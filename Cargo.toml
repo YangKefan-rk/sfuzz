@@ -1,0 +1,27 @@
+[package]
+name = "sfuzz"
+version = "0.1.0"
+edition = "2024"
+description = "SFuzz for multicore SoC simulation fuzzing"
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+libafl = { version = "0.15.4", features = ["prelude"] }
+libafl_bolts = "0.15.4"
+clap = { version = "4.5.20", features = ["derive"] }
+libc = "0.2"
+md5 = "0.7"
+rand = "0.8.5"
+
+[lib]
+name = "sfuzz"
+crate-type = ["staticlib"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+debug = true

@@ -1,0 +1,8 @@
+{
+  global:
+    __rustc_proc_macro_decls_a353e881aee38358__;
+    rust_metadata_thiserror_impl_a353e881aee38358;
+
+  local:
+    *;
+};

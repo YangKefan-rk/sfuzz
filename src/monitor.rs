@@ -1,0 +1,81 @@
+/**
+ * Copyright (c) 2023 Institute of Computing Technology, Chinese Academy of Sciences
+ * sfuzz is licensed under Mulan PSL v2.
+ * You can use this software according to the terms and conditions of the Mulan PSL v2.
+ * You may obtain a copy of Mulan PSL v2 at:
+ *          http://license.coscl.org.cn/MulanPSL2
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+ * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+ * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+ * See the Mulan PSL v2 for more details.
+ */
+extern crate md5;
+
+use std::fs;
+use std::path::PathBuf;
+
+use libafl::inputs::{HasMutatorBytes, ValueInput};
+use libafl::prelude::{BytesInput, Corpus, InMemoryCorpus, Input, OnDiskCorpus};
+use libafl::state::{HasCorpus, StdState};
+use libafl_bolts::rands::RomuDuoJrRand;
+
+use crate::seed::StructuredSeed;
+use crate::seed_codec::SeedCodecError;
+
+pub fn store_testcases(
+    state: &mut StdState<
+        InMemoryCorpus<ValueInput<Vec<u8>>>,
+        ValueInput<Vec<u8>>,
+        RomuDuoJrRand,
+        OnDiskCorpus<ValueInput<Vec<u8>>>,
+    >,
+    output_dir: String,
+) {
+    let corpus = state.corpus();
+
+    let count = corpus.count();
+    println!("Total corpus count: {count}");
+
+    for id in corpus.ids() {
+        let testcase: std::cell::RefMut<libafl::prelude::Testcase<BytesInput>> =
+            corpus.get(id).unwrap().borrow_mut();
+        let exec_time = testcase.exec_time().map(|s| s.as_secs()).unwrap_or(0);
+        let scheduled_count = testcase.scheduled_count();
+        let parent_id = if testcase.parent_id().is_some() {
+            usize::from(testcase.parent_id().unwrap()) as i32
+        } else {
+            -1
+        };
+        println!(
+            "Corpus {id}: exec_time {exec_time}, scheduled_count {scheduled_count}, parent_id {parent_id}"
+        );
+        let x = testcase.input().as_ref().unwrap();
+        store_testcase(x, &output_dir, Some(id.to_string()));
+    }
+}
+
+pub fn store_testcase(input: &BytesInput, output_dir: &String, name: Option<String>) {
+    fs::create_dir_all(&output_dir).expect("Unable to create the output directory");
+
+    let filename = if name.is_some() {
+        name.unwrap()
+    } else {
+        let mut context = md5::Context::new();
+        context.consume(input.mutator_bytes());
+        format!("{:x}", context.compute())
+    };
+
+    input
+        .to_file(PathBuf::from(format!("{output_dir}/{filename}")).as_path())
+        .expect(format!("written {filename} failed").as_str());
+}
+
+pub fn store_structured_seed(
+    seed: &StructuredSeed,
+    output_dir: &String,
+    name: Option<String>,
+) -> Result<(), SeedCodecError> {
+    let input = seed.to_bytes_input()?;
+    store_testcase(&input, output_dir, name);
+    Ok(())
+}

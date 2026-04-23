@@ -1,0 +1,8 @@
+{
+  global:
+    __rustc_proc_macro_decls_4c18d96a9cb8b89f__;
+    rust_metadata_bitbybit_4c18d96a9cb8b89f;
+
+  local:
+    *;
+};
