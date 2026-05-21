@@ -23,9 +23,14 @@ in-memory `sim_main_with_input` fuzzing ABI.
   and runs a one-iteration ABI smoke check.
 - `scripts/linknan_vcs_smoke.py`: builds/runs LinkNan VCS with a minimal SFUZ
   seed and checks that VCS reaches the SFUZ RAM expansion path.
+- `scripts/linknan/`: LinkNan platform runners for SFuzz, RFuzz, DirectFuzz,
+  SurgeFuzz, and the reserved PROFUZZ entry.  Shared LinkNan/VCS build, run,
+  seed, config, and result-table helpers live beside method-specific runners
+  under `scripts/linknan/methods/`.
 - `config/sfuzz.toml`: local path and toolchain defaults for smoke flows.
 - `docs/`: notes for the ABI smoke flow, litmus conversion flow, FIRRTL
-  coverage experiments, and method reproductions.
+  coverage runs, benchmark plan, SFuzz coverage points, and method
+  reproductions.
 - `vendor/`: vendored Rust dependencies for offline builds.
 
 The current workspace layout is expected to be:
@@ -156,7 +161,7 @@ The smoke script proves that SFuzz routes LibAFL `BytesInput` through
 
 ## VCS Smoke Check
 
-For a quick LinkNan/VCS experiment:
+For a quick LinkNan/VCS smoke run:
 
 ```bash
 cd ~/SFUZZ/sfuzz
@@ -184,6 +189,60 @@ python3 scripts/linknan_vcs_smoke.py --seed /path/to/app.sfuz
 The VCS smoke is file-based: VCS owns the simulator `main`, so this is not the
 same as the in-process Rust `sim_main_with_input` fuzzing ABI used by the
 Verilator smoke path.
+
+## LinkNan Platform Runs
+
+For batch LinkNan/VCS data collection with SFuzz seeds:
+
+```bash
+cd ~/SFUZZ/sfuzz
+python3 scripts/linknan/run.py sfuzz \
+  --seed-dir /nfs/home/yangkefan/SFUZZ-subagents/subagent5/testcases/seeds \
+  --limit 10 \
+  --work-dir /tmp/sfuzz-linknan \
+  --skip-build \
+  --cycles 2000
+```
+
+The same platform entry point exposes method-specific commands:
+
+```bash
+python3 scripts/linknan/run.py rfuzz --raw-hex 73001000 --skip-build
+python3 scripts/linknan/run.py directfuzz \
+  --metadata /tmp/directfuzz_metadata.csv \
+  --target-instance Tile0.mshr \
+  --seed-dir /tmp/sfuzz-corpus \
+  --skip-build
+python3 scripts/linknan/run.py surgefuzz \
+  --score-trace-dir /tmp/surgefuzz_profile \
+  --seed-dir /tmp/sfuzz-corpus \
+  --skip-build
+python3 scripts/linknan/run.py profuzz
+```
+
+The script layout is intentionally split by responsibility:
+
+```text
+scripts/linknan/
+  run.py                 # public CLI for LinkNan platform runs
+  config.py              # TOML/path/environment resolution
+  vcs.py                 # real LinkNan VCS build/run/log/coverage utilities
+  seeds.py               # SFUZ seed collection and generated smoke seeds
+  common.py              # result-table and small shared helpers
+  methods/
+    sfuzz.py
+    rfuzz.py
+    directfuzz.py
+    surgefuzz.py
+    profuzz.py
+```
+
+注意：这些入口保留真实 LinkNan VCS 构建和运行路径。RFuzz 当前只有外部
+mux-select bitmap 才能表示论文定义的覆盖；DirectFuzz 必须接入 per-instance
+mux-toggle 覆盖/反馈 ABI；SurgeFuzz 必须接入 per-cycle score 和 ancestor
+coverage ABI；PROFUZZ 必须接入论文定义的目标点覆盖/反馈 ABI。凡使用 VCS log、
+dev mock、VCS built-in coverage 或离线 trace 的结果，都只能作为调试/冒烟数据，
+不能作为 paper-faithful 对比数据。
 
 ## Seed Creation
 

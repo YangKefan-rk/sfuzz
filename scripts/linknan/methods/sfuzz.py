@@ -1,0 +1,111 @@
+from __future__ import annotations
+
+from typing import Any
+
+from ..common import (
+    slugify,
+    write_table,
+)
+from ..config import VcsContext
+from ..seeds import collect_seed_paths, read_seed_metadata_name
+from ..vcs import build_simv_if_needed, collect_vcs_coverage, run_vcs_seed, scan_vcs_logs
+
+
+BASELINE_FIELDS = [
+    "fuzzer",
+    "seed_name",
+    "seed_path",
+    "wall_time_sec",
+    "vcs_cycles",
+    "exit_code",
+    "vcs_report_seen",
+    "sfuz_expansion_seen",
+    "good_trap_seen",
+    "bug_triggered",
+    "bug_reasons",
+    "coverage_name",
+    "coverage_value",
+    "coverage_source",
+    "coverage_status",
+    "log_path",
+    "assert_log_path",
+    "command_log_path",
+    "case_dir",
+    "case_name",
+    "timed_out",
+    "infrastructure_error",
+]
+
+
+def run_sfuzz(args: Any, ctx: VcsContext) -> int:
+    work_dir = args.work_dir.expanduser().resolve()
+    runs_dir = work_dir / "runs"
+    logs_dir = work_dir / "logs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    seeds = collect_seed_paths(args.seed, args.seed_list, args.seed_dir, work_dir, args.limit, True, "sfuzz-smoke")
+    build_simv_if_needed(args, ctx, work_dir)
+
+    rows: list[dict[str, Any]] = []
+    for index, seed in enumerate(seeds, 1):
+        seed_name = read_seed_metadata_name(seed)
+        case_name = f"{slugify(args.case_prefix)}-{index:04d}-{slugify(seed_name)}"
+        result, case_dir, run_log, assert_log = run_vcs_seed(
+            seed=seed,
+            case_name=case_name,
+            runs_dir=runs_dir,
+            logs_dir=logs_dir,
+            ctx=ctx,
+            timeout_sec=args.timeout_sec,
+            cov=args.cov,
+            simv_args=args.simv_args,
+        )
+        info = scan_vcs_logs(run_log, assert_log, ctx.cycles)
+        if result.timed_out and "timeout" not in info.bug_reasons:
+            info.bug_reasons.append("timeout")
+            info.bug_triggered = True
+
+        infrastructure_error = result.error
+        if result.returncode != 0 and not infrastructure_error:
+            infrastructure_error = f"command returned non-zero exit code {result.returncode}"
+        if not run_log.is_file() and not infrastructure_error:
+            infrastructure_error = "run.log missing"
+
+        coverage = collect_vcs_coverage(args, case_dir, ctx.sim_dir)
+        rows.append(
+            {
+                "fuzzer": "sfuzz",
+                "seed_name": seed_name,
+                "seed_path": str(seed),
+                "wall_time_sec": round(result.wall_time_sec, 3),
+                "vcs_cycles": info.cycles or ctx.cycles,
+                "exit_code": result.returncode,
+                "vcs_report_seen": info.vcs_report_seen,
+                "sfuz_expansion_seen": info.sfuz_expansion_seen,
+                "good_trap_seen": info.good_trap_seen,
+                "bug_triggered": info.bug_triggered,
+                "bug_reasons": info.bug_reasons,
+                "coverage_name": coverage.coverage_name,
+                "coverage_value": coverage.coverage_value,
+                "coverage_source": coverage.coverage_source,
+                "coverage_status": coverage.coverage_status,
+                "log_path": str(run_log),
+                "assert_log_path": str(assert_log),
+                "command_log_path": result.command_log_path,
+                "case_dir": str(case_dir),
+                "case_name": case_name,
+                "timed_out": result.timed_out,
+                "infrastructure_error": infrastructure_error,
+            }
+        )
+        print(f"[{index}/{len(seeds)}] sfuzz exit={result.returncode} log={run_log}", flush=True)
+
+    write_table(
+        rows,
+        args.output_json or work_dir / "results.json",
+        args.output_csv or work_dir / "results.csv",
+        BASELINE_FIELDS,
+        {"fuzzer": "sfuzz"},
+    )
+    return 0
