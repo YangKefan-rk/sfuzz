@@ -12,7 +12,7 @@ from typing import Any
 SCRIPT_DIR = Path(__file__).resolve().parent
 SFUZZ_HOME = SCRIPT_DIR.parent
 WORKSPACE_ROOT = SFUZZ_HOME.parent
-DEFAULT_CONFIG = SCRIPT_DIR / "sfuzz.toml"
+DEFAULT_CONFIG = SFUZZ_HOME / "config" / "sfuzz.toml"
 
 
 def parse_scalar(value: str) -> Any:

@@ -17,7 +17,7 @@ in-memory `sim_main_with_input` fuzzing ABI.
   and runs a one-iteration ABI smoke check.
 - `scripts/linknan_vcs_smoke.py`: builds/runs LinkNan VCS with a minimal SFUZ
   seed and checks that VCS reaches the SFUZ RAM expansion path.
-- `scripts/sfuzz.toml`: local path and toolchain defaults for the smoke flow.
+- `config/sfuzz.toml`: local path and toolchain defaults for smoke flows.
 - `docs/`: notes for the ABI smoke flow, litmus conversion flow, and FIRRTL
   coverage experiments.
 - `vendor/`: vendored Rust dependencies for offline builds.
@@ -28,6 +28,10 @@ The current workspace layout is expected to be:
 ~/SFUZZ/
   LinkNan/
   sfuzz/
+    config/
+    docs/
+    scripts/
+    src/
 ```
 
 Most scripts still allow explicit overrides through environment variables when

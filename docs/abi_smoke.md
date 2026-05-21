@@ -10,7 +10,7 @@ What it proves:
 Files:
 - `scripts/make_sfuz_seed.py`: builds a standalone SFUZ container from simple CLI inputs.
 - `scripts/linknan_abi_smoke.py`: rebuilds the current LinkNan ABI slice, relinks it against a real Verilated model, runs one minimal SFUZ seed, and checks for the proof logs plus the selected coverage backend.
-- `scripts/sfuzz.toml`: stores local path and toolchain defaults used by the smoke script.
+- `config/sfuzz.toml`: stores local path and toolchain defaults used by the smoke script.
 
 Default path assumptions:
 - `sfuzz` root: current directory of the script.
