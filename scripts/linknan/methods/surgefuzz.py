@@ -33,6 +33,7 @@ SURGEFUZZ_FIELDS = [
     "required_native_abi",
     "notes",
     "score_backend",
+    "trace_source",
     "coverage_total",
     "coverage_covered",
     "coverage_acc",
@@ -40,7 +41,7 @@ SURGEFUZZ_FIELDS = [
 
 
 def parse_annotation(raw: str) -> tuple[str, bool, str]:
-    key, value = raw.split("=", 1)
+    key, value = raw.split("=", 1) if "=" in raw else (raw, "1")
     key_norm = re.sub(r"[\s_]", "", key).upper()
     value_norm = value.strip().strip('"').strip("'")
     if key_norm in {"SURGEFREQ", "FREQ"}:
@@ -48,7 +49,12 @@ def parse_annotation(raw: str) -> tuple[str, bool, str]:
     if key_norm in {"SURGECONSEC", "CONSEC"}:
         return "CONSEC", value_norm not in {"0", "false", "False"}, "MAX"
     if key_norm in {"SURGECOUNT", "COUNT"}:
-        return "COUNT", True, value_norm.upper()
+        direction = value_norm.upper()
+        if direction == "1":
+            direction = "MAX"
+        elif direction == "0":
+            direction = "MIN"
+        return "COUNT", True, direction
     raise ValueError(f"unsupported SurgeFuzz annotation: {raw}")
 
 
@@ -82,6 +88,22 @@ def load_surge_trace(path: Path, score_column: str) -> tuple[list[int], list[tup
     dep_cols = [name for name in (reader.fieldnames or []) if name.startswith("dependent_")]
     dependents = [tuple(int(row[name], 0) for name in dep_cols) for row in rows]
     return values, dependents
+
+
+def trace_backend(trace_source: str) -> tuple[str, bool, str]:
+    if trace_source == "vcs-native-abi":
+        return "surgefuzz_vcs_native_abi_trace", True, ""
+    if trace_source == "dev-mock":
+        return (
+            "dev_mock_score_trace",
+            False,
+            "surgefuzz_per_cycle_score_and_ancestor_coverage",
+        )
+    return (
+        "surgefuzz_offline_trace_csv",
+        False,
+        "surgefuzz_vcs_native_coverage_export",
+    )
 
 
 def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
@@ -119,30 +141,28 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
             best_score = max(scores, default=0)
             energy = float(best_score * best_score)
             ancestor_states = {row for row in dependents}
-            backend = "dev_mock_score_trace" if args.trace_is_dev_mock else "surgefuzz_per_cycle_trace_csv"
+            trace_source = "dev-mock" if args.trace_is_dev_mock else args.trace_source
+            backend, paper_faithful, required_native_abi = trace_backend(trace_source)
             score_backend = backend
             notes = f"真实 LinkNan VCS 已运行;trace={trace}"
-            paper_faithful = not args.trace_is_dev_mock
-            required_native_abi = "" if paper_faithful else "surgefuzz_per_cycle_score_and_ancestor_coverage"
-            if args.trace_is_dev_mock:
-                notes += ";当前 trace 标记为 dev mock，仅用于调试数据管线，必须接入论文定义的 SurgeFuzz per-cycle score/ancestor coverage ABI"
+            if trace_source != "vcs-native-abi":
+                notes += (
+                    ";当前 trace 未声明为 LinkNan/VCS native ABI 导出，"
+                    "只能诊断 scoring/coverage 数据管线，不能作为论文 SurgeFuzz 结果"
+                )
         else:
-            proof = [
-                info.sfuz_expansion_seen,
-                info.vcs_report_seen,
-                bool(info.cycles),
-                info.good_trap_seen,
-            ]
-            best_score = sum(1 for item in proof if item)
-            energy = float(best_score * best_score)
+            best_score = ""
+            energy = ""
             ancestor_states = set()
-            backend = "vcs_log_health"
-            score_backend = "vcs_log_health"
+            backend = "none"
+            score_backend = "unavailable"
+            trace_source = ""
             paper_faithful = False
             required_native_abi = "surgefuzz_per_cycle_score_and_ancestor_coverage"
             notes = (
                 "真实 LinkNan VCS 已运行;"
-                "当前日志健康特征不是 SurgeFuzz 论文定义的 ancestor coverage;"
+                "未发现 coverage_target/dependent_* per-cycle trace;"
+                "未用 VCS 日志健康特征冒充 SurgeFuzz score 或 ancestor coverage;"
                 "必须接入论文定义的 per-cycle score/ancestor coverage ABI"
             )
         rows.append(
@@ -164,6 +184,7 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                 "required_native_abi": required_native_abi,
                 "notes": append_notes(notes, {"sfuz_seen": info.sfuz_expansion_seen, "vcs_report": info.vcs_report_seen}),
                 "score_backend": score_backend,
+                "trace_source": trace_source,
                 "coverage_total": "",
                 "coverage_covered": "",
                 "coverage_acc": "",

@@ -28,12 +28,15 @@ SurgeFuzz supports one user annotation in the original prototype:
 - `SURGE_COUNT="MAX"`: maximize a multi-bit count-like signal, such as queue
   occupancy.
 
-The Rust parser also accepts compact forms such as `SURGEFREQ=1` and has a
-`MIN` direction for COUNT.  The artifact annotation pass records only the
-annotation type (`FREQ`, `CONSEC`, or `COUNT`) in the runtime environment; its
-target patches use `SURGE_COUNT` for maxima and do not carry a runtime `MIN`
-direction.  Treat `COUNT=MIN` as a paper-faithful/modeling extension, not an
-artifact-compatible runtime feature.
+The Rust parser also accepts compact forms such as `SURGEFREQ=1` and the
+artifact patch style without values (`SURGE_FREQ`, `SURGE_CONSEC`,
+`SURGE_COUNT`).  Bare FREQ/CONSEC default to active `1`, and bare COUNT defaults
+to `MAX`.  The parser has a `MIN` direction for COUNT because the paper defines
+`P=MIN`; however, the artifact annotation pass records only the annotation type
+(`FREQ`, `CONSEC`, or `COUNT`) in the runtime environment, and its target
+patches use `SURGE_COUNT` for maxima.  Treat `COUNT=MIN` as a paper-level
+modeling extension, not an artifact-compatible runtime feature until the
+simulator ABI carries the direction.
 
 ## Score And Energy
 
@@ -114,13 +117,22 @@ cycle,dependent_0,dependent_1,...,coverage_target
 There are two related NMI pruning strategies in the artifact:
 
 - `selector.py` iteratively computes NMI against the most recently selected
-  signal and drops candidates with `nmi > 0.7`.
+  signal and drops candidates with `nmi > 0.7`.  The first reference is
+  `coverage_target`.
 - `analyze.py`'s `closer_mi` path filters later candidates with
   `0 < nmi < 0.35` after computing information against `coverage_target`.
 
 The Rust method model implements the iterative selected-signal strategy with a
-configurable threshold.  It does not yet reproduce the separate `closer_mi`
-DataFrame filtering and graph-reporting path.
+configurable threshold and uses `coverage_target` as the initial reference when
+that column is present in the profiling CSV.  The Rust API still treats
+`max_bits` as the returned ancestor-state bit budget.  The artifact's
+`selector.py` starts its internal selected list with `coverage_target`, so its
+coverage rewrite spends part of `COV_BIT` on the target bit before adding
+ancestors.  This difference is documented rather than hidden because the paper
+defines coverage as ancestor-register state, while the artifact rewrite keeps
+the target signal in the concatenated `coverage` wire.  The Rust model does not
+yet reproduce the separate `closer_mi` DataFrame filtering and graph-reporting
+path.
 
 ## Prototype Cross-Check
 
@@ -148,10 +160,14 @@ The method code is explicit about the following differences:
 - FREQ/CONSEC non-zero handling: Rust booleanizes non-zero values; the artifact
   driver asserts 0/1 and should be fed a 1-bit signal.
 - `coverage_target`: the artifact includes it as a public runtime signal and
-  profiling CSV column, but coverage indexing uses the rewritten `coverage`
-  ancestor state plus the current score.
-- NMI pruning: Rust models the iterative threshold pruning path and leaves the
-  `closer_mi` reporting/filtering variant for a future profile pipeline.
+  profiling CSV column.  The paper describes the coverage metric as ancestor
+  registers only; the artifact `selector.py`/`instrument.py` rewrite can also
+  put `coverage_target` into the concatenated `coverage` wire before selected
+  ancestors.
+- NMI pruning: Rust models the artifact `selector.py` iterative threshold
+  pruning path, including the `coverage_target` initial reference when
+  profiling data provides it.  It leaves the `closer_mi` reporting/filtering
+  variant for a future profile pipeline.
 - Score bitmap truncation: Rust keeps the artifact behavior of indexing the
   score bitmap by `score & 0xff`.
 
@@ -175,6 +191,19 @@ missing, by design in this module:
 - runtime scheduler integration that consumes SurgeFuzz score energy and
   coverage feedback
 
-Until those pieces exist, SurgeFuzz support here should be described as
-method-level building blocks plus artifact-compatible parsers/tests, not as a
-complete runner.
+The LinkNan CLI preserves a real VCS execution path, but it is deliberately
+strict about provenance:
+
+- no trace: `best_score` and `energy` are left unavailable; VCS log health is
+  not used as a surrogate SurgeFuzz score
+- `--score-trace-dir` with the default `--trace-source offline-csv`: useful for
+  checking the scoring/coverage data shape, but `paper_faithful=false`
+- `--trace-is-dev-mock` or `--trace-source dev-mock`: development plumbing only,
+  `paper_faithful=false`
+- `--trace-source vcs-native-abi`: may be marked `paper_faithful=true` only when
+  the CSV was exported by the real LinkNan/VCS per-cycle SurgeFuzz ABI
+
+Until the native ABI and profile/rewrite pipeline exist, SurgeFuzz support here
+should be described as method-level building blocks plus artifact-compatible
+parsers/tests and a non-paper-faithful LinkNan smoke runner, not as a complete
+paper-faithful runner.

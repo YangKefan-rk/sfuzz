@@ -25,13 +25,17 @@ src/methods/rfuzz/
 RFuzz does not treat the DUT as a file parser.  One testcase is a sequence of
 DUT input-pin values over multiple cycles:
 
-- One cycle consumes `ceil(sum(top_input_bits) / 8)` bytes.
+- One cycle consumes `ceil(sum(top_input_bits) / 8)` bytes padded to the RFuzz
+  artifact's 8-byte transport alignment.
 - A testcase is normalized to a whole number of cycles.
 - Optional `max_cycles` truncates overlong mutations before padding.
 - Empty inputs normalize to one zero-filled cycle so mutators and future runner
   code never need to execute a zero-length testcase.
 
-This is modeled by `RfuzzInputLayout` in `input.rs`.
+This is modeled by `RfuzzInputLayout` in `input.rs`. `RfuzzInputLayout::new`
+uses the artifact-compatible 8-byte cycle alignment. Tests can use
+`with_cycle_byte_align(..., 1)` only when they need to model a byte-tight ABI for
+diagnostics; that is not the default RFuzz transport shape.
 
 ## Coverage Model
 
@@ -90,10 +94,46 @@ Each mutated testcase is normalized through `RfuzzInputLayout` before it is
 returned.
 
 Known mutation fidelity boundary: havoc uses the same RFuzz/AFL operation
-families and RFuzz-style stacked counts (`2, 4, 8, 16, 32, 64, 128`), but it is
-not yet a byte-for-byte port of the original artifact's block-length scheduler
-or exact weighted selection table. That exact scheduling belongs with a future
-runner/scheduler integration and should be tested there.
+families, RFuzz-style stacked counts (`2, 4, 8, 16, 32, 64, 128`), and the
+artifact's weighted havoc family table shape, but it is not yet a byte-for-byte
+port of the original artifact's block-length scheduler. That exact scheduling
+belongs with a future runner/scheduler integration and should be tested there.
+
+## LinkNan/VCS Runner Status
+
+`scripts/linknan/run.py rfuzz` is intentionally conservative. It can launch the
+real LinkNan VCS `simv-run` path and record the real command status, logs,
+cycles, and optional diagnostic coverage sources. It does not yet implement the
+RFuzz paper runner ABI:
+
+- it feeds LinkNan through `xmake simv-run --workload=<seed.sfuz>`, so the input
+  is an SFUZ program image or memory payload rather than per-cycle raw top-level
+  pin bytes
+- it has no VCS DPI/PLI/shared-memory hook that samples a native `coverage`
+  mux-select bus every cycle and returns the local toggle bitmap to the fuzzer
+- it has no native valid/invalid decision exported from constrained LinkNan
+  interfaces
+- it does not run a campaign loop where total and valid-only RFuzz coverage maps
+  decide corpus retention
+
+The RFuzz CSV now records these boundaries explicitly:
+
+```text
+runner_abi              linknan-workload-simv-run today
+input_model             sfuz-core0-payload, sfuz-seed, linknan-workload-file,
+                        or requested raw-pin-stream
+toggle_bitmap_source    absent, manual, dev-generated, or vcs-native-abi
+valid_source            unknown, unconstrained, manual, or vcs-native-abi
+paper_faithful          true only when no required RFuzz ABI is missing
+required_native_abi     semicolon-separated missing ABI pieces
+```
+
+Because the current runner is still the LinkNan SFUZ workload path,
+`required_native_abi` includes `rfuzz_vcs_native_runner_abi`. Supplying a manual
+bitmap with `--rfuzz-toggle-bitmap` is useful for pipeline diagnostics, but it
+does not make the row paper-faithful. VCS built-in line/toggle coverage,
+annotated-source counts, VCS logs, run success, and cycle counts are likewise
+diagnostic only and must not be reported as RFuzz paper coverage.
 
 ## SurgeFuzz Cross-Check
 

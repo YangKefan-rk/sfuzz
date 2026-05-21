@@ -15,8 +15,13 @@ BASELINE_FIELDS = [
     "fuzzer",
     "seed_name",
     "seed_path",
+    "comparison_tier",
+    "paper_faithful",
+    "coverage_backend",
+    "required_native_abi",
     "wall_time_sec",
     "vcs_cycles",
+    "max_cycle_exceeded",
     "exit_code",
     "vcs_report_seen",
     "sfuz_expansion_seen",
@@ -73,13 +78,26 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
             infrastructure_error = "run.log missing"
 
         coverage = collect_vcs_coverage(args, case_dir, ctx.sim_dir)
+        coverage_backend = (
+            "vcs_builtin"
+            if coverage.coverage_name == "vcs_vdb" or coverage.coverage_status.startswith("parsed")
+            else "none"
+        )
+        comparison_tier = "T1_common_backend" if coverage_backend == "vcs_builtin" else "T0_smoke"
+        paper_faithful = False
+        required_native_abi = "sfuzz_linknan_native_bitmap"
         rows.append(
             {
                 "fuzzer": "sfuzz",
                 "seed_name": seed_name,
                 "seed_path": str(seed),
+                "comparison_tier": comparison_tier,
+                "paper_faithful": paper_faithful,
+                "coverage_backend": coverage_backend,
+                "required_native_abi": required_native_abi,
                 "wall_time_sec": round(result.wall_time_sec, 3),
                 "vcs_cycles": info.cycles or ctx.cycles,
+                "max_cycle_exceeded": info.max_cycle_exceeded,
                 "exit_code": result.returncode,
                 "vcs_report_seen": info.vcs_report_seen,
                 "sfuz_expansion_seen": info.sfuz_expansion_seen,

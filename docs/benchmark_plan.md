@@ -282,6 +282,17 @@ benchmarks/
 
 VCS 运行结果可以提供真实工程成本，如执行时间、退出码、周期数、日志路径、coverage summary 是否出现。但这些字段本身不是 RFuzz、DirectFuzz、SurgeFuzz 的论文反馈。只有当方法所需 instrumentation 和 ABI 已经把真实覆盖/反馈值导出到 fuzzer，才可以把对应方法标记为论文可比结果。
 
+## 第一批具体性能对比实验
+
+第一批建议固定为两个互补实验，避免把工程健康指标和论文原生反馈混成同一张主结果。
+
+| 实验 | 比较对象 | 统一口径 | 可进入论文主表的条件 |
+| --- | --- | --- | --- |
+| `T1_common_backend_vcs_health` | SFuzz、RFuzz、DirectFuzz、SurgeFuzz 的 LinkNan/VCS 入口 | 同一 LinkNan revision、同一 VCS simv、同一 seed 集合或可审计转换、同一 cycle/timeout/时间预算；收集吞吐、退出状态、bug/objective、VCS/FIRRTL common coverage export health | 只报告 common backend 或工程健康指标；RFuzz/DirectFuzz/SurgeFuzz 的日志健康字段不能标成 paper-faithful native coverage |
+| `T2_paper_faithful_native_feedback` | SFuzz、RFuzz、DirectFuzz、SurgeFuzz 的论文定义反馈 | 每个方法使用真实 native ABI：SFuzz coverage backend、RFuzz mux-select toggle、DirectFuzz per-instance mux-toggle+distance、SurgeFuzz per-cycle score+ancestor coverage | 只有 `paper_faithful=true` 且 ABI/metadata 来源可审计的列可进入论文原生反馈对比 |
+
+当前 `scripts/linknan` 输出 schema 可作为第一阶段采集表头的来源：SFuzz 使用 `BASELINE_FIELDS`，RFuzz 使用 `RFUZZ_FIELDS`，DirectFuzz 使用 `DIRECTFUZZ_FIELDS`，SurgeFuzz 使用 `SURGEFUZZ_FIELDS`。正式统计时建议再汇总成统一 campaign CSV，并保留原始 per-method CSV 作为审计附件。
+
 ## 真实指标边界
 
 以下指标必须来自论文定义的真实覆盖或反馈，不能来自 mock、日志派生或占位计算：

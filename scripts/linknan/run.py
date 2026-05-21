@@ -68,15 +68,45 @@ def main() -> int:
         epilog=(
             "说明：当前入口保留真实 VCS 运行。若未提供 RFuzz mux-select bitmap，"
             "覆盖来自日志、VCS built-in coverage 或 FIRRTL 诊断解析时，必须接入论文定义的 "
-            "RFuzz mux-select 覆盖/反馈 ABI 后，才能作为 paper-faithful RFuzz 数据。"
+            "RFuzz raw pin-stream runner、mux-select 覆盖和反馈 ABI 后，"
+            "才能作为 paper-faithful RFuzz 数据。"
         ),
     )
     add_common_vcs_args(rfuzz)
     rfuzz.add_argument("--seed", action="append", default=[], help="existing .sfuz seed; first seed is used")
     rfuzz.add_argument("--raw-hex", default="73001000", help="raw bytes packed into a generated SFUZ core0 payload")
     rfuzz.add_argument("--case-name", default="rfuzz-smoke")
-    rfuzz.add_argument("--rfuzz-toggle-bitmap", type=Path, help="external true RFuzz mux-toggle bitmap")
+    rfuzz.add_argument(
+        "--rfuzz-input-model",
+        choices=["sfuz-core0-payload", "raw-pin-stream"],
+        default="sfuz-core0-payload",
+        help="input ABI used by this run; only raw-pin-stream can be RFuzz paper-faithful",
+    )
+    rfuzz.add_argument("--rfuzz-toggle-bitmap", type=Path, help="RFuzz mux-toggle bitmap exported for this testcase")
+    rfuzz.add_argument(
+        "--rfuzz-toggle-bitmap-source",
+        choices=["vcs-native-abi", "manual", "dev-generated"],
+        default="manual",
+        help="provenance of --rfuzz-toggle-bitmap; only vcs-native-abi can be paper-faithful",
+    )
     rfuzz.add_argument("--rfuzz-toggle-total", type=int, default=0, help="total RFuzz mux-toggle points")
+    rfuzz.add_argument(
+        "--rfuzz-valid-source",
+        choices=["unknown", "unconstrained", "vcs-native-abi", "manual"],
+        default="unknown",
+        help="source of the RFuzz validity decision; constrained DUTs need vcs-native-abi",
+    )
+    rfuzz.add_argument(
+        "--rfuzz-valid",
+        choices=["unknown", "true", "false"],
+        default="unknown",
+        help="current testcase validity when --rfuzz-valid-source can justify it",
+    )
+    rfuzz.add_argument(
+        "--rfuzz-campaign-feedback",
+        action="store_true",
+        help="set only when total/valid RFuzz coverage maps drive corpus retention for this campaign",
+    )
     rfuzz.add_argument("--firrtl-annotated-dir", type=Path, help="parse annotated FIRRTL/VCS files as diagnostic coverage")
     rfuzz.set_defaults(case_prefix="rfuzz", handler=run_rfuzz)
 
@@ -94,6 +124,12 @@ def main() -> int:
     direct.add_argument("--target-instance", required=True)
     direct.add_argument("--metadata", type=Path, required=True, help="DirectFuzz metadata CSV")
     direct.add_argument(
+        "--metadata-source",
+        choices=["static-analysis", "dev-generated", "manual"],
+        default="manual",
+        help="provenance of the DirectFuzz instance-distance metadata; only static-analysis can be paper-faithful",
+    )
+    direct.add_argument(
         "--coverage-backend",
         choices=["vcs-log", "dev-mock", "native-file"],
         default="vcs-log",
@@ -103,6 +139,12 @@ def main() -> int:
         "--native-coverage",
         type=Path,
         help="CSV exported by the DirectFuzz native ABI: instance_name,coverage_hex",
+    )
+    direct.add_argument(
+        "--native-coverage-source",
+        choices=["vcs-native-abi", "manual", "dev-generated"],
+        default="manual",
+        help="provenance of --native-coverage; only vcs-native-abi can be paper-faithful",
     )
     direct.set_defaults(case_prefix="directfuzz", handler=run_directfuzz)
 
@@ -122,6 +164,12 @@ def main() -> int:
     surge.add_argument("--score-trace-dir", type=Path, help="directory containing <seed-stem>.csv traces")
     surge.add_argument("--score-column", default="coverage_target")
     surge.add_argument("--trace-is-dev-mock", action="store_true")
+    surge.add_argument(
+        "--trace-source",
+        choices=["vcs-native-abi", "offline-csv", "dev-mock"],
+        default="offline-csv",
+        help="provenance of --score-trace-dir; only vcs-native-abi can be paper-faithful",
+    )
     surge.add_argument("--freq-window", type=int, default=256)
     surge.set_defaults(case_prefix="surgefuzz", handler=run_surgefuzz)
 

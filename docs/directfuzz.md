@@ -135,3 +135,50 @@ needs:
 Until those pieces exist, invoking `--directed` should be documented as the
 current guard-based directed heuristic, not as a reproduction of the DirectFuzz
 paper algorithm.
+
+## LinkNan VCS Runner Boundary
+
+`scripts/linknan/run.py directfuzz` always runs the selected SFUZ seed through
+the real LinkNan VCS path, but the DirectFuzz feedback source is selected
+separately:
+
+```text
+--coverage-backend vcs-log      real VCS run only; no DirectFuzz mux-toggle feedback
+--coverage-backend dev-mock     real VCS run plus deterministic mock coverage
+--coverage-backend native-file  real VCS run plus an external per-instance coverage CSV
+```
+
+The `native-file` ABI currently consumes one CSV row per metadata instance:
+
+```text
+instance_name,coverage_hex
+```
+
+Rows are keyed by `instance_name`, reordered to metadata order, and each
+`coverage_hex` payload must contain exactly `ceil(width / 8)` bytes for that
+metadata row. Padding bits beyond `width` are masked before computing
+`target_covered_bits`, `distance`, `new_coverage`, and `target_progress`.
+
+For auditability, the runner records provenance fields:
+
+```text
+metadata_source
+native_coverage_source
+paper_faithful
+required_native_abi
+```
+
+`paper_faithful` is `true` only when all DirectFuzz paper feedback inputs are
+declared as real method inputs:
+
+```text
+--coverage-backend native-file
+--metadata-source static-analysis
+--native-coverage-source vcs-native-abi
+```
+
+This is intentionally conservative. A manually written native-file CSV is useful
+for ABI smoke testing, but it must remain `paper_faithful=false`; similarly,
+`vcs-log` and `dev-mock` must not be treated as paper-faithful DirectFuzz
+results because they do not provide the paper-defined local per-instance
+mux-toggle coverage.

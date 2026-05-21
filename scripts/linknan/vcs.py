@@ -50,6 +50,7 @@ class VcsLogInfo:
     good_trap_seen: bool = False
     bug_triggered: bool = False
     bug_reasons: list[str] = field(default_factory=list)
+    max_cycle_exceeded: bool = False
     cycles: int | None = None
     cycles_are_requested_only: bool = False
     vcs_sim_time_ps: int | None = None
@@ -216,6 +217,7 @@ def scan_vcs_logs(run_log: Path, assert_log: Path, requested_cycles: int) -> Vcs
     exceeded = [int(match) for match in re.findall(r"EXCEEDED MAX CYCLE:\s*(\d+)", text)]
     if exceeded:
         info.cycles = exceeded[-1]
+        info.max_cycle_exceeded = True
     sim_time = re.findall(r"\bTime:\s*(\d+)\s*ps\b", text)
     if sim_time:
         info.vcs_sim_time_ps = int(sim_time[-1])

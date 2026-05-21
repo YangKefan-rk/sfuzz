@@ -40,22 +40,29 @@ impl SurgeAnnotation {
 
     pub(crate) fn parse(value: &str) -> Result<Self, SurgeAnnotationError> {
         let value = value.trim();
-        let Some((kind, raw_setting)) = value.split_once('=') else {
-            return Err(SurgeAnnotationError::Unknown(value.to_string()));
+        let (kind, raw_setting) = match value.split_once('=') {
+            Some((kind, raw_setting)) => (kind, Some(raw_setting)),
+            None => (value, None),
         };
         let kind = normalize_key(kind);
-        let setting = raw_setting.trim().trim_matches('"');
+        let setting = raw_setting.map(|raw| raw.trim().trim_matches(['"', '\'']));
 
         match kind.as_str() {
             "SURGEFREQ" | "FREQ" => Ok(Self::Freq {
-                active: parse_bool_setting("FREQ", setting)?,
+                active: setting
+                    .map(|setting| parse_bool_setting("FREQ", setting))
+                    .unwrap_or(Ok(true))?,
                 window: Self::DEFAULT_FREQ_WINDOW,
             }),
             "SURGECONSEC" | "CONSEC" => Ok(Self::Consec {
-                active: parse_bool_setting("CONSEC", setting)?,
+                active: setting
+                    .map(|setting| parse_bool_setting("CONSEC", setting))
+                    .unwrap_or(Ok(true))?,
             }),
             "SURGECOUNT" | "COUNT" => Ok(Self::Count {
-                direction: parse_count_direction(setting)?,
+                direction: setting
+                    .map(parse_count_direction)
+                    .unwrap_or(Ok(CountDirection::Max))?,
             }),
             _ => Err(SurgeAnnotationError::Unknown(value.to_string())),
         }
@@ -203,6 +210,23 @@ mod tests {
         );
         assert_eq!(
             SurgeAnnotation::parse("SURGECOUNT=\"MAX\"").unwrap(),
+            SurgeAnnotation::Count {
+                direction: CountDirection::Max,
+            }
+        );
+        assert_eq!(
+            SurgeAnnotation::parse("SURGE_FREQ").unwrap(),
+            SurgeAnnotation::Freq {
+                active: true,
+                window: SurgeAnnotation::DEFAULT_FREQ_WINDOW,
+            }
+        );
+        assert_eq!(
+            SurgeAnnotation::parse("SURGE_CONSEC").unwrap(),
+            SurgeAnnotation::Consec { active: true }
+        );
+        assert_eq!(
+            SurgeAnnotation::parse("SURGE_COUNT").unwrap(),
             SurgeAnnotation::Count {
                 direction: CountDirection::Max,
             }

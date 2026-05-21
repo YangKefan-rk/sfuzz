@@ -43,6 +43,10 @@ impl Coverage {
     }
 
     pub fn get_accumulative_coverage(&self) -> f64 {
+        if self.len() == 0 {
+            return 0.0;
+        }
+
         let mut covered_num: usize = 0;
         for covered in self.accumulated.iter() {
             if *covered != 0 as u8 {
@@ -95,4 +99,15 @@ pub(crate) fn cover_accumulate() {
 
 pub(crate) fn cover_display() {
     cov().display()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Coverage;
+
+    #[test]
+    fn zero_length_coverage_reports_zero_percent() {
+        let cover = Coverage::new(0);
+        assert_eq!(cover.get_accumulative_coverage(), 0.0);
+    }
 }

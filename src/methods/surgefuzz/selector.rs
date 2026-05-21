@@ -139,31 +139,59 @@ pub(crate) fn select_slices_by_distance_and_nmi(
     });
 
     let mut selected = Vec::new();
+    let mut rejected = HashSet::new();
     let mut bits = 0usize;
-    for candidate in candidates {
-        if bits >= max_bits {
+    let mut reference_samples = sample_map.get("coverage_target").copied();
+
+    while bits < max_bits {
+        for candidate in &candidates {
+            if selected
+                .iter()
+                .any(|selected: &SelectedAncestorSlice| selected.name == candidate.name)
+                || rejected.contains(candidate.name.as_str())
+            {
+                continue;
+            }
+            let Some(candidate_samples) = sample_map.get(candidate.name.as_str()) else {
+                rejected.insert(candidate.name.as_str());
+                continue;
+            };
+
+            if let Some(reference_samples) = reference_samples {
+                if normalized_mutual_information(candidate_samples, reference_samples)
+                    > nmi_threshold
+                {
+                    rejected.insert(candidate.name.as_str());
+                }
+            }
+        }
+
+        let mut selected_this_round = false;
+        for candidate in &candidates {
+            if selected
+                .iter()
+                .any(|selected: &SelectedAncestorSlice| selected.name == candidate.name)
+                || rejected.contains(candidate.name.as_str())
+            {
+                continue;
+            }
+            let Some(candidate_samples) = sample_map.get(candidate.name.as_str()) else {
+                continue;
+            };
+            let remaining = max_bits - bits;
+            if candidate.width <= remaining {
+                selected.push(SelectedAncestorSlice::whole(candidate));
+                bits += candidate.width;
+            } else {
+                selected.push(SelectedAncestorSlice::low_bits(candidate, remaining));
+                bits += remaining;
+            }
+            reference_samples = Some(candidate_samples);
+            selected_this_round = true;
             break;
         }
-        let Some(candidate_samples) = sample_map.get(candidate.name.as_str()) else {
-            continue;
-        };
 
-        let redundant = selected.iter().any(|selected: &SelectedAncestorSlice| {
-            let Some(selected_samples) = sample_map.get(selected.name.as_str()) else {
-                return false;
-            };
-            normalized_mutual_information(candidate_samples, selected_samples) >= nmi_threshold
-        });
-        if redundant {
-            continue;
-        }
-
-        let remaining = max_bits - bits;
-        if candidate.width <= remaining {
-            selected.push(SelectedAncestorSlice::whole(candidate));
-            bits += candidate.width;
-        } else {
-            selected.push(SelectedAncestorSlice::low_bits(candidate, remaining));
+        if !selected_this_round {
             break;
         }
     }
@@ -230,21 +258,21 @@ pub(crate) fn parse_dependents_csv(csv: &str) -> Vec<RegisterSample> {
         return Vec::new();
     };
     let names: Vec<_> = header.split(',').map(str::trim).collect();
-    let dependent_names: Vec<_> = names
+    let sample_names: Vec<_> = names
         .iter()
         .copied()
-        .filter(|name| name.starts_with("dependent_"))
+        .filter(|name| name.starts_with("dependent_") || *name == "coverage_target")
         .collect();
-    let mut values: HashMap<String, Vec<u64>> = dependent_names
+    let mut values: HashMap<String, Vec<u64>> = sample_names
         .iter()
         .map(|name| ((*name).to_string(), Vec::new()))
         .collect();
-    let dependent_set: HashSet<_> = dependent_names.into_iter().collect();
+    let sample_set: HashSet<_> = sample_names.into_iter().collect();
 
     for line in lines {
         let fields: Vec<_> = line.split(',').map(str::trim).collect();
         for (idx, name) in names.iter().enumerate() {
-            if !dependent_set.contains(name) {
+            if !sample_set.contains(name) {
                 continue;
             }
             let parsed = fields
@@ -363,6 +391,32 @@ mod tests {
     }
 
     #[test]
+    fn nmi_selection_uses_coverage_target_as_initial_reference() {
+        let signals = vec![
+            signal("dependent_0", 1, 1, 0),
+            signal("dependent_1", 1, 2, 0),
+        ];
+        let samples = vec![
+            RegisterSample {
+                name: "coverage_target".to_string(),
+                values: vec![0, 1, 0, 1],
+            },
+            RegisterSample {
+                name: "dependent_0".to_string(),
+                values: vec![0, 1, 0, 1],
+            },
+            RegisterSample {
+                name: "dependent_1".to_string(),
+                values: vec![0, 0, 1, 1],
+            },
+        ];
+        assert_eq!(
+            select_by_distance_and_nmi(&signals, &samples, 2, 0.7),
+            vec!["dependent_1".to_string()]
+        );
+    }
+
+    #[test]
     fn nmi_selection_uses_partial_low_bits_for_final_candidate() {
         let signals = vec![
             signal("dependent_0", 1, 1, 0),
@@ -407,6 +461,10 @@ cycle,dependent_0,dependent_1,coverage_target
         assert_eq!(
             samples,
             vec![
+                RegisterSample {
+                    name: "coverage_target".to_string(),
+                    values: vec![0, 1],
+                },
                 RegisterSample {
                     name: "dependent_0".to_string(),
                     values: vec![3, 4],

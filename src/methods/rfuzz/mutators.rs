@@ -202,7 +202,7 @@ pub(crate) fn havoc_mutation<R: Rng + ?Sized>(
 }
 
 fn apply_havoc_step<R: Rng + ?Sized>(bytes: &mut Vec<u8>, rng: &mut R) {
-    match rng.gen_range(0..10) {
+    match rng.gen_range(0..15) {
         0 => {
             let bit = rng.gen_range(0..bytes.len() * 8);
             flip_bit(bytes, bit);
@@ -214,11 +214,12 @@ fn apply_havoc_step<R: Rng + ?Sized>(bytes: &mut Vec<u8>, rng: &mut R) {
         2 => overwrite_interesting_8(bytes, rng),
         3 => overwrite_interesting_16(bytes, rng),
         4 => overwrite_interesting_32(bytes, rng),
-        5 => random_arith(bytes, rng, 1),
-        6 => random_arith(bytes, rng, 2),
-        7 => random_arith(bytes, rng, 4),
-        8 => delete_random_range(bytes, rng),
-        _ => clone_or_overwrite_range(bytes, rng),
+        5 | 6 => random_arith(bytes, rng, 1),
+        7 | 8 => random_arith(bytes, rng, 2),
+        9 | 10 => random_arith(bytes, rng, 4),
+        11 | 12 => delete_random_range(bytes, rng),
+        13 => clone_or_overwrite_range(bytes, rng),
+        _ => overwrite_random_range(bytes, rng),
     }
 }
 
@@ -328,6 +329,32 @@ fn clone_or_overwrite_range<R: Rng + ?Sized>(bytes: &mut Vec<u8>, rng: &mut R) {
     }
 }
 
+fn overwrite_random_range<R: Rng + ?Sized>(bytes: &mut [u8], rng: &mut R) {
+    if bytes.len() <= 1 {
+        return;
+    }
+    let src = rng.gen_range(0..bytes.len());
+    let dst = rng.gen_range(0..bytes.len());
+    let max_len = bytes.len() - src.max(dst);
+    if max_len == 0 || src == dst {
+        return;
+    }
+    let len = rng.gen_range(1..=max_len);
+    if rng.gen_bool(0.25) {
+        let fragment = bytes[src..src + len].to_vec();
+        bytes[dst..dst + len].copy_from_slice(&fragment);
+    } else {
+        let value = if rng.gen_bool(0.5) {
+            rng.r#gen()
+        } else {
+            bytes[src]
+        };
+        for byte in &mut bytes[dst..dst + len] {
+            *byte = value;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rand::{SeedableRng, rngs::StdRng};
@@ -338,9 +365,13 @@ mod tests {
     };
     use crate::methods::rfuzz::input::RfuzzInputLayout;
 
+    fn byte_tight_layout(cycle_bits: usize) -> RfuzzInputLayout {
+        RfuzzInputLayout::with_cycle_byte_align(cycle_bits, None, 1)
+    }
+
     #[test]
     fn bitflip_1_1_generates_one_child_per_bit() {
-        let layout = RfuzzInputLayout::new(8, None);
+        let layout = byte_tight_layout(8);
         let children = apply_deterministic_mutation(
             &[0],
             &layout,
@@ -356,7 +387,7 @@ mod tests {
 
     #[test]
     fn bitflip_16_8_steps_by_byte() {
-        let layout = RfuzzInputLayout::new(8, None);
+        let layout = byte_tight_layout(8);
         let children = apply_deterministic_mutation(
             &[0, 0, 0],
             &layout,
@@ -370,7 +401,7 @@ mod tests {
 
     #[test]
     fn arith_8_generates_add_and_sub_for_each_delta() {
-        let layout = RfuzzInputLayout::new(8, None);
+        let layout = byte_tight_layout(8);
         let children = apply_deterministic_mutation(
             &[10],
             &layout,
@@ -388,7 +419,7 @@ mod tests {
 
     #[test]
     fn arith_16_generates_both_endian_orders() {
-        let layout = RfuzzInputLayout::new(16, None);
+        let layout = byte_tight_layout(16);
         let children = apply_deterministic_mutation(
             &[0, 1],
             &layout,
@@ -405,7 +436,7 @@ mod tests {
 
     #[test]
     fn interesting_values_match_rfuzz_artifact_sets() {
-        let layout = RfuzzInputLayout::new(8, None);
+        let layout = byte_tight_layout(8);
         let interesting_8 = apply_deterministic_mutation(
             &[0],
             &layout,
@@ -415,7 +446,7 @@ mod tests {
         assert_eq!(interesting_8[0], vec![0x80]);
         assert_eq!(interesting_8[8], vec![0x7f]);
 
-        let layout = RfuzzInputLayout::new(16, None);
+        let layout = byte_tight_layout(16);
         let interesting_16 = apply_deterministic_mutation(
             &[0, 0],
             &layout,
@@ -427,7 +458,7 @@ mod tests {
         assert!(interesting_16.contains(&vec![0x00, 0x02]));
         assert!(!interesting_16.contains(&vec![0xff, 0xff]));
 
-        let layout = RfuzzInputLayout::new(32, None);
+        let layout = byte_tight_layout(32);
         let interesting_32 = apply_deterministic_mutation(
             &[0, 0, 0, 0],
             &layout,
@@ -444,8 +475,8 @@ mod tests {
     fn deterministic_stage_includes_interesting_and_normalizes_children() {
         let layout = RfuzzInputLayout::new(17, None);
         let children = deterministic_mutations(&[0xaa], &layout);
-        assert!(children.contains(&vec![0x80, 0, 0]));
-        assert!(children.iter().all(|child| child.len() % 3 == 0));
+        assert!(children.contains(&vec![0x80, 0, 0, 0, 0, 0, 0, 0]));
+        assert!(children.iter().all(|child| child.len() % 8 == 0));
     }
 
     #[test]
@@ -461,7 +492,16 @@ mod tests {
         );
         assert_eq!(
             children,
-            vec![vec![0xff, 0, 0], vec![0, 0xff, 0], vec![0, 0, 0xff],]
+            vec![
+                vec![0xff, 0, 0, 0, 0, 0, 0, 0],
+                vec![0, 0xff, 0, 0, 0, 0, 0, 0],
+                vec![0, 0, 0xff, 0, 0, 0, 0, 0],
+                vec![0, 0, 0, 0xff, 0, 0, 0, 0],
+                vec![0, 0, 0, 0, 0xff, 0, 0, 0],
+                vec![0, 0, 0, 0, 0, 0xff, 0, 0],
+                vec![0, 0, 0, 0, 0, 0, 0xff, 0],
+                vec![0, 0, 0, 0, 0, 0, 0, 0xff],
+            ]
         );
     }
 
@@ -471,8 +511,8 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(7);
         let child = havoc_mutation(&[1, 2, 3, 4], &layout, &mut rng);
         assert!(!child.is_empty());
-        assert_eq!(child.len() % 3, 0);
-        assert!(child.len() <= 12);
+        assert_eq!(child.len() % 8, 0);
+        assert!(child.len() <= 32);
     }
 
     #[test]
@@ -481,7 +521,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(11);
         let child = havoc_mutation(&[], &layout, &mut rng);
         assert!(!child.is_empty());
-        assert_eq!(child.len() % 2, 0);
-        assert!(child.len() <= 4);
+        assert_eq!(child.len() % 8, 0);
+        assert!(child.len() <= 16);
     }
 }

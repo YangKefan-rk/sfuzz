@@ -21,10 +21,12 @@ DIRECTFUZZ_FIELDS = [
     "fuzzer",
     "seed",
     "target_instance",
+    "metadata_source",
     "wall_time_sec",
     "cycles",
     "exit_code",
     "coverage_backend",
+    "native_coverage_source",
     "target_covered_bits",
     "distance",
     "energy",
@@ -35,6 +37,9 @@ DIRECTFUZZ_FIELDS = [
     "required_native_abi",
     "notes",
 ]
+
+DIRECT_METADATA_FIELDS = ["instance_name", "coverage_signal_name", "width", "distance"]
+NATIVE_COVERAGE_FIELDS = ["instance_name", "coverage_hex"]
 
 
 @dataclass(frozen=True)
@@ -58,21 +63,42 @@ def parse_distance(value: str) -> int | None:
     if text.lower() in {"undefined", "unreachable", "none", ""}:
         return None
     distance = int(text, 0)
+    if distance < 0:
+        raise ValueError(f"DirectFuzz distance must be non-negative: {value!r}")
     return None if distance == 256 else distance
+
+
+def require_csv_fields(path: Path, fieldnames: list[str] | None, required: list[str]) -> None:
+    if fieldnames is None:
+        raise ValueError(f"{path}: CSV is missing a header")
+    missing = [field for field in required if field not in fieldnames]
+    if missing:
+        raise ValueError(f"{path}: CSV is missing required columns: {', '.join(missing)}")
 
 
 def load_direct_metadata(path: Path) -> list[InstanceMeta]:
     with path.open(newline="", encoding="utf-8") as input_file:
         reader = csv.DictReader(input_file)
+        require_csv_fields(path, reader.fieldnames, DIRECT_METADATA_FIELDS)
         rows: list[InstanceMeta] = []
+        seen_instances: set[str] = set()
         for line_no, row in enumerate(reader, 2):
+            instance = row["instance_name"].strip()
+            signal = row["coverage_signal_name"].strip()
+            if not instance:
+                raise ValueError(f"{path}:{line_no}: instance_name must be non-empty")
+            if not signal:
+                raise ValueError(f"{path}:{line_no}: coverage_signal_name must be non-empty")
+            if instance in seen_instances:
+                raise ValueError(f"{path}:{line_no}: duplicate instance_name {instance!r}")
+            seen_instances.add(instance)
             width = int(row["width"], 0)
             if width <= 0:
                 raise ValueError(f"{path}:{line_no}: width must be positive")
             rows.append(
                 InstanceMeta(
-                    row["instance_name"].strip(),
-                    row["coverage_signal_name"].strip(),
+                    instance,
+                    signal,
                     width,
                     parse_distance(row["distance"]),
                 )
@@ -127,6 +153,12 @@ class DirectCoverageState:
             return {"target_covered_bits": "", "distance": "", "energy": "", "new_coverage": "", "target_progress": ""}
         if len(coverage) != len(self.metadata):
             raise ValueError("coverage length does not match DirectFuzz metadata length")
+        for idx, (meta, data) in enumerate(zip(self.metadata, coverage)):
+            if len(data) != meta.byte_len:
+                raise ValueError(
+                    f"coverage for metadata row {idx} instance {meta.instance!r} has {len(data)} bytes, "
+                    f"expected {meta.byte_len}"
+                )
 
         target_bits = 0
         reachable_bits = 0
@@ -162,22 +194,32 @@ class DirectCoverageState:
             "distance": "" if distance is None else round(distance, 6),
             "energy": round(energy, 6),
             "new_coverage": new_cov,
-                "target_progress": target_progress,
-            }
+            "target_progress": target_progress,
+        }
 
 
 def load_direct_coverage_file(path: Path, metadata: list[InstanceMeta]) -> list[bytes]:
     """Load native DirectFuzz coverage rows in metadata order.
 
     The CSV schema is intentionally simple for the first LinkNan ABI:
-    `instance_name,coverage_hex`. Each `coverage_hex` payload must match the
-    corresponding metadata row width after padding bits are masked.
+    `instance_name,coverage_hex`. It must contain exactly one row per metadata
+    instance. Rows are keyed by instance name and then reordered to metadata
+    order. Each `coverage_hex` payload must match the corresponding metadata row
+    width after padding bits are masked.
     """
     by_instance: dict[str, bytes] = {}
+    metadata_instances = {meta.instance for meta in metadata}
     with path.open(newline="", encoding="utf-8") as input_file:
         reader = csv.DictReader(input_file)
+        require_csv_fields(path, reader.fieldnames, NATIVE_COVERAGE_FIELDS)
         for line_no, row in enumerate(reader, 2):
             instance = row["instance_name"].strip()
+            if not instance:
+                raise ValueError(f"{path}:{line_no}: instance_name must be non-empty")
+            if instance in by_instance:
+                raise ValueError(f"{path}:{line_no}: duplicate coverage row for instance {instance!r}")
+            if instance not in metadata_instances:
+                raise ValueError(f"{path}:{line_no}: coverage row for unknown instance {instance!r}")
             raw_hex = row["coverage_hex"].strip()
             try:
                 data = bytes.fromhex(raw_hex)
@@ -198,6 +240,25 @@ def load_direct_coverage_file(path: Path, metadata: list[InstanceMeta]) -> list[
         mask_padding_bits(mutable, meta.width)
         coverage.append(bytes(mutable))
     return coverage
+
+
+def paper_faithful_native_file(args: Any) -> bool:
+    return (
+        args.coverage_backend == "native-file"
+        and args.metadata_source == "static-analysis"
+        and args.native_coverage_source == "vcs-native-abi"
+    )
+
+
+def required_native_abi(args: Any) -> str:
+    missing: list[str] = []
+    if args.coverage_backend != "native-file":
+        missing.append("directfuzz_per_instance_mux_toggle")
+    elif args.native_coverage_source != "vcs-native-abi":
+        missing.append("directfuzz_vcs_native_coverage_export")
+    if args.metadata_source != "static-analysis":
+        missing.append("directfuzz_static_analysis_instance_distance_metadata")
+    return ";".join(missing)
 
 
 def run_directfuzz(args: Any, ctx: VcsContext) -> int:
@@ -228,16 +289,28 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
             simv_args=args.simv_args,
         )
         info = scan_vcs_logs(run_log, assert_log, ctx.cycles)
-        paper_faithful = False
-        required_native_abi = "directfuzz_per_instance_mux_toggle"
+        paper_faithful = paper_faithful_native_file(args)
+        missing_native_abi = required_native_abi(args)
+        native_coverage_source = ""
         if args.coverage_backend == "native-file":
             if not args.native_coverage:
                 raise ValueError("--coverage-backend native-file requires --native-coverage")
             feedback = state.feedback(load_direct_coverage_file(args.native_coverage.expanduser(), metadata))
             backend = "directfuzz_per_instance_mux_toggle_file"
-            notes = "真实 LinkNan VCS 已运行;覆盖/反馈来自 DirectFuzz per-instance mux-toggle ABI 导出文件"
-            paper_faithful = True
-            required_native_abi = ""
+            native_coverage_source = args.native_coverage_source
+            if paper_faithful:
+                notes = (
+                    "真实 LinkNan VCS 已运行;"
+                    "覆盖/反馈来自声明为 VCS native ABI 导出的 DirectFuzz per-instance mux-toggle 文件;"
+                    "metadata_source=static-analysis"
+                )
+            else:
+                notes = (
+                    "真实 LinkNan VCS 已运行;"
+                    "native-file ABI 已解析并计算 DirectFuzz 反馈;"
+                    "但未同时声明 static-analysis metadata 和 vcs-native-abi coverage export，"
+                    "因此不标记为 paper-faithful"
+                )
         elif args.coverage_backend == "dev-mock":
             feedback = state.feedback(dev_direct_coverage(seed, metadata, args.target_instance))
             backend = "dev_mock_directfuzz_feedback"
@@ -260,14 +333,16 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
                 "fuzzer": "directfuzz",
                 "seed": str(seed),
                 "target_instance": args.target_instance,
+                "metadata_source": args.metadata_source,
                 "wall_time_sec": round(result.wall_time_sec, 6),
                 "cycles": info.cycles or ctx.cycles,
                 "exit_code": result.returncode,
                 "coverage_backend": backend,
+                "native_coverage_source": native_coverage_source,
                 **feedback,
                 "log_path": str(run_log),
                 "paper_faithful": paper_faithful,
-                "required_native_abi": required_native_abi,
+                "required_native_abi": missing_native_abi,
                 "notes": append_notes(notes, {"sfuz_seen": info.sfuz_expansion_seen, "vcs_report": info.vcs_report_seen}),
             }
         )

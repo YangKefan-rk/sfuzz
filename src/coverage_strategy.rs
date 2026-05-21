@@ -34,6 +34,18 @@ impl CoverageStrategy {
             if left.eq_ignore_ascii_case(&right) {
                 return Err("union coverage requires two distinct coverage names".to_string());
             }
+            if left
+                .get(..7)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("FIRRTL."))
+                || right
+                    .get(..7)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("FIRRTL."))
+            {
+                return Err(
+                    "union coverage currently cannot target FIRRTL subtypes; use a top-level simulator coverage name"
+                        .to_string(),
+                );
+            }
 
             return Ok(Self::Union { left, right });
         }
@@ -125,5 +137,10 @@ mod tests {
     #[test]
     fn rejects_nested_union_strategy() {
         assert!(CoverageStrategy::parse("union:llvm.branch+union:Instruction+Instr-Imm").is_err());
+    }
+
+    #[test]
+    fn rejects_union_with_firrtl_subtype() {
+        assert!(CoverageStrategy::parse("union:FIRRTL.MSHR+llvm.branch").is_err());
     }
 }

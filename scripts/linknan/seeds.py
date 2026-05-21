@@ -66,7 +66,7 @@ def read_seed_metadata_name(seed: Path) -> str:
             skip_blob()
         interrupt_count = u32()
         for _ in range(interrupt_count):
-            skip_blob()
+            take(24)
         name = read_string().strip()
         return name or seed.stem
     except Exception:
