@@ -10,11 +10,14 @@ This note records the current runnable results for:
 
 Date: 2026-04-23
 
+Path note: this report was captured before the workspace moved. The commands
+below have been updated to the current `~/SFUZZ` workspace layout.
+
 ## FIRRTL Instrumentation Inventory
 
 Generated metadata source:
 
-- `/nfs/home/yangkefan/Nanhu-V5.1/LinkNan/build-cover-validate-r2/generated-src/firrtl-cover.cpp`
+- `~/SFUZZ/LinkNan/build-cover-validate-r2/generated-src/firrtl-cover.cpp`
 
 Current FIRRTL coverage groups and totals:
 
@@ -76,7 +79,7 @@ Signal list:
 ### 1. Generate FIRRTL coverage metadata
 
 ```bash
-cd /nfs/home/yangkefan/Nanhu-V5.1/LinkNan
+cd ~/SFUZZ/LinkNan
 python3 -m py_compile scripts/linknan/postcompile.py
 python3 scripts/linknan/postcompile.py build-cover-validate-r2/rtl -j 4
 ```
@@ -84,7 +87,7 @@ python3 scripts/linknan/postcompile.py build-cover-validate-r2/rtl -j 4
 ### 2. FIRRTL-enabled Verilator build
 
 ```bash
-cd /nfs/home/yangkefan/Nanhu-V5.1/LinkNan
+cd ~/SFUZZ/LinkNan
 xmake emu --build_dir=build-cover-validate-r2 --no_build_chisel --firrtl_cover -j 8 -t 8
 ```
 
@@ -97,11 +100,11 @@ Observed build status:
 ### 3. Relink a runnable emu with current SFUZ ABI support
 
 ```bash
-cd /nfs/home/yangkefan/Nanhu-V5.1/sfuzz
+cd ~/SFUZZ/sfuzz
 
 CXX=clang++-18
 VERILATOR_ROOT=/nfs/share/opt/verilator/share/verilator
-LINKNAN=/nfs/home/yangkefan/Nanhu-V5.1/LinkNan
+LINKNAN=~/SFUZZ/LinkNan
 REAL_MODEL_COMP="$LINKNAN/sim/emu/comp"
 REAL_MODEL_GENERATED_SRC="$LINKNAN/build-cover-validate-r2/generated-src"
 WORK=/tmp/sfuzz-litmus-probe2
@@ -149,9 +152,9 @@ COMMON_CXXFLAGS=(
 Example for one litmus:
 
 ```bash
-python3 /nfs/home/yangkefan/Nanhu-V5.1/sfuzz/scripts/make_sfuz_seed.py \
+python3 ~/SFUZZ/sfuzz/scripts/make_sfuz_seed.py \
   --output /tmp/sfuzz-litmus-probe2/corpus/seed.sfuz \
-  --core0-elf /nfs/home/yangkefan/Nanhu-V5.1/litmus-tests-riscv/generated-relax-model-linknan-elf/non-mixed-size/ATOMICS/RELAX/PodRWPX/LB+addr+popx-src/LB+addr+popx.elf
+  --core0-elf ~/SFUZZ/litmus-tests-riscv/generated-relax-model-linknan-elf/non-mixed-size/ATOMICS/RELAX/PodRWPX/LB+addr+popx-src/LB+addr+popx.elf
 
 /tmp/sfuzz-litmus-probe2/relink/emu \
   --coverage FIRRTL.all \

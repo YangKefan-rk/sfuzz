@@ -9,18 +9,21 @@ What it proves:
 
 Files:
 - `scripts/make_sfuz_seed.py`: builds a standalone SFUZ container from simple CLI inputs.
-- `scripts/linknan_abi_smoke.sh`: rebuilds the current LinkNan ABI slice, relinks it against a real Verilated model, runs one minimal SFUZ seed, and checks for the proof logs plus the selected coverage backend.
+- `scripts/linknan_abi_smoke.py`: rebuilds the current LinkNan ABI slice, relinks it against a real Verilated model, runs one minimal SFUZ seed, and checks for the proof logs plus the selected coverage backend.
+- `scripts/sfuzz.toml`: stores local path and toolchain defaults used by the smoke script.
 
 Default path assumptions:
 - `sfuzz` root: current directory of the script.
-- LinkNan release sources: `../LN-release/LinkNan_20260324`
-- Real prebuilt Verilated model: `../LinkNan/sim/emu/comp`
-- Matching generated headers: `../LinkNan/build/generated-src`
+- Workspace root: `~/SFUZZ`
+- LinkNan source/model root: `~/SFUZZ/LinkNan`
+- Real prebuilt Verilated model: `~/SFUZZ/LinkNan/sim/emu/comp`
+- Matching generated headers: `~/SFUZZ/LinkNan/build/generated-src`
+- Legacy fallback for release sources: `~/SFUZZ/LN-release/LinkNan_20260324`
 
 Run:
 ```bash
-cd /nfs/home/yangkefan/Nanhu-V5.1/sfuzz
-./scripts/linknan_abi_smoke.sh
+cd ~/SFUZZ/sfuzz
+python3 scripts/linknan_abi_smoke.py
 ```
 
 Useful overrides:
@@ -42,8 +45,8 @@ FIRRTL coverage validation:
 
 Example:
 ```bash
-cd /nfs/home/yangkefan/Nanhu-V5.1/sfuzz
-COVERAGE_NAME=FIRRTL.MSHR LINKNAN_RELEASE=/nfs/home/yangkefan/Nanhu-V5.1/LinkNan REAL_MODEL_ROOT=/nfs/home/yangkefan/Nanhu-V5.1/LinkNan REAL_MODEL_COMP=/nfs/home/yangkefan/Nanhu-V5.1/LinkNan/sim/emu/comp REAL_MODEL_GENERATED_SRC=/nfs/home/yangkefan/Nanhu-V5.1/LinkNan/build-cover-validate-r2/generated-src ./scripts/linknan_abi_smoke.sh
+cd ~/SFUZZ/sfuzz
+COVERAGE_NAME=FIRRTL.MSHR LINKNAN_ROOT=~/SFUZZ/LinkNan REAL_MODEL_GENERATED_SRC=~/SFUZZ/LinkNan/build-cover-validate-r2/generated-src python3 scripts/linknan_abi_smoke.py
 ```
 
 Expected proof lines:

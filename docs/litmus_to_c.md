@@ -7,7 +7,8 @@ The repository Makefile expands the single-test flow to the diy `litmus7` comman
 litmus7 -mach ./riscv.cfg -avail <cores> -o <output-dir> <test>.litmus
 ```
 
-In the checked-out upstream tree at `/nfs/home/yangkefan/Nanhu-V5.1/litmus-tests-riscv`, the two equivalent entry points are:
+In a checked-out upstream tree such as `~/SFUZZ/litmus-tests-riscv`, the two
+equivalent entry points are:
 
 ```sh
 make -n hw-single-test-src CORES=2 LITMUSFILE=tests/non-mixed-size/BASIC_2_THREAD/MP.litmus
@@ -26,9 +27,9 @@ With the just-built herdtools7 binary, direct use works, but there are two runti
 For example:
 
 ```sh
-cd /nfs/home/yangkefan/Nanhu-V5.1/herdtools7
+cd ~/SFUZZ/herdtools7
 mkdir -p /tmp/herdtools7-litmus-mp
-./litmus7   -set-libdir "$PWD/litmus/libdir"   -mach /nfs/home/yangkefan/Nanhu-V5.1/litmus-tests-riscv/riscv.cfg   -avail 2   -o /tmp/herdtools7-litmus-mp   /nfs/home/yangkefan/Nanhu-V5.1/litmus-tests-riscv/tests/non-mixed-size/BASIC_2_THREAD/MP.litmus
+./litmus7   -set-libdir "$PWD/litmus/libdir"   -mach ~/SFUZZ/litmus-tests-riscv/riscv.cfg   -avail 2   -o /tmp/herdtools7-litmus-mp   ~/SFUZZ/litmus-tests-riscv/tests/non-mixed-size/BASIC_2_THREAD/MP.litmus
 ```
 
 That command was validated locally and generated files including `MP.c`, `run.c`, `Makefile`, and support C sources in `/tmp/herdtools7-litmus-mp`.
@@ -38,7 +39,7 @@ That command was validated locally and generated files including `MP.c`, `run.c`
 To avoid hardcoding corpus seeds in Rust, use `scripts/litmus_to_c.py` as the canonical wrapper:
 
 ```sh
-python3 scripts/litmus_to_c.py   --litmus-home /nfs/home/yangkefan/Nanhu-V5.1/litmus-tests-riscv   --litmus-bin /nfs/home/yangkefan/Nanhu-V5.1/herdtools7/litmus7   --output-dir ./generated-litmus-c   --cores 2   /nfs/home/yangkefan/Nanhu-V5.1/litmus-tests-riscv/tests/non-mixed-size/BASIC_2_THREAD/MP.litmus
+python3 scripts/litmus_to_c.py   --litmus-home ~/SFUZZ/litmus-tests-riscv   --litmus-bin ~/SFUZZ/herdtools7/litmus7   --output-dir ./generated-litmus-c   --cores 2   ~/SFUZZ/litmus-tests-riscv/tests/non-mixed-size/BASIC_2_THREAD/MP.litmus
 ```
 
 The wrapper now creates each `-o` directory before invocation and auto-detects `litmus/libdir` when the selected binary lives inside a herdtools7 checkout. If auto-detection ever fails, pass `--litmus-libdir <path>` explicitly.
