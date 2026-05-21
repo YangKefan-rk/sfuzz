@@ -1,0 +1,12 @@
+target/
+scripts/__pycache__/
+*.py[cod]
+
+crashes/
+errors/
+corpus/
+work/
+generated-litmus-c/
+
+*.log
+*.tmp
