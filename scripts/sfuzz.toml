@@ -1,0 +1,26 @@
+[workspace]
+work_dir = "/tmp/sfuzz-linknan-abi-smoke"
+
+[linknan]
+root = "~/SFUZZ/LinkNan"
+src_root = "."
+real_model_root = "."
+build_dir = "build"
+sim_dir = "sim"
+comp_dir = "sim/emu/comp"
+generated_src = "build/generated-src"
+legacy_release_root = "~/SFUZZ/LN-release/LinkNan_20260324"
+
+[toolchain]
+cxx = "clang++-18"
+linker = "lld-18"
+verilator_root = "/nfs/share/opt/verilator/share/verilator"
+xmake_jobs = 8
+
+[emu]
+num_cores = 2
+emu_thread = 8
+build_no_diff = true
+
+[coverage]
+default = "llvm.branch"
