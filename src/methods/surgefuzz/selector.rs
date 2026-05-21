@@ -10,7 +10,61 @@ pub(crate) struct RegisterSample {
     pub values: Vec<u64>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SelectedAncestorSlice {
+    pub name: String,
+    pub lsb: usize,
+    pub width: usize,
+}
+
+impl SelectedAncestorSlice {
+    pub(crate) fn whole(signal: &AncestorSignal) -> Self {
+        Self {
+            name: signal.name.clone(),
+            lsb: 0,
+            width: signal.width,
+        }
+    }
+
+    pub(crate) fn low_bits(signal: &AncestorSignal, width: usize) -> Self {
+        Self {
+            name: signal.name.clone(),
+            lsb: 0,
+            width,
+        }
+    }
+
+    pub(crate) fn is_whole_signal(&self, signal: &AncestorSignal) -> bool {
+        self.lsb == 0 && self.width == signal.width
+    }
+
+    pub(crate) fn signal_expr(&self) -> String {
+        match self.width {
+            0 => format!("{}[-1:0]", self.name),
+            1 => format!("{}[{}]", self.name, self.lsb),
+            width => format!("{}[{}:{}]", self.name, self.lsb + width - 1, self.lsb),
+        }
+    }
+}
+
 pub(crate) fn select_by_distance(signals: &[AncestorSignal], max_bits: usize) -> Vec<String> {
+    select_slices_by_distance(signals, max_bits)
+        .into_iter()
+        .map(|selected| {
+            signals
+                .iter()
+                .find(|signal| signal.name == selected.name)
+                .filter(|signal| selected.is_whole_signal(signal))
+                .map(|_| selected.name.clone())
+                .unwrap_or_else(|| selected.signal_expr())
+        })
+        .collect()
+}
+
+pub(crate) fn select_slices_by_distance(
+    signals: &[AncestorSignal],
+    max_bits: usize,
+) -> Vec<SelectedAncestorSlice> {
     let mut candidates: Vec<_> = signals
         .iter()
         .filter(|signal| signal.name.starts_with("dependent_"))
@@ -30,8 +84,14 @@ pub(crate) fn select_by_distance(signals: &[AncestorSignal], max_bits: usize) ->
         if bits >= max_bits {
             break;
         }
-        selected.push(signal.name.clone());
-        bits += signal.width;
+        let remaining = max_bits - bits;
+        if signal.width <= remaining {
+            selected.push(SelectedAncestorSlice::whole(signal));
+            bits += signal.width;
+        } else {
+            selected.push(SelectedAncestorSlice::low_bits(signal, remaining));
+            break;
+        }
     }
     selected
 }
@@ -42,6 +102,25 @@ pub(crate) fn select_by_distance_and_nmi(
     max_bits: usize,
     nmi_threshold: f64,
 ) -> Vec<String> {
+    select_slices_by_distance_and_nmi(signals, samples, max_bits, nmi_threshold)
+        .into_iter()
+        .map(|selected| {
+            signals
+                .iter()
+                .find(|signal| signal.name == selected.name)
+                .filter(|signal| selected.is_whole_signal(signal))
+                .map(|_| selected.name.clone())
+                .unwrap_or_else(|| selected.signal_expr())
+        })
+        .collect()
+}
+
+pub(crate) fn select_slices_by_distance_and_nmi(
+    signals: &[AncestorSignal],
+    samples: &[RegisterSample],
+    max_bits: usize,
+    nmi_threshold: f64,
+) -> Vec<SelectedAncestorSlice> {
     let sample_map: HashMap<_, _> = samples
         .iter()
         .map(|sample| (sample.name.as_str(), sample.values.as_slice()))
@@ -69,8 +148,8 @@ pub(crate) fn select_by_distance_and_nmi(
             continue;
         };
 
-        let redundant = selected.iter().any(|selected_name: &String| {
-            let Some(selected_samples) = sample_map.get(selected_name.as_str()) else {
+        let redundant = selected.iter().any(|selected: &SelectedAncestorSlice| {
+            let Some(selected_samples) = sample_map.get(selected.name.as_str()) else {
                 return false;
             };
             normalized_mutual_information(candidate_samples, selected_samples) >= nmi_threshold
@@ -79,8 +158,14 @@ pub(crate) fn select_by_distance_and_nmi(
             continue;
         }
 
-        selected.push(candidate.name.clone());
-        bits += candidate.width;
+        let remaining = max_bits - bits;
+        if candidate.width <= remaining {
+            selected.push(SelectedAncestorSlice::whole(candidate));
+            bits += candidate.width;
+        } else {
+            selected.push(SelectedAncestorSlice::low_bits(candidate, remaining));
+            break;
+        }
     }
     selected
 }
@@ -181,8 +266,9 @@ pub(crate) fn parse_dependents_csv(csv: &str) -> Vec<RegisterSample> {
 #[cfg(test)]
 mod tests {
     use super::{
-        RegisterSample, normalized_mutual_information, parse_dependents_csv, select_by_distance,
-        select_by_distance_and_nmi,
+        RegisterSample, SelectedAncestorSlice, normalized_mutual_information, parse_dependents_csv,
+        select_by_distance, select_by_distance_and_nmi, select_slices_by_distance,
+        select_slices_by_distance_and_nmi,
     };
     use crate::methods::surgefuzz::metadata::AncestorSignal;
 
@@ -207,7 +293,36 @@ mod tests {
         ];
         assert_eq!(
             select_by_distance(&signals, 2),
-            vec!["dependent_0".to_string(), "dependent_1".to_string()]
+            vec!["dependent_0".to_string(), "dependent_1[0]".to_string()]
+        );
+        assert_eq!(
+            select_slices_by_distance(&signals, 2),
+            vec![
+                SelectedAncestorSlice {
+                    name: "dependent_0".to_string(),
+                    lsb: 0,
+                    width: 1,
+                },
+                SelectedAncestorSlice {
+                    name: "dependent_1".to_string(),
+                    lsb: 0,
+                    width: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn distance_selection_never_exceeds_bit_budget() {
+        let signals = vec![signal("dependent_0", 4, 1, 0)];
+        assert_eq!(select_slices_by_distance(&signals, 0), Vec::new());
+        assert_eq!(
+            select_slices_by_distance(&signals, 3),
+            vec![SelectedAncestorSlice {
+                name: "dependent_0".to_string(),
+                lsb: 0,
+                width: 3,
+            }]
         );
     }
 
@@ -244,6 +359,39 @@ mod tests {
         assert_eq!(
             select_by_distance_and_nmi(&signals, &samples, 3, 0.7),
             vec!["dependent_0".to_string(), "dependent_2".to_string()]
+        );
+    }
+
+    #[test]
+    fn nmi_selection_uses_partial_low_bits_for_final_candidate() {
+        let signals = vec![
+            signal("dependent_0", 1, 1, 0),
+            signal("dependent_1", 4, 2, 0),
+        ];
+        let samples = vec![
+            RegisterSample {
+                name: "dependent_0".to_string(),
+                values: vec![0, 1, 0, 1],
+            },
+            RegisterSample {
+                name: "dependent_1".to_string(),
+                values: vec![0, 0, 1, 1],
+            },
+        ];
+        assert_eq!(
+            select_slices_by_distance_and_nmi(&signals, &samples, 3, 0.7),
+            vec![
+                SelectedAncestorSlice {
+                    name: "dependent_0".to_string(),
+                    lsb: 0,
+                    width: 1,
+                },
+                SelectedAncestorSlice {
+                    name: "dependent_1".to_string(),
+                    lsb: 0,
+                    width: 2,
+                },
+            ]
         );
     }
 

@@ -225,6 +225,35 @@ mod tests {
     }
 
     #[test]
+    fn freq_default_window_is_256_cycles() {
+        let mut recorder = SurgeRecorder::new(SurgeAnnotation::Freq {
+            active: true,
+            window: SurgeAnnotation::DEFAULT_FREQ_WINDOW,
+        });
+        for _ in 0..SurgeAnnotation::DEFAULT_FREQ_WINDOW {
+            assert!(recorder.update(1) <= 256);
+        }
+        assert_eq!(recorder.best_score(), 256);
+        assert_eq!(recorder.update(0), 255);
+        assert_eq!(recorder.update(1), 255);
+        assert!(recorder.score_bitmap()[0]);
+        assert!(recorder.score_bitmap()[255]);
+    }
+
+    #[test]
+    fn freq_zero_annotation_counts_zero_values() {
+        let mut recorder = SurgeRecorder::new(SurgeAnnotation::Freq {
+            active: false,
+            window: 4,
+        });
+        let scores: Vec<_> = [0, 1, 0, 0, 1, 0]
+            .into_iter()
+            .map(|value| recorder.update(value))
+            .collect();
+        assert_eq!(scores, vec![1, 1, 2, 3, 2, 3]);
+    }
+
+    #[test]
     fn consec_score_tracks_current_run() {
         let mut recorder = SurgeRecorder::new(SurgeAnnotation::Consec { active: true });
         let scores: Vec<_> = [1, 1, 0, 1, 1, 1]
@@ -232,6 +261,33 @@ mod tests {
             .map(|value| recorder.update(value))
             .collect();
         assert_eq!(scores, vec![1, 2, 0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn consec_resets_and_can_target_zero() {
+        let mut recorder = SurgeRecorder::new(SurgeAnnotation::Consec { active: false });
+        let scores: Vec<_> = [0, 0, 1, 0, 0, 0, 1]
+            .into_iter()
+            .map(|value| recorder.update(value))
+            .collect();
+        assert_eq!(scores, vec![1, 2, 0, 1, 2, 3, 0]);
+        assert_eq!(recorder.best_score(), 3);
+        recorder.reset();
+        assert_eq!(recorder.best_score(), 0);
+        assert_eq!(recorder.update(0), 1);
+    }
+
+    #[test]
+    fn freq_and_consec_treat_nonzero_values_as_active() {
+        let mut freq = SurgeRecorder::new(SurgeAnnotation::Freq {
+            active: true,
+            window: 4,
+        });
+        assert_eq!(freq.update(2), 1);
+
+        let mut consec = SurgeRecorder::new(SurgeAnnotation::Consec { active: true });
+        assert_eq!(consec.update(3), 1);
+        assert_eq!(consec.update(0), 0);
     }
 
     #[test]
@@ -245,7 +301,28 @@ mod tests {
     }
 
     #[test]
+    fn count_min_inverts_raw_value_for_score_ordering() {
+        let mut recorder = SurgeRecorder::new(SurgeAnnotation::Count {
+            direction: CountDirection::Min,
+        });
+        assert_eq!(recorder.update(7), u32::MAX - 7);
+        assert_eq!(recorder.update(3), u32::MAX - 3);
+        assert_eq!(recorder.best_score(), u32::MAX - 3);
+    }
+
+    #[test]
+    fn score_bitmap_uses_low_8_score_bits() {
+        let mut recorder = SurgeRecorder::new(SurgeAnnotation::Count {
+            direction: CountDirection::Max,
+        });
+        recorder.update(0x123);
+        assert!(recorder.score_bitmap()[0x23]);
+        assert!(!recorder.score_bitmap()[0x22]);
+    }
+
+    #[test]
     fn quadratic_power_schedule_matches_paper() {
         assert_eq!(SurgePowerSchedule::default().energy(9), 81.0);
+        assert_eq!(SurgePowerSchedule::default().energy(0), 0.0);
     }
 }

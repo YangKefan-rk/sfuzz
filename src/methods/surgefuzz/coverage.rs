@@ -92,6 +92,13 @@ mod tests {
             window: 256,
         });
         assert_eq!(indexer.index(0b101, 0x23), 0b101_0011);
+
+        let indexer = SurgeCoverageIndex::new(SurgeAnnotation::Consec { active: true });
+        assert_eq!(
+            indexer.index(0b10, 0x1f),
+            ((0b10usize) << 4) | (0x1fusize & 0xf)
+        );
+        assert_eq!(indexer.index(0b10, 0), 0b10_0000);
     }
 
     #[test]
@@ -100,6 +107,11 @@ mod tests {
             direction: CountDirection::Max,
         });
         assert_eq!(indexer.index(13, 99), 13);
+
+        let indexer = SurgeCoverageIndex::new(SurgeAnnotation::Count {
+            direction: CountDirection::Min,
+        });
+        assert_eq!(indexer.index(13, 0), 13);
     }
 
     #[test]

@@ -27,7 +27,7 @@ pub(crate) enum SurgeMetadataError {
     },
     CsvFieldCount {
         line: usize,
-        expected: usize,
+        expected: &'static str,
         actual: usize,
     },
     CsvNumber {
@@ -66,6 +66,7 @@ impl std::error::Error for SurgeMetadataError {}
 
 impl SurgeMetadata {
     const CSV_HEADER: &'static str = "name,width,src,depth,reg_depth,is_ctrl,cell_name";
+    const CSV_FIELD_COUNT: &'static str = "6 or 7";
 
     pub(crate) fn new(signals: Vec<AncestorSignal>) -> Result<Self, SurgeMetadataError> {
         if signals.is_empty() {
@@ -108,10 +109,10 @@ impl SurgeMetadata {
             }
 
             let fields: Vec<_> = line.split(',').map(str::trim).collect();
-            if fields.len() != 7 {
+            if !(6..=7).contains(&fields.len()) {
                 return Err(SurgeMetadataError::CsvFieldCount {
                     line: line_no,
-                    expected: 7,
+                    expected: Self::CSV_FIELD_COUNT,
                     actual: fields.len(),
                 });
             }
@@ -123,7 +124,7 @@ impl SurgeMetadata {
                 depth: parse_usize(line_no, "depth", fields[3])?,
                 register_depth: parse_usize(line_no, "reg_depth", fields[4])?,
                 is_control: parse_boolish(fields[5]),
-                cell_name: fields[6].to_string(),
+                cell_name: fields.get(6).copied().unwrap_or("").to_string(),
             });
         }
         Self::new(signals)
@@ -173,8 +174,8 @@ mod tests {
         let metadata = SurgeMetadata::from_csv_str(
             "\
 name,width,src,depth,reg_depth,is_ctrl,cell_name
-coverage,1,1'0,0,0,0,
-coverage_target,1,\\target,0,0,0,
+coverage,1,1'0,0,0,0
+coverage_target,1,\\target,0,0,0
 dependent_0,1,\\foo,1,0,1,$mux
 dependent_1,3,\\bar [2:0],3,1,0,$dff
 ",
@@ -184,7 +185,23 @@ dependent_1,3,\\bar [2:0],3,1,0,$dff
         assert_eq!(metadata.ancestor_count(), 2);
         assert_eq!(metadata.coverage_bits(), 4);
         assert_eq!(metadata.bitmap_byte_size(), Some(16));
+        assert_eq!(metadata.signals()[0].cell_name, "");
+        assert_eq!(metadata.signals()[1].cell_name, "");
         assert!(metadata.signals()[2].is_control);
+    }
+
+    #[test]
+    fn parses_optional_cell_name_field() {
+        let metadata = SurgeMetadata::from_csv_str(
+            "\
+name,width,src,depth,reg_depth,is_ctrl,cell_name
+dependent_0,2,\\foo,1,0,0
+dependent_1,1,\\bar,2,1,1,$dff
+",
+        )
+        .unwrap();
+        assert_eq!(metadata.signals()[0].cell_name, "");
+        assert_eq!(metadata.signals()[1].cell_name, "$dff");
     }
 
     #[test]
@@ -200,7 +217,7 @@ dependent_0,1,\\foo
             err,
             SurgeMetadataError::CsvFieldCount {
                 line: 2,
-                expected: 7,
+                expected: "6 or 7",
                 actual: 3,
             }
         );
