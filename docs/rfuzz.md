@@ -1,8 +1,14 @@
 # RFuzz Reproduction
 
-This note describes the RFuzz method-level reproduction in SFuzz.  RFuzz is a
+This note describes the RFuzz method-level reproduction in SFuzz. RFuzz is a
 coverage-directed RTL fuzzer: it treats a test as raw bytes over top-level input
 pins across time and uses mux-select toggle coverage as feedback.
+
+This is not a complete LinkNan, Verilator, or VCS RFuzz runner. The Rust code
+below provides testable building blocks for input normalization, toggle
+coverage, feedback decisions, and mutation. It deliberately does not add a
+placeholder runner or CLI until the simulator ABI and instrumentation pieces are
+available.
 
 The implementation lives under:
 
@@ -22,52 +28,72 @@ DUT input-pin values over multiple cycles:
 - One cycle consumes `ceil(sum(top_input_bits) / 8)` bytes.
 - A testcase is normalized to a whole number of cycles.
 - Optional `max_cycles` truncates overlong mutations before padding.
+- Empty inputs normalize to one zero-filled cycle so mutators and future runner
+  code never need to execute a zero-length testcase.
 
 This is modeled by `RfuzzInputLayout` in `input.rs`.
 
 ## Coverage Model
 
-RFuzz uses mux-select toggle coverage.  The driver captures the initial sampled
+RFuzz uses mux-select toggle coverage. The driver captures the initial sampled
 mux-select state for a testcase and accumulates toggles against later samples:
 
 ```text
 local_toggle_map |= initial_sample ^ current_sample
 ```
 
-`ToggleTracker` implements this local testcase behavior.  `RfuzzCoverageMap`
-keeps the fuzzer-side state split into:
+`ToggleTracker` implements only this local testcase behavior. Callers must
+reset it before each testcase. `RfuzzCoverageMap` keeps the fuzzer-side state
+split into:
 
-- current local testcase coverage
-- accumulated total coverage
-- accumulated valid-input-only coverage for constrained interfaces
+- `current_local`: the local toggle map for exactly the testcase that just ran
+- `total_global`: accumulated coverage from the total corpus
+- `valid_global`: accumulated coverage from valid-input-only corpus entries
 
-Keeping local and accumulated maps separate is important.  Interesting-input
-decisions must compare the current testcase against global coverage; they must
-not accidentally reuse accumulated coverage as if it came from one input.
+Keeping local and accumulated maps separate is important. Interesting-input
+decisions compare `current_local` against one of the accumulated maps, then
+apply `current_local` into the chosen global map. The accumulated maps must not
+be reused as if they were the coverage produced by one input.
+
+The Rust API names this distinction explicitly with helpers such as
+`set_current_from_tracker`, `current_local`, `total_global`, and
+`valid_global`.
 
 ## Feedback
 
 `RfuzzOutcome` models the interesting-input decision:
 
 - new total mux-toggle coverage is interesting
-- for constrained interfaces, new valid coverage is interesting only when the
-  testcase is valid
+- for constrained interfaces, new valid-only coverage is interesting only when
+  the testcase is valid
 - crashes are always objectives
 
-Timeout state is recorded so a runner can make a policy decision at the ABI
-layer.
+For unconstrained interfaces, valid coverage is treated as the normal coverage
+map and can be applied for every testcase. For constrained interfaces, callers
+should apply `valid_global` only when the runner can prove the testcase is
+valid. Timeout state is recorded so a runner can make a policy decision at the
+ABI layer.
 
 ## Mutations
 
-`mutators.rs` implements the RFuzz/AFL mutation set used by the RFuzz paper:
+`mutators.rs` implements RFuzz/AFL-style mutation building blocks:
 
 - deterministic bitflip `1/1`, `2/1`, `4/1`, `8/8`, `16/8`, `32/8`
-- deterministic arithmetic `8`, `16`, `32`, with deltas `1..=35`
+- deterministic arithmetic `8`, `16`, `32`, matching the RFuzz artifact's
+  `0..35` exclusive delta index (`0..=34`), including no-op children
+- deterministic interesting `8/16/32` value overwrites matching the RFuzz
+  artifact's interesting-value tables and endian handling
 - havoc steps for random bitflip, interesting `8/16/32`, arithmetic
   `8/16/32`, random byte overwrite, delete, clone, and overwrite
 
 Each mutated testcase is normalized through `RfuzzInputLayout` before it is
 returned.
+
+Known mutation fidelity boundary: havoc uses the same RFuzz/AFL operation
+families and RFuzz-style stacked counts (`2, 4, 8, 16, 32, 64, 128`), but it is
+not yet a byte-for-byte port of the original artifact's block-length scheduler
+or exact weighted selection table. That exact scheduling belongs with a future
+runner/scheduler integration and should be tested there.
 
 ## SurgeFuzz Cross-Check
 
@@ -77,12 +103,27 @@ The local RFuzz reproduction mirrors these SurgeFuzz components:
 - fuzzer coverage map: `surgefuzz/fuzzer/include/coverage/rfuzz.hpp`
 - prepare script metadata handling: `surgefuzz/script/prepare/method/rfuzz.py`
 
-The Rust code intentionally stops at the method boundary.  A fully faithful
-LinkNan run still needs a simulator ABI that exposes raw RFuzz pin-stream input
-and mux-select samples to `src/methods/rfuzz/`.
+The Rust code intentionally stops at the method boundary. A fully faithful
+LinkNan/Verilator/VCS run still needs:
+
+- mux-select instrumentation generated from the RTL/FIRRTL pass
+- a pin-stream ABI that maps testcase bytes onto top-level input pins every
+  cycle
+- a per-cycle simulator hook that samples mux-select coverage and feeds
+  `ToggleTracker`
+- reset/memory handling equivalent to RFuzz's `MetaReset` and `SparseMem`
+  transforms
+- a defined source for constrained-interface validity, including how invalid,
+  timeout, and crash states are reported to `RfuzzOutcome`
+- corpus/scheduler integration that decides when to apply total and valid
+  coverage maps and how to persist interesting inputs
 
 ## Current Integration Status
 
-The method logic is unit-tested and ready to be used by future runners.  The
+The method logic is unit-tested and ready to be used by future runners. The
 default `--fuzzing` path still uses the existing LibAFL byte-input harness, so
 it should not be described as a fully faithful RFuzz runner yet.
+
+Recommended README wording, when coordination allows: "RFuzz currently provides
+method-level building blocks under `src/methods/rfuzz/`; a full RFuzz runner
+still requires simulator pin-stream and mux-coverage integration."

@@ -6,35 +6,35 @@ use super::input::RfuzzInputLayout;
 
 const ARITH_MAX: i64 = 35;
 const INTERESTING_8: &[i8] = &[-128, -1, 0, 1, 16, 32, 64, 100, 127];
-const INTERESTING_16: &[i16] = &[
-    -32768, -129, -128, -1, 0, 1, 16, 32, 64, 100, 127, 128, 255, 256, 32767,
-];
+const INTERESTING_16: &[i16] = &[-32768, -129, 128, 255, 256, 512, 1000, 1024, 4096, 32767];
 const INTERESTING_32: &[i32] = &[
     i32::MIN,
+    -100_663_046,
     -32769,
-    -32768,
-    -129,
-    -128,
-    -1,
-    0,
-    1,
-    16,
-    32,
-    64,
-    100,
-    127,
-    128,
-    255,
-    256,
-    32767,
     32768,
+    65535,
+    65536,
+    100_663_045,
     i32::MAX,
+];
+const INTERESTING_8_VALUES: &[i64] = &[-128, -1, 0, 1, 16, 32, 64, 100, 127];
+const INTERESTING_16_VALUES: &[i64] = &[-32768, -129, 128, 255, 256, 512, 1000, 1024, 4096, 32767];
+const INTERESTING_32_VALUES: &[i64] = &[
+    i32::MIN as i64,
+    -100_663_046,
+    -32769,
+    32768,
+    65535,
+    65536,
+    100_663_045,
+    i32::MAX as i64,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DeterministicMutation {
     BitFlip { width_bits: usize, step_bits: usize },
     Arith { width_bytes: usize },
+    Interesting { width_bytes: usize },
 }
 
 pub(crate) fn deterministic_mutations(input: &[u8], layout: &RfuzzInputLayout) -> Vec<Vec<u8>> {
@@ -67,6 +67,9 @@ pub(crate) fn deterministic_mutations(input: &[u8], layout: &RfuzzInputLayout) -
         DeterministicMutation::Arith { width_bytes: 1 },
         DeterministicMutation::Arith { width_bytes: 2 },
         DeterministicMutation::Arith { width_bytes: 4 },
+        DeterministicMutation::Interesting { width_bytes: 1 },
+        DeterministicMutation::Interesting { width_bytes: 2 },
+        DeterministicMutation::Interesting { width_bytes: 4 },
     ] {
         outputs.extend(apply_deterministic_mutation(input, layout, mutation));
     }
@@ -78,12 +81,18 @@ pub(crate) fn apply_deterministic_mutation(
     layout: &RfuzzInputLayout,
     mutation: DeterministicMutation,
 ) -> Vec<Vec<u8>> {
+    let input = layout.normalize(input.to_vec());
     match mutation {
         DeterministicMutation::BitFlip {
             width_bits,
             step_bits,
-        } => bitflip_mutations(input, layout, width_bits, step_bits),
-        DeterministicMutation::Arith { width_bytes } => arith_mutations(input, layout, width_bytes),
+        } => bitflip_mutations(&input, layout, width_bits, step_bits),
+        DeterministicMutation::Arith { width_bytes } => {
+            arith_mutations(&input, layout, width_bytes)
+        }
+        DeterministicMutation::Interesting { width_bytes } => {
+            interesting_mutations(&input, layout, width_bytes)
+        }
     }
 }
 
@@ -116,13 +125,21 @@ fn arith_mutations(input: &[u8], layout: &RfuzzInputLayout, width_bytes: usize) 
 
     let mut outputs = Vec::new();
     for offset in 0..=input.len() - width_bytes {
-        for delta in 1..=ARITH_MAX {
-            for add in [false, true] {
+        for delta in 0..ARITH_MAX {
+            if width_bytes == 1 {
                 let mut le = input.to_vec();
-                mutate_integer(&mut le[offset..offset + width_bytes], delta, add, false);
+                mutate_integer(&mut le[offset..offset + width_bytes], delta, true, false);
                 outputs.push(layout.normalize(le));
 
-                if width_bytes > 1 {
+                let mut le = input.to_vec();
+                mutate_integer(&mut le[offset..offset + width_bytes], delta, false, false);
+                outputs.push(layout.normalize(le));
+            } else {
+                for add in [true, false] {
+                    let mut le = input.to_vec();
+                    mutate_integer(&mut le[offset..offset + width_bytes], delta, add, false);
+                    outputs.push(layout.normalize(le));
+
                     let mut be = input.to_vec();
                     mutate_integer(&mut be[offset..offset + width_bytes], delta, add, true);
                     outputs.push(layout.normalize(be));
@@ -133,13 +150,48 @@ fn arith_mutations(input: &[u8], layout: &RfuzzInputLayout, width_bytes: usize) 
     outputs
 }
 
+fn interesting_mutations(
+    input: &[u8],
+    layout: &RfuzzInputLayout,
+    width_bytes: usize,
+) -> Vec<Vec<u8>> {
+    if input.len() < width_bytes {
+        return Vec::new();
+    }
+
+    let mut outputs = Vec::new();
+    for offset in 0..=input.len() - width_bytes {
+        for value in interesting_values(width_bytes) {
+            let mut le = input.to_vec();
+            write_int(&mut le[offset..offset + width_bytes], *value as u64, false);
+            outputs.push(layout.normalize(le));
+
+            if width_bytes > 1 {
+                let mut be = input.to_vec();
+                write_int(&mut be[offset..offset + width_bytes], *value as u64, true);
+                outputs.push(layout.normalize(be));
+            }
+        }
+    }
+    outputs
+}
+
+fn interesting_values(width_bytes: usize) -> &'static [i64] {
+    match width_bytes {
+        1 => INTERESTING_8_VALUES,
+        2 => INTERESTING_16_VALUES,
+        4 => INTERESTING_32_VALUES,
+        _ => &[],
+    }
+}
+
 pub(crate) fn havoc_mutation<R: Rng + ?Sized>(
     input: &[u8],
     layout: &RfuzzInputLayout,
     rng: &mut R,
 ) -> Vec<u8> {
-    let mut candidate = input.to_vec();
-    let stacked = rng.gen_range(2..=128);
+    let mut candidate = layout.normalize(input.to_vec());
+    let stacked = [2, 4, 8, 16, 32, 64, 128][rng.gen_range(0..7)];
     for _ in 0..stacked {
         apply_havoc_step(&mut candidate, rng);
         if candidate.is_empty() {
@@ -157,7 +209,7 @@ fn apply_havoc_step<R: Rng + ?Sized>(bytes: &mut Vec<u8>, rng: &mut R) {
         }
         1 => {
             let idx = rng.gen_range(0..bytes.len());
-            bytes[idx] = rng.r#gen();
+            bytes[idx] ^= rng.gen_range(1..=u8::MAX);
         }
         2 => overwrite_interesting_8(bytes, rng),
         3 => overwrite_interesting_16(bytes, rng),
@@ -222,7 +274,7 @@ fn overwrite_interesting_16<R: Rng + ?Sized>(bytes: &mut [u8], rng: &mut R) {
     }
     let idx = rng.gen_range(0..=bytes.len() - 2);
     let value = INTERESTING_16[rng.gen_range(0..INTERESTING_16.len())];
-    bytes[idx..idx + 2].copy_from_slice(&value.to_le_bytes());
+    write_int(&mut bytes[idx..idx + 2], value as u64, rng.gen_bool(0.5));
 }
 
 fn overwrite_interesting_32<R: Rng + ?Sized>(bytes: &mut [u8], rng: &mut R) {
@@ -232,7 +284,7 @@ fn overwrite_interesting_32<R: Rng + ?Sized>(bytes: &mut [u8], rng: &mut R) {
     }
     let idx = rng.gen_range(0..=bytes.len() - 4);
     let value = INTERESTING_32[rng.gen_range(0..INTERESTING_32.len())];
-    bytes[idx..idx + 4].copy_from_slice(&value.to_le_bytes());
+    write_int(&mut bytes[idx..idx + 4], value as u64, rng.gen_bool(0.5));
 }
 
 fn random_arith<R: Rng + ?Sized>(bytes: &mut [u8], rng: &mut R, width_bytes: usize) {
@@ -240,7 +292,7 @@ fn random_arith<R: Rng + ?Sized>(bytes: &mut [u8], rng: &mut R, width_bytes: usi
         return;
     }
     let idx = rng.gen_range(0..=bytes.len() - width_bytes);
-    let delta = rng.gen_range(1..=ARITH_MAX);
+    let delta = rng.gen_range(0..ARITH_MAX);
     let add = rng.gen_bool(0.5);
     let big_endian = width_bytes > 1 && rng.gen_bool(0.5);
     mutate_integer(&mut bytes[idx..idx + width_bytes], delta, add, big_endian);
@@ -325,16 +377,92 @@ mod tests {
             DeterministicMutation::Arith { width_bytes: 1 },
         );
         assert_eq!(children.len(), 70);
+        assert_eq!(children[0], vec![10]);
+        assert_eq!(children[1], vec![10]);
+        assert!(children.contains(&vec![10]));
         assert!(children.contains(&vec![9]));
         assert!(children.contains(&vec![11]));
-        assert!(children.contains(&vec![45]));
+        assert!(children.contains(&vec![44]));
+        assert!(!children.contains(&vec![45]));
     }
 
     #[test]
-    fn deterministic_stage_normalizes_children() {
+    fn arith_16_generates_both_endian_orders() {
+        let layout = RfuzzInputLayout::new(16, None);
+        let children = apply_deterministic_mutation(
+            &[0, 1],
+            &layout,
+            DeterministicMutation::Arith { width_bytes: 2 },
+        );
+        assert_eq!(children.len(), 140);
+        assert_eq!(children[0], vec![0, 1]);
+        assert_eq!(children[1], vec![0, 1]);
+        assert!(children.contains(&vec![1, 1]));
+        assert!(children.contains(&vec![0, 2]));
+        assert!(children.contains(&vec![255, 0]));
+        assert!(children.contains(&vec![0, 0]));
+    }
+
+    #[test]
+    fn interesting_values_match_rfuzz_artifact_sets() {
+        let layout = RfuzzInputLayout::new(8, None);
+        let interesting_8 = apply_deterministic_mutation(
+            &[0],
+            &layout,
+            DeterministicMutation::Interesting { width_bytes: 1 },
+        );
+        assert_eq!(interesting_8.len(), 9);
+        assert_eq!(interesting_8[0], vec![0x80]);
+        assert_eq!(interesting_8[8], vec![0x7f]);
+
+        let layout = RfuzzInputLayout::new(16, None);
+        let interesting_16 = apply_deterministic_mutation(
+            &[0, 0],
+            &layout,
+            DeterministicMutation::Interesting { width_bytes: 2 },
+        );
+        assert_eq!(interesting_16.len(), 20);
+        assert!(interesting_16.contains(&vec![0x00, 0x80]));
+        assert!(interesting_16.contains(&vec![0x80, 0x00]));
+        assert!(interesting_16.contains(&vec![0x00, 0x02]));
+        assert!(!interesting_16.contains(&vec![0xff, 0xff]));
+
+        let layout = RfuzzInputLayout::new(32, None);
+        let interesting_32 = apply_deterministic_mutation(
+            &[0, 0, 0, 0],
+            &layout,
+            DeterministicMutation::Interesting { width_bytes: 4 },
+        );
+        assert_eq!(interesting_32.len(), 16);
+        assert!(interesting_32.contains(&vec![0x00, 0x00, 0x00, 0x80]));
+        assert!(interesting_32.contains(&vec![0x80, 0x00, 0x00, 0x00]));
+        assert!(interesting_32.contains(&vec![0xff, 0xff, 0x00, 0x00]));
+        assert!(interesting_32.contains(&vec![0x00, 0x00, 0xff, 0xff]));
+    }
+
+    #[test]
+    fn deterministic_stage_includes_interesting_and_normalizes_children() {
         let layout = RfuzzInputLayout::new(17, None);
         let children = deterministic_mutations(&[0xaa], &layout);
+        assert!(children.contains(&vec![0x80, 0, 0]));
         assert!(children.iter().all(|child| child.len() % 3 == 0));
+    }
+
+    #[test]
+    fn deterministic_mutation_normalizes_seed_before_enumerating() {
+        let layout = RfuzzInputLayout::new(17, None);
+        let children = apply_deterministic_mutation(
+            &[],
+            &layout,
+            DeterministicMutation::BitFlip {
+                width_bits: 8,
+                step_bits: 8,
+            },
+        );
+        assert_eq!(
+            children,
+            vec![vec![0xff, 0, 0], vec![0, 0xff, 0], vec![0, 0, 0xff],]
+        );
     }
 
     #[test]
@@ -345,5 +473,15 @@ mod tests {
         assert!(!child.is_empty());
         assert_eq!(child.len() % 3, 0);
         assert!(child.len() <= 12);
+    }
+
+    #[test]
+    fn havoc_normalizes_empty_input_before_mutating() {
+        let layout = RfuzzInputLayout::new(9, Some(2));
+        let mut rng = StdRng::seed_from_u64(11);
+        let child = havoc_mutation(&[], &layout, &mut rng);
+        assert!(!child.is_empty());
+        assert_eq!(child.len() % 2, 0);
+        assert!(child.len() <= 4);
     }
 }

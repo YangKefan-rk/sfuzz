@@ -44,7 +44,9 @@ impl RfuzzInputLayout {
 
         let cycle_bytes = self.cycle_bytes();
         if input.is_empty() {
-            input.resize(cycle_bytes, 0);
+            if self.max_len() != Some(0) {
+                input.resize(cycle_bytes, 0);
+            }
             return input;
         }
 
@@ -81,8 +83,30 @@ mod tests {
     }
 
     #[test]
+    fn cycle_count_and_padding_use_ceil_cycle_bytes() {
+        let layout = RfuzzInputLayout::new(9, Some(3));
+        assert_eq!(layout.cycle_bytes(), 2);
+        assert_eq!(layout.cycle_count_for_len(0), 0);
+        assert_eq!(layout.cycle_count_for_len(1), 1);
+        assert_eq!(layout.cycle_count_for_len(2), 1);
+        assert_eq!(layout.cycle_count_for_len(3), 2);
+        assert_eq!(
+            layout.normalize(vec![1, 2, 3, 4, 5, 6, 7]),
+            vec![1, 2, 3, 4, 5, 6]
+        );
+    }
+
+    #[test]
     fn truncates_before_padding() {
         let layout = RfuzzInputLayout::new(16, Some(2));
         assert_eq!(layout.normalize(vec![1, 2, 3, 4, 5]), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn zero_max_cycles_remains_empty() {
+        let layout = RfuzzInputLayout::new(9, Some(0));
+        assert_eq!(layout.max_len(), Some(0));
+        assert_eq!(layout.normalize(Vec::new()), Vec::<u8>::new());
+        assert_eq!(layout.normalize(vec![1, 2, 3]), Vec::<u8>::new());
     }
 }
