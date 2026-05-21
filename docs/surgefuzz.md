@@ -195,13 +195,24 @@ The LinkNan CLI preserves a real VCS execution path, but it is deliberately
 strict about provenance:
 
 - no trace: `best_score` and `energy` are left unavailable; VCS log health is
-  not used as a surrogate SurgeFuzz score
+  not used as a surrogate SurgeFuzz score.  These rows are `T0_vcs_smoke`,
+  with `trace_source=no-trace`, `coverage_backend=none`, and
+  `paper_faithful=false`.
 - `--score-trace-dir` with the default `--trace-source offline-csv`: useful for
   checking the scoring/coverage data shape, but `paper_faithful=false`
 - `--trace-is-dev-mock` or `--trace-source dev-mock`: development plumbing only,
-  `paper_faithful=false`
+  `paper_faithful=false`.  Use this for generated profile smoke tests, not for
+  paper data.
 - `--trace-source vcs-native-abi`: may be marked `paper_faithful=true` only when
   the CSV was exported by the real LinkNan/VCS per-cycle SurgeFuzz ABI
+
+For T0 on LinkNan, run at least two real `.sfuz` corpus seeds without
+`--score-trace-dir`; success means the seed is accepted by LinkNan VCS, the
+run reaches the requested cycle cap or normal simulator report, and the output
+records the missing native SurgeFuzz ABI instead of inventing score or ancestor
+coverage from logs.  A dev smoke may additionally run
+`gen-surgefuzz-dev-profile` plus `surgefuzz --score-trace-dir ... --trace-source
+dev-mock`; that row must remain `paper_faithful=false`.
 
 Until the native ABI and profile/rewrite pipeline exist, SurgeFuzz support here
 should be described as method-level building blocks plus artifact-compatible

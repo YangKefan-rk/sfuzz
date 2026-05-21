@@ -168,6 +168,11 @@ paper_faithful
 required_native_abi
 ```
 
+It also records VCS smoke health fields such as `vcs_report_seen`,
+`sfuz_expansion_seen`, `max_cycle_exceeded`, `command_log_path`, `case_dir`,
+and `infrastructure_error`, so T0 reports can distinguish runner health from
+DirectFuzz feedback faithfulness.
+
 `paper_faithful` is `true` only when all DirectFuzz paper feedback inputs are
 declared as real method inputs:
 
@@ -182,3 +187,9 @@ for ABI smoke testing, but it must remain `paper_faithful=false`; similarly,
 `vcs-log` and `dev-mock` must not be treated as paper-faithful DirectFuzz
 results because they do not provide the paper-defined local per-instance
 mux-toggle coverage.
+
+For T0 LinkNan VCS smoke, use `--metadata-source dev-generated` when the
+metadata comes from `gen-directfuzz-dev-metadata`. For a native-file ABI smoke
+backed by hand-written or generated CSV coverage, use
+`--native-coverage-source manual` or `dev-generated`; those runs are valid
+pipeline checks, but their output must still show `paper_faithful=false`.

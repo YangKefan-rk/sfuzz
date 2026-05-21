@@ -14,7 +14,7 @@ from ..common import (
 )
 from ..config import VcsContext
 from ..seeds import collect_seed_paths
-from ..vcs import build_simv_if_needed, run_vcs_seed, scan_vcs_logs
+from ..vcs import build_simv_if_needed, collect_vcs_coverage, common_coverage_backend, run_vcs_seed, scan_vcs_logs
 
 
 DIRECTFUZZ_FIELDS = [
@@ -25,6 +25,13 @@ DIRECTFUZZ_FIELDS = [
     "wall_time_sec",
     "cycles",
     "exit_code",
+    "vcs_report_seen",
+    "sfuz_expansion_seen",
+    "max_cycle_exceeded",
+    "bug_triggered",
+    "bug_reasons",
+    "vcs_cpu_time_sec",
+    "vcs_sim_time_ps",
     "coverage_backend",
     "native_coverage_source",
     "target_covered_bits",
@@ -32,7 +39,18 @@ DIRECTFUZZ_FIELDS = [
     "energy",
     "new_coverage",
     "target_progress",
+    "common_coverage_backend",
+    "common_coverage_name",
+    "common_coverage_value",
+    "common_coverage_source",
+    "common_coverage_status",
     "log_path",
+    "assert_log_path",
+    "command_log_path",
+    "case_dir",
+    "case_name",
+    "timed_out",
+    "infrastructure_error",
     "paper_faithful",
     "required_native_abi",
     "notes",
@@ -278,7 +296,7 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
     rows: list[dict[str, Any]] = []
     for idx, seed in enumerate(seeds):
         case_name = f"{slugify(args.case_prefix)}-{idx:04d}-{slugify(seed.stem)}"
-        result, _case_dir, run_log, assert_log = run_vcs_seed(
+        result, case_dir, run_log, assert_log = run_vcs_seed(
             seed=seed,
             case_name=case_name,
             runs_dir=runs_dir,
@@ -289,6 +307,17 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
             simv_args=args.simv_args,
         )
         info = scan_vcs_logs(run_log, assert_log, ctx.cycles)
+        common_coverage = collect_vcs_coverage(args, case_dir, ctx.sim_dir)
+        common_backend = common_coverage_backend(common_coverage)
+        if result.timed_out and "timeout" not in info.bug_reasons:
+            info.bug_reasons.append("timeout")
+            info.bug_triggered = True
+        infrastructure_error = result.error
+        if result.returncode != 0 and not infrastructure_error and not info.bug_triggered:
+            infrastructure_error = f"command returned non-zero exit code {result.returncode}"
+        if not run_log.is_file() and not infrastructure_error:
+            infrastructure_error = "run.log missing"
+
         paper_faithful = paper_faithful_native_file(args)
         missing_native_abi = required_native_abi(args)
         native_coverage_source = ""
@@ -337,10 +366,28 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
                 "wall_time_sec": round(result.wall_time_sec, 6),
                 "cycles": info.cycles or ctx.cycles,
                 "exit_code": result.returncode,
+                "vcs_report_seen": info.vcs_report_seen,
+                "sfuz_expansion_seen": info.sfuz_expansion_seen,
+                "max_cycle_exceeded": info.max_cycle_exceeded,
+                "bug_triggered": info.bug_triggered,
+                "bug_reasons": info.bug_reasons,
+                "vcs_cpu_time_sec": info.vcs_cpu_time_sec,
+                "vcs_sim_time_ps": info.vcs_sim_time_ps,
                 "coverage_backend": backend,
                 "native_coverage_source": native_coverage_source,
                 **feedback,
+                "common_coverage_backend": common_backend,
+                "common_coverage_name": common_coverage.coverage_name,
+                "common_coverage_value": common_coverage.coverage_value,
+                "common_coverage_source": common_coverage.coverage_source,
+                "common_coverage_status": common_coverage.coverage_status,
                 "log_path": str(run_log),
+                "assert_log_path": str(assert_log),
+                "command_log_path": result.command_log_path,
+                "case_dir": str(case_dir),
+                "case_name": case_name,
+                "timed_out": result.timed_out,
+                "infrastructure_error": infrastructure_error,
                 "paper_faithful": paper_faithful,
                 "required_native_abi": missing_native_abi,
                 "notes": append_notes(notes, {"sfuz_seen": info.sfuz_expansion_seen, "vcs_report": info.vcs_report_seen}),

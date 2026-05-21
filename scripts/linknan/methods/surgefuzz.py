@@ -12,12 +12,18 @@ from ..common import (
 )
 from ..config import VcsContext
 from ..seeds import collect_seed_paths
-from ..vcs import build_simv_if_needed, run_vcs_seed, scan_vcs_logs
+from ..vcs import build_simv_if_needed, collect_vcs_coverage, common_coverage_backend, run_vcs_seed, scan_vcs_logs
 
+
+REQUIRED_SURGE_NATIVE_ABI = "surgefuzz_per_cycle_score_and_ancestor_coverage"
+RUNNER_ABI = "linknan-workload-simv-run"
 
 SURGEFUZZ_FIELDS = [
     "fuzzer",
     "seed",
+    "case_name",
+    "comparison_tier",
+    "runner_abi",
     "annotation_type",
     "target_signal_or_group",
     "best_score",
@@ -25,15 +31,35 @@ SURGEFUZZ_FIELDS = [
     "ancestor_coverage_bits",
     "new_coverage",
     "coverage_backend",
+    "common_coverage_backend",
+    "common_coverage_name",
+    "common_coverage_value",
+    "common_coverage_source",
+    "common_coverage_status",
+    "score_backend",
+    "trace_source",
+    "trace_path",
+    "score_column",
     "wall_time_sec",
     "cycles",
+    "max_cycle_exceeded",
     "exit_code",
+    "vcs_report_seen",
+    "sfuz_expansion_seen",
+    "good_trap_seen",
+    "bug_triggered",
+    "bug_reasons",
+    "vcs_cpu_time_sec",
+    "vcs_sim_time_ps",
     "log_path",
+    "assert_log_path",
+    "command_log_path",
+    "case_dir",
+    "timed_out",
+    "infrastructure_error",
     "paper_faithful",
     "required_native_abi",
     "notes",
-    "score_backend",
-    "trace_source",
     "coverage_total",
     "coverage_covered",
     "coverage_acc",
@@ -83,6 +109,10 @@ def score_series(kind: str, active: bool, direction: str, values: list[int], win
 def load_surge_trace(path: Path, score_column: str) -> tuple[list[int], list[tuple[int, ...]]]:
     with path.open(newline="", encoding="utf-8") as input_file:
         reader = csv.DictReader(input_file)
+        if reader.fieldnames is None:
+            raise ValueError(f"{path}: CSV is missing a header")
+        if score_column not in reader.fieldnames:
+            raise ValueError(f"{path}: CSV is missing score column {score_column!r}")
         rows = list(reader)
     values = [int(row[score_column], 0) for row in rows]
     dep_cols = [name for name in (reader.fieldnames or []) if name.startswith("dependent_")]
@@ -97,12 +127,12 @@ def trace_backend(trace_source: str) -> tuple[str, bool, str]:
         return (
             "dev_mock_score_trace",
             False,
-            "surgefuzz_per_cycle_score_and_ancestor_coverage",
+            REQUIRED_SURGE_NATIVE_ABI,
         )
     return (
         "surgefuzz_offline_trace_csv",
         False,
-        "surgefuzz_vcs_native_coverage_export",
+        REQUIRED_SURGE_NATIVE_ABI,
     )
 
 
@@ -114,12 +144,15 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     seeds = collect_seed_paths(args.seed, args.seed_list, args.seed_dir, work_dir, args.limit, True, "surgefuzz-smoke")
+    if args.trace_is_dev_mock and args.trace_source == "vcs-native-abi":
+        raise ValueError("--trace-is-dev-mock conflicts with --trace-source vcs-native-abi")
     build_simv_if_needed(args, ctx, work_dir)
     annotation = parse_annotation(args.annotation_type)
+    seen_ancestor_states: set[tuple[int, ...]] = set()
     rows: list[dict[str, Any]] = []
     for idx, seed in enumerate(seeds):
         case_name = f"{slugify(args.case_prefix)}-{idx:03d}-{slugify(seed.stem)}"
-        result, _case_dir, run_log, assert_log = run_vcs_seed(
+        result, case_dir, run_log, assert_log = run_vcs_seed(
             seed=seed,
             case_name=case_name,
             runs_dir=runs_dir,
@@ -130,6 +163,18 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
             simv_args=args.simv_args,
         )
         info = scan_vcs_logs(run_log, assert_log, ctx.cycles)
+        common_coverage = collect_vcs_coverage(args, case_dir, ctx.sim_dir)
+        common_backend = common_coverage_backend(common_coverage)
+        if result.timed_out and "timeout" not in info.bug_reasons:
+            info.bug_reasons.append("timeout")
+            info.bug_triggered = True
+
+        infrastructure_error = result.error
+        if result.returncode != 0 and not infrastructure_error and not info.bug_triggered:
+            infrastructure_error = f"command returned non-zero exit code {result.returncode}"
+        if not run_log.is_file() and not infrastructure_error:
+            infrastructure_error = "run.log missing"
+
         trace = None
         if args.score_trace_dir:
             candidate = args.score_trace_dir.expanduser() / f"{seed.stem}.csv"
@@ -141,9 +186,15 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
             best_score = max(scores, default=0)
             energy = float(best_score * best_score)
             ancestor_states = {row for row in dependents}
+            new_ancestor_states = ancestor_states - seen_ancestor_states
+            seen_ancestor_states.update(ancestor_states)
+            ancestor_coverage_bits: int | str = len(ancestor_states)
+            new_coverage: int | str = len(new_ancestor_states)
             trace_source = "dev-mock" if args.trace_is_dev_mock else args.trace_source
             backend, paper_faithful, required_native_abi = trace_backend(trace_source)
             score_backend = backend
+            trace_path = str(trace)
+            comparison_tier = "T2_paper_faithful_native_feedback" if paper_faithful else "T0_trace_smoke"
             notes = f"真实 LinkNan VCS 已运行;trace={trace}"
             if trace_source != "vcs-native-abi":
                 notes += (
@@ -153,12 +204,15 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
         else:
             best_score = ""
             energy = ""
-            ancestor_states = set()
+            ancestor_coverage_bits = ""
+            new_coverage = ""
             backend = "none"
             score_backend = "unavailable"
-            trace_source = ""
+            trace_source = "no-trace"
+            trace_path = ""
+            comparison_tier = "T0_vcs_smoke"
             paper_faithful = False
-            required_native_abi = "surgefuzz_per_cycle_score_and_ancestor_coverage"
+            required_native_abi = REQUIRED_SURGE_NATIVE_ABI
             notes = (
                 "真实 LinkNan VCS 已运行;"
                 "未发现 coverage_target/dependent_* per-cycle trace;"
@@ -169,26 +223,54 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
             {
                 "fuzzer": "surgefuzz",
                 "seed": str(seed),
+                "case_name": case_name,
+                "comparison_tier": comparison_tier,
+                "runner_abi": RUNNER_ABI,
                 "annotation_type": args.annotation_type,
                 "target_signal_or_group": args.target_signal_or_group,
                 "best_score": best_score,
                 "energy": energy,
-                "ancestor_coverage_bits": len(ancestor_states),
-                "new_coverage": len(ancestor_states),
+                "ancestor_coverage_bits": ancestor_coverage_bits,
+                "new_coverage": new_coverage,
                 "coverage_backend": backend,
+                "common_coverage_backend": common_backend,
+                "common_coverage_name": common_coverage.coverage_name,
+                "common_coverage_value": common_coverage.coverage_value,
+                "common_coverage_source": common_coverage.coverage_source,
+                "common_coverage_status": common_coverage.coverage_status,
+                "score_backend": score_backend,
+                "trace_source": trace_source,
+                "trace_path": trace_path,
+                "score_column": args.score_column,
                 "wall_time_sec": round(result.wall_time_sec, 6),
                 "cycles": info.cycles or ctx.cycles,
+                "max_cycle_exceeded": info.max_cycle_exceeded,
                 "exit_code": result.returncode,
+                "vcs_report_seen": info.vcs_report_seen,
+                "sfuz_expansion_seen": info.sfuz_expansion_seen,
+                "good_trap_seen": info.good_trap_seen,
+                "bug_triggered": info.bug_triggered,
+                "bug_reasons": info.bug_reasons,
+                "vcs_cpu_time_sec": info.vcs_cpu_time_sec,
+                "vcs_sim_time_ps": info.vcs_sim_time_ps,
                 "log_path": str(run_log),
+                "assert_log_path": str(assert_log),
+                "command_log_path": result.command_log_path,
+                "case_dir": str(case_dir),
+                "timed_out": result.timed_out,
+                "infrastructure_error": infrastructure_error,
                 "paper_faithful": paper_faithful,
                 "required_native_abi": required_native_abi,
                 "notes": append_notes(notes, {"sfuz_seen": info.sfuz_expansion_seen, "vcs_report": info.vcs_report_seen}),
-                "score_backend": score_backend,
-                "trace_source": trace_source,
                 "coverage_total": "",
                 "coverage_covered": "",
                 "coverage_acc": "",
             }
+        )
+        print(
+            f"[{idx + 1}/{len(seeds)}] surgefuzz exit={result.returncode} "
+            f"trace_source={trace_source} log={run_log}",
+            flush=True,
         )
     write_table(
         rows,

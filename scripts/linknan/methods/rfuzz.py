@@ -12,7 +12,13 @@ from ..common import (
 )
 from ..config import VcsContext
 from ..seeds import seed_from_raw_hex
-from ..vcs import build_simv_if_needed, collect_vcs_coverage, run_vcs_seed, scan_vcs_logs
+from ..vcs import (
+    build_simv_if_needed,
+    collect_vcs_coverage,
+    common_coverage_backend,
+    run_vcs_seed,
+    scan_vcs_logs,
+)
 
 
 RFUZZ_FIELDS = [
@@ -20,6 +26,7 @@ RFUZZ_FIELDS = [
     "seed",
     "seed_path",
     "runner_abi",
+    "requested_input_model",
     "input_model",
     "toggle_bitmap_source",
     "valid_source",
@@ -27,14 +34,29 @@ RFUZZ_FIELDS = [
     "wall_time_sec",
     "cycles",
     "exit_code",
+    "vcs_report_seen",
+    "sfuz_expansion_seen",
+    "max_cycle_exceeded",
+    "bug_triggered",
+    "bug_reasons",
     "coverage_backend",
     "coverage_value",
     "covered",
     "total",
     "toggle_bits",
+    "common_coverage_backend",
+    "common_coverage_name",
+    "common_coverage_value",
+    "common_coverage_source",
+    "common_coverage_status",
     "vcs_cpu_time_sec",
     "vcs_sim_time_ps",
     "log_path",
+    "assert_log_path",
+    "command_log_path",
+    "case_dir",
+    "timed_out",
+    "infrastructure_error",
     "paper_faithful",
     "required_native_abi",
     "notes",
@@ -104,9 +126,9 @@ def rfuzz_valid_value(args: Any) -> bool | str:
     return parsed if parsed is not None else "unknown"
 
 
-def required_native_abi(args: Any, has_native_bitmap: bool) -> list[str]:
+def required_native_abi(args: Any, input_model: str, has_native_bitmap: bool) -> list[str]:
     missing: list[str] = [MISSING_NATIVE_RUNNER]
-    if args.rfuzz_input_model != "raw-pin-stream":
+    if input_model != "raw-pin-stream":
         missing.append(MISSING_RAW_PIN_STREAM)
     if not has_native_bitmap:
         missing.append(MISSING_MUX_TOGGLE)
@@ -128,14 +150,14 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
     runs_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    input_model = args.rfuzz_input_model
+    requested_input_model = args.rfuzz_input_model
     if args.seed:
         seed = Path(args.seed[0]).expanduser().resolve()
         raw = seed.read_bytes()
-        if input_model == "sfuz-core0-payload":
-            input_model = "sfuz-seed" if seed.suffix == ".sfuz" else "linknan-workload-file"
+        input_model = "sfuz-seed" if seed.suffix == ".sfuz" else "linknan-workload-file"
     else:
         seed, raw = seed_from_raw_hex(args.raw_hex, work_dir, args.case_name)
+        input_model = "sfuz-core0-payload"
     build_simv_if_needed(args, ctx, work_dir)
 
     result, case_dir, run_log, assert_log = run_vcs_seed(
@@ -149,6 +171,17 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
         simv_args=args.simv_args,
     )
     info = scan_vcs_logs(run_log, assert_log, ctx.cycles)
+    if result.timed_out and "timeout" not in info.bug_reasons:
+        info.bug_reasons.append("timeout")
+        info.bug_triggered = True
+    infrastructure_error = result.error
+    if result.returncode != 0 and not infrastructure_error and not info.bug_triggered:
+        infrastructure_error = f"command returned non-zero exit code {result.returncode}"
+    if not run_log.is_file() and not infrastructure_error:
+        infrastructure_error = "run.log missing"
+
+    common_coverage = collect_vcs_coverage(args, case_dir, ctx.sim_dir)
+    common_backend = common_coverage_backend(common_coverage)
     runner_abi = "linknan-workload-simv-run"
     coverage_backend = "vcs_log_only"
     coverage_value = covered = total = toggle_bits = ""
@@ -181,13 +214,14 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
         total = parsed["total"]
         notes.append(f"annotated_files={parsed['files']}")
     elif args.cov:
-        cov = collect_vcs_coverage(args, case_dir, ctx.sim_dir)
-        coverage_backend = cov.coverage_name or "vcs_builtin_coverage"
-        coverage_value = cov.coverage_value
-        notes.append(cov.coverage_status)
+        coverage_backend = common_coverage.coverage_name or "vcs_builtin_coverage"
+        coverage_value = common_coverage.coverage_value
+        notes.append(common_coverage.coverage_status)
 
-    missing_native_abi = required_native_abi(args, has_native_bitmap)
+    missing_native_abi = required_native_abi(args, input_model, has_native_bitmap)
     paper_faithful = not missing_native_abi
+    if requested_input_model != input_model:
+        notes.append(f"requested_input_model={requested_input_model}; actual_input_model={input_model}")
     if input_model == "sfuz-core0-payload":
         notes.append("LinkNan 入口使用生成的 SFUZ core0 payload，不是 RFuzz raw pin-stream")
     elif input_model == "sfuz-seed":
@@ -197,6 +231,8 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
     notes.append("当前 scripts/linknan RFuzz runner 仍通过 xmake simv-run --workload 执行，缺少 native RFuzz VCS runner ABI")
     if coverage_backend in {"vcs_log_only", "vcs_builtin_coverage", "firrtl_annotated_diagnostic"}:
         notes.append("该 coverage_backend 只能诊断 VCS 健康或普通覆盖，不能充当 RFuzz mux-select feedback")
+    if common_backend != "none":
+        notes.append("common_coverage_* 只用于 T1 共同后端评价，不是 RFuzz paper-native feedback")
     if args.rfuzz_toggle_bitmap and not has_native_bitmap:
         notes.append("外部 bitmap 未声明为 VCS native RFuzz ABI 导出，不能作为 paper-faithful 结果")
 
@@ -205,6 +241,7 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
         "seed": hashlib.sha256(raw).hexdigest()[:16],
         "seed_path": str(seed),
         "runner_abi": runner_abi,
+        "requested_input_model": requested_input_model,
         "input_model": input_model,
         "toggle_bitmap_source": toggle_bitmap_source,
         "valid_source": args.rfuzz_valid_source,
@@ -212,14 +249,29 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
         "wall_time_sec": round(result.wall_time_sec, 6),
         "cycles": info.cycles or ctx.cycles,
         "exit_code": result.returncode,
+        "vcs_report_seen": info.vcs_report_seen,
+        "sfuz_expansion_seen": info.sfuz_expansion_seen,
+        "max_cycle_exceeded": info.max_cycle_exceeded,
+        "bug_triggered": info.bug_triggered,
+        "bug_reasons": info.bug_reasons,
         "coverage_backend": coverage_backend,
         "coverage_value": coverage_value,
         "covered": covered,
         "total": total,
         "toggle_bits": toggle_bits,
+        "common_coverage_backend": common_backend,
+        "common_coverage_name": common_coverage.coverage_name,
+        "common_coverage_value": common_coverage.coverage_value,
+        "common_coverage_source": common_coverage.coverage_source,
+        "common_coverage_status": common_coverage.coverage_status,
         "vcs_cpu_time_sec": info.vcs_cpu_time_sec,
         "vcs_sim_time_ps": info.vcs_sim_time_ps,
         "log_path": str(run_log),
+        "assert_log_path": str(assert_log),
+        "command_log_path": result.command_log_path,
+        "case_dir": str(case_dir),
+        "timed_out": result.timed_out,
+        "infrastructure_error": infrastructure_error,
         "paper_faithful": paper_faithful,
         "required_native_abi": ";".join(missing_native_abi),
         "notes": append_notes(notes, {"sfuz_seen": info.sfuz_expansion_seen, "vcs_report": info.vcs_report_seen}),

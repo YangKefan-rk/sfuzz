@@ -73,6 +73,14 @@ def read_seed_metadata_name(seed: Path) -> str:
         return seed.stem
 
 
+def seed_category(seed: Path, seed_name: str | None = None) -> str:
+    name = (seed_name or seed.stem).strip() or seed.stem
+    parts = name.split("-")
+    if len(parts) >= 2:
+        return f"{parts[0]}-{parts[1]}"
+    return parts[0] if parts else seed.stem
+
+
 def make_sfuz_seed(output: Path, core0_hex: str, name: str, tags: Iterable[str] = ()) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     command = [

@@ -29,6 +29,14 @@ def add_common_vcs_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--rebuild-comp", action="store_true", help="force VCS recompilation when building")
     parser.add_argument("--cov", action="store_true", help="pass --cov to build/run")
     parser.add_argument("--run-urg", action="store_true", help="try to parse VCS .vdb with urg")
+    parser.add_argument(
+        "--firrtl-cov",
+        dest="firrtl_cov",
+        help=(
+            "enable SFuzz FIRRTL common coverage export, e.g. FIRRTL.mux; "
+            "requires an instrumented LinkNan build with firrtl-cover.h/.cpp"
+        ),
+    )
     parser.add_argument("--simv-args", help="raw arguments passed to simv through xmake --simv_args")
     parser.add_argument("--output-json", type=Path)
     parser.add_argument("--output-csv", type=Path)
@@ -80,7 +88,10 @@ def main() -> int:
         "--rfuzz-input-model",
         choices=["sfuz-core0-payload", "raw-pin-stream"],
         default="sfuz-core0-payload",
-        help="input ABI used by this run; only raw-pin-stream can be RFuzz paper-faithful",
+        help=(
+            "requested RFuzz input ABI label; T0 still runs through LinkNan --workload, "
+            "so output input_model records the actual path"
+        ),
     )
     rfuzz.add_argument("--rfuzz-toggle-bitmap", type=Path, help="RFuzz mux-toggle bitmap exported for this testcase")
     rfuzz.add_argument(
@@ -127,7 +138,10 @@ def main() -> int:
         "--metadata-source",
         choices=["static-analysis", "dev-generated", "manual"],
         default="manual",
-        help="provenance of the DirectFuzz instance-distance metadata; only static-analysis can be paper-faithful",
+        help=(
+            "provenance of the DirectFuzz instance-distance metadata; "
+            "dev-generated/manual keep paper_faithful=false"
+        ),
     )
     direct.add_argument(
         "--coverage-backend",
@@ -144,7 +158,7 @@ def main() -> int:
         "--native-coverage-source",
         choices=["vcs-native-abi", "manual", "dev-generated"],
         default="manual",
-        help="provenance of --native-coverage; only vcs-native-abi can be paper-faithful",
+        help="provenance of --native-coverage; manual/dev-generated keep paper_faithful=false",
     )
     direct.set_defaults(case_prefix="directfuzz", handler=run_directfuzz)
 
@@ -161,14 +175,28 @@ def main() -> int:
     add_seed_batch_args(surge)
     surge.add_argument("--annotation-type", default="SURGE_FREQ=1")
     surge.add_argument("--target-signal-or-group", default="MSHR")
-    surge.add_argument("--score-trace-dir", type=Path, help="directory containing <seed-stem>.csv traces")
+    surge.add_argument(
+        "--score-trace-dir",
+        type=Path,
+        help=(
+            "directory containing <seed-stem>.csv traces; omit for T0 real-VCS "
+            "no-trace smoke where SurgeFuzz score fields stay unavailable"
+        ),
+    )
     surge.add_argument("--score-column", default="coverage_target")
-    surge.add_argument("--trace-is-dev-mock", action="store_true")
+    surge.add_argument(
+        "--trace-is-dev-mock",
+        action="store_true",
+        help="legacy alias for --trace-source dev-mock; never paper-faithful",
+    )
     surge.add_argument(
         "--trace-source",
         choices=["vcs-native-abi", "offline-csv", "dev-mock"],
         default="offline-csv",
-        help="provenance of --score-trace-dir; only vcs-native-abi can be paper-faithful",
+        help=(
+            "provenance of --score-trace-dir; use dev-mock for generated smoke "
+            "traces, and only vcs-native-abi can be paper-faithful"
+        ),
     )
     surge.add_argument("--freq-window", type=int, default=256)
     surge.set_defaults(case_prefix="surgefuzz", handler=run_surgefuzz)

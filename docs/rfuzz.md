@@ -120,8 +120,10 @@ The RFuzz CSV now records these boundaries explicitly:
 
 ```text
 runner_abi              linknan-workload-simv-run today
-input_model             sfuz-core0-payload, sfuz-seed, linknan-workload-file,
-                        or requested raw-pin-stream
+requested_input_model   requested CLI label, for example sfuz-core0-payload
+                        or raw-pin-stream
+input_model             actual VCS path used today: sfuz-core0-payload,
+                        sfuz-seed, or linknan-workload-file
 toggle_bitmap_source    absent, manual, dev-generated, or vcs-native-abi
 valid_source            unknown, unconstrained, manual, or vcs-native-abi
 paper_faithful          true only when no required RFuzz ABI is missing
@@ -129,11 +131,14 @@ required_native_abi     semicolon-separated missing ABI pieces
 ```
 
 Because the current runner is still the LinkNan SFUZ workload path,
-`required_native_abi` includes `rfuzz_vcs_native_runner_abi`. Supplying a manual
-bitmap with `--rfuzz-toggle-bitmap` is useful for pipeline diagnostics, but it
-does not make the row paper-faithful. VCS built-in line/toggle coverage,
-annotated-source counts, VCS logs, run success, and cycle counts are likewise
-diagnostic only and must not be reported as RFuzz paper coverage.
+`required_native_abi` includes `rfuzz_vcs_native_runner_abi` and
+`rfuzz_raw_top_pin_stream_input_abi` even if `--rfuzz-input-model
+raw-pin-stream` is requested; the output `input_model` records the actual path
+that reached VCS. Supplying a manual bitmap with `--rfuzz-toggle-bitmap` is
+useful for pipeline diagnostics, but it does not make the row paper-faithful.
+VCS built-in line/toggle coverage, annotated-source counts, VCS logs, run
+success, and cycle counts are likewise diagnostic only and must not be reported
+as RFuzz paper coverage.
 
 ## SurgeFuzz Cross-Check
 

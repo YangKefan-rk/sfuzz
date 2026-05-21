@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +19,11 @@ VCS_REPORT_TOKEN = "V C S   S i m u l a t i o n   R e p o r t"
 VCS_REPORT_NORMALIZED = "VCSSimulationReport"
 SFUZ_EXPANSION_TOKEN = "SFuzz structured seed detected. Expanding image into RAM"
 GOOD_TRAP_TOKEN = "HIT GOOD TRAP"
+FINISH_TOKEN = "$finish"
+SFUZZ_FIRRTL_COV_ENV = "SFUZZ_FIRRTL_COV"
+SFUZZ_FIRRTL_COV_OUT_ENV = "SFUZZ_FIRRTL_COV_OUT"
+SFUZZ_FIRRTL_COV_PREFIX = "sfuzz_firrtl_coverage"
+SFUZZ_FIRRTL_GENERATOR = Path("scripts/linknan/sfuzz_firrtl_cov.py")
 
 BUG_PATTERNS = [
     ("hit_bad_trap", re.compile(r"HIT BAD TRAP", re.IGNORECASE)),
@@ -48,6 +56,7 @@ class VcsLogInfo:
     vcs_report_seen: bool = False
     sfuz_expansion_seen: bool = False
     good_trap_seen: bool = False
+    finish_seen: bool = False
     bug_triggered: bool = False
     bug_reasons: list[str] = field(default_factory=list)
     max_cycle_exceeded: bool = False
@@ -70,6 +79,79 @@ def num_cores_to_noc(num_cores: str) -> str:
     if num_cores not in table:
         raise ValueError(f"unsupported NUM_CORES for LinkNan xmake: {num_cores}")
     return table[num_cores]
+
+
+def normalize_firrtl_coverage_name(value: str | None) -> str:
+    text = (value or "").strip()
+    if not text:
+        return ""
+    if text.lower() == "firrtl" or text.lower().startswith("firrtl."):
+        return text
+    return f"FIRRTL.{text}"
+
+
+def requested_firrtl_coverage(args: Any) -> str:
+    return normalize_firrtl_coverage_name(
+        getattr(args, "firrtl_cov", None)
+        or getattr(args, "sfuzz_firrtl_cov", None)
+        or os.environ.get(SFUZZ_FIRRTL_COV_ENV)
+    )
+
+
+def simv_cmd_file(sim_dir: Path) -> Path:
+    return sim_dir / "simv" / "comp" / "vcs_cmd.sh"
+
+
+def simv_compiled_with_firrtl_coverage(sim_dir: Path) -> bool | None:
+    cmd_file = simv_cmd_file(sim_dir)
+    if not cmd_file.is_file():
+        return None
+    text = cmd_file.read_text(encoding="utf-8", errors="replace")
+    csrc_file = sim_dir / "simv" / "comp" / "csrc.f"
+    if csrc_file.is_file():
+        text += "\n" + csrc_file.read_text(encoding="utf-8", errors="replace")
+    return "-DFIRRTL_COVER" in text and "sfuzz_firrtl_cov_export.cpp" in text
+
+
+def ensure_firrtl_coverage_artifacts(firrtl_cov: str, ctx: VcsContext, work_dir: Path, timeout_sec: int = 0) -> None:
+    generated_src = ctx.build_dir / "generated-src"
+    required = [
+        generated_src / "firrtl-cover.h",
+        generated_src / "firrtl-cover.cpp",
+        ctx.build_dir / "rtl" / "verification" / "cover" / "sfuzz_firrtl_cover_bind.sv",
+    ]
+
+    generator = ctx.linknan_root / SFUZZ_FIRRTL_GENERATOR
+    if not generator.is_file():
+        missing = ", ".join(str(path) for path in required if not path.is_file())
+        raise RuntimeError(
+            f"missing SFuzz FIRRTL coverage artifacts ({missing}) and generator is not available: {generator}"
+        )
+    rtl_dir = ctx.build_dir / "rtl"
+    if not rtl_dir.is_dir():
+        raise RuntimeError(f"cannot generate SFuzz FIRRTL coverage artifacts; RTL directory does not exist: {rtl_dir}")
+
+    command = [
+        sys.executable,
+        str(generator),
+        str(rtl_dir),
+        "--generated-src-dir",
+        str(generated_src),
+        "--groups",
+        firrtl_cov,
+    ]
+    result = run_command(
+        command,
+        ctx.linknan_root,
+        work_dir / "logs" / "generate_firrtl_coverage.log",
+        timeout_sec,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"SFuzz FIRRTL coverage generation failed with code {result.returncode}; see {result.command_log_path}"
+        )
+    for path in required:
+        require_file(path)
 
 
 def run_command(command: list[str], cwd: Path, log_path: Path, timeout_sec: int = 0) -> CommandResult:
@@ -116,15 +198,28 @@ def run_command(command: list[str], cwd: Path, log_path: Path, timeout_sec: int 
 def build_simv_if_needed(args: Any, ctx: VcsContext, work_dir: Path) -> None:
     comp_dir = ctx.sim_dir / "simv" / "comp"
     simv = comp_dir / "simv"
+    firrtl_cov = requested_firrtl_coverage(args)
     if getattr(args, "skip_build", False):
         require_file(simv)
+        if firrtl_cov and simv_compiled_with_firrtl_coverage(ctx.sim_dir) is not True:
+            raise RuntimeError(
+                f"existing simv was not built with SFuzz FIRRTL coverage; rebuild with {SFUZZ_FIRRTL_COV_ENV}={firrtl_cov}"
+            )
         return
-    if simv.is_file() and not getattr(args, "build", False) and not getattr(args, "rebuild_comp", False):
+    needs_firrtl_rebuild = firrtl_cov and simv_compiled_with_firrtl_coverage(ctx.sim_dir) is not True
+    if (
+        simv.is_file()
+        and not getattr(args, "build", False)
+        and not getattr(args, "rebuild_comp", False)
+        and not needs_firrtl_rebuild
+    ):
         return
     if shutil.which("xmake") is None:
         raise FileNotFoundError("missing required tool: xmake")
     if shutil.which("vcs") is None:
         raise FileNotFoundError("missing required tool: vcs")
+    if firrtl_cov:
+        ensure_firrtl_coverage_artifacts(firrtl_cov, ctx, work_dir, getattr(args, "timeout_sec", 0))
 
     command = [
         "xmake",
@@ -146,6 +241,8 @@ def build_simv_if_needed(args: Any, ctx: VcsContext, work_dir: Path) -> None:
         command.append("--no_initreg_random")
     if getattr(args, "cov", False):
         command.append("--cov")
+    if firrtl_cov:
+        command.append(f"--firrtl_cov={firrtl_cov}")
     if getattr(args, "rebuild_comp", False):
         command.append("--rebuild_comp")
 
@@ -210,6 +307,8 @@ def scan_vcs_logs(run_log: Path, assert_log: Path, requested_cycles: int) -> Vcs
             info.sfuz_expansion_seen = True
         if GOOD_TRAP_TOKEN in line:
             info.good_trap_seen = True
+        if FINISH_TOKEN in line:
+            info.finish_seen = True
         for reason, pattern in BUG_PATTERNS:
             if pattern.search(line) and reason not in info.bug_reasons:
                 info.bug_reasons.append(reason)
@@ -247,7 +346,7 @@ def find_vdb_dirs(case_dir: Path, sim_dir: Path) -> list[Path]:
 
 
 def simv_compiled_with_coverage(sim_dir: Path) -> bool | None:
-    cmd_file = sim_dir / "simv" / "comp" / "vcs_cmd.sh"
+    cmd_file = simv_cmd_file(sim_dir)
     if not cmd_file.is_file():
         return None
     text = cmd_file.read_text(encoding="utf-8", errors="replace")
@@ -272,7 +371,107 @@ def parse_coverage_from_text(path: Path) -> CoverageResult | None:
     return None
 
 
+def sfuzz_firrtl_summary_candidates(case_dir: Path) -> list[Path]:
+    candidates = [case_dir / f"{SFUZZ_FIRRTL_COV_PREFIX}.json"]
+    out_prefix = os.environ.get(SFUZZ_FIRRTL_COV_OUT_ENV)
+    if out_prefix:
+        out_summary = Path(f"{out_prefix}.json").expanduser()
+        if not out_summary.is_absolute():
+            out_summary = case_dir / out_summary
+        candidates.append(out_summary)
+    if case_dir.exists():
+        candidates.extend(sorted(case_dir.rglob(f"{SFUZZ_FIRRTL_COV_PREFIX}.json")))
+
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve() if candidate.exists() else candidate.absolute()
+        if resolved not in seen:
+            unique.append(candidate)
+            seen.add(resolved)
+    return unique
+
+
+def parse_sfuzz_firrtl_coverage(path: Path) -> CoverageResult | None:
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return CoverageResult(
+            coverage_name="sfuzz_firrtl",
+            coverage_source=str(path),
+            coverage_status=f"unavailable: invalid SFuzz FIRRTL coverage json: {exc}",
+        )
+
+    if payload.get("backend") != "sfuzz_firrtl":
+        return None
+
+    try:
+        total = int(payload.get("total", 0))
+        covered = int(payload.get("covered", 0))
+        percent = float(payload.get("coverage_percent", 0.0))
+    except (TypeError, ValueError) as exc:
+        return CoverageResult(
+            coverage_name="sfuzz_firrtl",
+            coverage_source=str(path),
+            coverage_status=f"unavailable: invalid SFuzz FIRRTL numeric fields: {exc}",
+        )
+
+    bitmap_raw = str(payload.get("bitmap_file") or f"{SFUZZ_FIRRTL_COV_PREFIX}.bin")
+    bitmap_path = Path(bitmap_raw)
+    if not bitmap_path.is_absolute():
+        bitmap_path = path.parent / bitmap_path
+
+    status = "parsed_sfuzz_firrtl"
+    source = str(path)
+    if bitmap_path.is_file():
+        source = f"{path};{bitmap_path}"
+        bitmap_size = bitmap_path.stat().st_size
+        if total and bitmap_size != total:
+            status += f": bitmap_size={bitmap_size} total={total}"
+    else:
+        status += ": bitmap_missing"
+
+    group = str(payload.get("group") or payload.get("coverage_name") or "FIRRTL")
+    return CoverageResult(
+        coverage_name=f"sfuzz_firrtl.{group}",
+        coverage_value=f"{percent:.6f}",
+        coverage_source=source,
+        coverage_status=f"{status}: covered={covered} total={total}",
+    )
+
+
+def collect_sfuzz_firrtl_coverage(case_dir: Path) -> CoverageResult | None:
+    for candidate in sfuzz_firrtl_summary_candidates(case_dir):
+        parsed = parse_sfuzz_firrtl_coverage(candidate)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def common_coverage_backend(coverage: CoverageResult) -> str:
+    if coverage.coverage_name.startswith("sfuzz_firrtl."):
+        return "sfuzz_firrtl"
+    if coverage.coverage_name == "vcs_vdb" or coverage.coverage_status.startswith("parsed"):
+        return "vcs_builtin"
+    return "none"
+
+
 def collect_vcs_coverage(args: Any, case_dir: Path, sim_dir: Path) -> CoverageResult:
+    firrtl_coverage = collect_sfuzz_firrtl_coverage(case_dir)
+    if firrtl_coverage is not None:
+        return firrtl_coverage
+    firrtl_request = requested_firrtl_coverage(args)
+    if firrtl_request:
+        return CoverageResult(
+            coverage_name="sfuzz_firrtl",
+            coverage_status=(
+                f"unavailable: no SFuzz FIRRTL coverage json found for {firrtl_request}; "
+                "check that simv was built with --firrtl_cov and the seed run reached coverage export"
+            ),
+        )
+
     vdb_dirs = find_vdb_dirs(case_dir, sim_dir)
     if not vdb_dirs:
         status = "unavailable: no VCS .vdb found"

@@ -103,6 +103,26 @@ index,group,module_pattern,event_name,bucket,width,kind,priority,notes
 - interrupt plan 在 SFUZ 文件和 Rust codec 中存在，但 LinkNan loader 当前只跳过事件，
   未把 timer/software/external/debug interrupt 注入 VCS/Verilator testbench。
 
+#### SFuzz T0 runner 状态补充（2026-05-21）
+
+`scripts/linknan/run.py sfuzz --skip-build` 已用真实 corpus `.sfuz` seeds 在现有
+LinkNan VCS `sim/simv/comp/simv` 上跑通 T0 smoke。覆盖类别包括 `rv64ui-p`、
+`rv64um-p`、`rv64ua-p`、`rv64mi-p`、`rv64si-p`，每个 testcase 都能看到
+`SFuzz structured seed detected`、VCS simulation report、空 `assert.log` 和
+`exit_code=0`。当前这批 seed 在 2000 cycle 配置下均由 max-cycle guard 正常结束，
+因此 runner 以 `run_outcome=max_cycle_reached`、`max_cycle_exceeded=true` 记录；
+这表示 T0 稳定跑满预算，不等价于 DUT bug。
+
+SFuzz T0 结果表补充了 `seed_category`、`run_outcome`、`t0_smoke_pass`、
+`vcs_cpu_time_sec`、`vcs_sim_time_ps` 等字段。`t0_smoke_pass=true` 的含义限定为：
+VCS 命令返回 0、SFUZ seed 被 LinkNan loader 展开、VCS report 出现、未命中已知
+bug pattern、无 runner infrastructure error。现有 simv 编译命令没有 `-cm`，
+因此本次结果仍是 `comparison_tier=T0_smoke`、`coverage_backend=none`。T1 应使用
+`--firrtl-cov FIRRTL.all` 或 `SFUZZ_FIRRTL_COV=FIRRTL.all`，并要求 LinkNan 生成目录中
+已经存在 `generated-src/firrtl-cover.h/.cpp`；runner 解析到
+`common_coverage_backend=sfuzz_firrtl` 后，才能进入 `T1_common_backend`。T2 则仍需要
+SFuzz 自己的论文原生 coverage/objective 闭环。
+
 ### LinkNan/Chisel 层
 
 适合在源代码附近加 `cover` 或把事件接入统一 bundle，但当前 SFuzz 仓库不应直接改
@@ -141,8 +161,8 @@ SFUZZ.multicore.L2.probe_cross_core
 
 VCS 路径建议两层：
 
-- **内建覆盖/urg**：可作为 `T1_common_backend`，用于所有方法公平比较，但不能叫
-  SFuzz native 微结构覆盖。
+- **内建覆盖/urg**：只能作为工程诊断或辅助表；当前 T1 主指标固定为
+  `common_coverage_backend=sfuzz_firrtl`，不把 VCS `.vdb`/`urg` 当作共同分母。
 - **DPI/PLI 导出 bitmap**：在 testbench 每周期调用 `sfuzz_cover_hit(index)` 或把
   Verilog coverage vector 暴露给 C++，每个 seed 开始清零，结束时交给 SFuzz。
 
@@ -154,8 +174,8 @@ VCS sim loop per cycle    -> if (sfuzz_cov_bits[i]) local_bitmap[i] = 1
 seed end                  -> sfuzz_record_coverage(local_bitmap, metadata_id)
 ```
 
-若使用 VCS `-cm`，实验表应写 `coverage_backend=vcs_builtin`；若使用本文覆盖点，
-写 `coverage_backend=sfuzz_linknan_native`。
+若使用 VCS `-cm`，实验表应写 `coverage_backend=vcs_builtin` 并只作为诊断；若使用本文
+共同覆盖点，runner 表中写 `common_coverage_backend=sfuzz_firrtl`。
 
 ### Verilator
 
