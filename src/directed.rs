@@ -6,13 +6,13 @@
  *   1. Map SanCov guards to RTL module instance paths via Verilator function names
  *   2. Compute module hierarchy distance from each guard to a target module
  *   3. Prioritize seeds that cover guards closer to the target module
- *   4. Assign more mutation energy to closer seeds
+ *   4. Bias scheduling toward closer seeds
  */
 use std::collections::HashMap;
 use std::ffi::CString;
 
-use libafl::prelude::*;
 use libafl::corpus::{Corpus, CorpusId};
+use libafl::prelude::*;
 use libafl::schedulers::Scheduler;
 use libafl::state::HasCorpus;
 use libc::c_char;
@@ -39,11 +39,7 @@ impl GuardDistances {
         let mut distances = vec![u16::MAX; n];
         let target_cstr = CString::new(target_module).expect("invalid target module path");
         let computed = unsafe {
-            compute_directed_distances(
-                target_cstr.as_ptr(),
-                distances.as_mut_ptr(),
-                n as u32,
-            )
+            compute_directed_distances(target_cstr.as_ptr(), distances.as_mut_ptr(), n as u32)
         };
         println!(
             "DirectFuzz: initialized {} guard distances for target '{}'",
@@ -89,10 +85,8 @@ impl GuardDistances {
 pub struct DirectedScheduler {
     guard_distances: GuardDistances,
     seed_distances: HashMap<CorpusId, f64>,
-    last_eval_distance: f64,
     sorted_seeds: Vec<CorpusId>,
     current_index: usize,
-    queue_cycles: u64,
 }
 
 impl DirectedScheduler {
@@ -101,10 +95,8 @@ impl DirectedScheduler {
         Self {
             guard_distances,
             seed_distances: HashMap::new(),
-            last_eval_distance: f64::MAX,
             sorted_seeds: Vec::new(),
             current_index: 0,
-            queue_cycles: 0,
         }
     }
 
@@ -115,22 +107,6 @@ impl DirectedScheduler {
             da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
         });
         self.current_index = 0;
-    }
-
-    /// Get the current seed's distance for energy computation
-    pub fn current_distance(&self, id: &CorpusId) -> f64 {
-        self.seed_distances.get(id).copied().unwrap_or(f64::MAX)
-    }
-
-    /// Compute mutation energy factor based on distance (DirectFuzz energy assignment)
-    /// Returns a multiplier: 1.0 for farthest, up to max_energy_factor for closest
-    pub fn energy_factor(&self, id: &CorpusId, max_factor: f64) -> f64 {
-        let dist = self.current_distance(id);
-        if dist >= (u16::MAX as f64) {
-            return 1.0;
-        }
-        // Energy inversely proportional to distance: E = max_factor / (1 + dist)
-        max_factor / (1.0 + dist)
     }
 }
 
@@ -196,7 +172,6 @@ where
         self.current_index += 1;
         if self.current_index >= effective_len {
             self.current_index = 0;
-            self.queue_cycles += 1;
         }
 
         <Self as Scheduler<I, S>>::set_current_scheduled(self, state, Some(id))?;

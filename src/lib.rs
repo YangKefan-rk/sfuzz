@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(dead_code))]
+
 /**
  * Copyright (c) 2023 Institute of Computing Technology, Chinese Academy of Sciences
  * sfuzz is licensed under Mulan PSL v2.

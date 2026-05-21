@@ -20,11 +20,13 @@ impl CoverageStrategy {
             let body = &trimmed[6..];
             let mut parts = body.split('+');
             let left = parts.next().unwrap_or_default();
-            let right = parts
-                .next()
-                .ok_or_else(|| "union coverage must use the form union:<left>+<right>".to_string())?;
+            let right = parts.next().ok_or_else(|| {
+                "union coverage must use the form union:<left>+<right>".to_string()
+            })?;
             if parts.next().is_some() {
-                return Err("union coverage currently supports exactly two coverage names".to_string());
+                return Err(
+                    "union coverage currently supports exactly two coverage names".to_string(),
+                );
             }
 
             let left = Self::parse_named(left)?;
@@ -48,7 +50,9 @@ impl CoverageStrategy {
             return Err("coverage names cannot contain whitespace".to_string());
         }
         if trimmed.eq_ignore_ascii_case("FIRRTL") {
-            return Err("FIRRTL feedback must use a concrete subtype such as FIRRTL.<group>".to_string());
+            return Err(
+                "FIRRTL feedback must use a concrete subtype such as FIRRTL.<group>".to_string(),
+            );
         }
         if trimmed
             .get(..6)

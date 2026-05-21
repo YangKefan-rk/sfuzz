@@ -24,7 +24,8 @@ use libafl::stages::StdMutationalStage;
 use libafl::state::StdState;
 use libafl_bolts::{current_nanos, rands::StdRand, tuples::tuple_list};
 
-type FuzzState = StdState<InMemoryCorpus<BytesInput>, BytesInput, StdRand, OnDiskCorpus<BytesInput>>;
+type FuzzState =
+    StdState<InMemoryCorpus<BytesInput>, BytesInput, StdRand, OnDiskCorpus<BytesInput>>;
 
 fn populate_initial_corpus<E, EM, Z>(
     state: &mut FuzzState,
@@ -52,14 +53,20 @@ fn populate_initial_corpus<E, EM, Z>(
                         &corpus_dirs, err
                     )
                 });
-            println!("{label}: imported {} inputs from disk.", state.corpus().count());
+            println!(
+                "{label}: imported {} inputs from disk.",
+                state.corpus().count()
+            );
         }
         None => {
             let mut generator = RandBytesGenerator::new(NonZero::new(16384).unwrap());
             state
                 .generate_initial_inputs(fuzzer, executor, &mut generator, mgr, 32)
                 .expect("Failed to generate the initial corpus");
-            println!("{label}: generated {} random byte inputs.", state.corpus().count());
+            println!(
+                "{label}: generated {} random byte inputs.",
+                state.corpus().count()
+            );
         }
     }
 }
@@ -116,6 +123,11 @@ pub(crate) fn run_fuzzer(
         unsafe { harness::SAVE_ERRORS = true };
     }
 
+    if random_input {
+        println!("We are using random input bytes");
+        unsafe { harness::USE_RANDOM_INPUT = true };
+    }
+
     // Corpus
     populate_initial_corpus(
         &mut state,
@@ -126,26 +138,15 @@ pub(crate) fn run_fuzzer(
         "Fuzzer",
     );
 
-    if random_input {
-        println!("We are using random input bytes");
-        unsafe { harness::USE_RANDOM_INPUT = true };
-    }
-
     // Mutator
     let mutator = HavocScheduledMutator::new(havoc_mutations());
     let mut stages = tuple_list!(StdMutationalStage::new(mutator));
 
     // Fuzzing Loop
-    if max_iters.is_some() {
-        println!("Running the Fuzzer for {} iterations.", max_iters.unwrap());
+    if let Some(max_iters) = max_iters {
+        println!("Running the Fuzzer for {max_iters} iterations.");
         fuzzer
-            .fuzz_loop_for(
-                &mut stages,
-                &mut executor,
-                &mut state,
-                &mut mgr,
-                max_iters.unwrap(),
-            )
+            .fuzz_loop_for(&mut stages, &mut executor, &mut state, &mut mgr, max_iters)
             .expect("Fuzzer should not run into errors.");
     } else {
         println!("Running the Fuzzer for unlimited iterations.");
@@ -154,8 +155,8 @@ pub(crate) fn run_fuzzer(
             .expect("Error in the fuzzing loop");
     }
 
-    if corpus_output.is_some() {
-        monitor::store_testcases(&mut state, corpus_output.unwrap());
+    if let Some(corpus_output) = corpus_output {
+        monitor::store_testcases(&mut state, corpus_output);
     };
 }
 
@@ -213,6 +214,11 @@ pub(crate) fn run_directed_fuzzer(
         unsafe { harness::SAVE_ERRORS = true };
     }
 
+    if random_input {
+        println!("We are using random input bytes");
+        unsafe { harness::USE_RANDOM_INPUT = true };
+    }
+
     // Corpus
     populate_initial_corpus(
         &mut state,
@@ -223,27 +229,19 @@ pub(crate) fn run_directed_fuzzer(
         "DirectFuzz",
     );
 
-    if random_input {
-        println!("We are using random input bytes");
-        unsafe { harness::USE_RANDOM_INPUT = true };
-    }
-
-    // Mutator (same havoc mutations as RFuzz but with energy-aware scheduling)
+    // Mutator (same havoc mutations as RFuzz but with distance-biased scheduling)
     let mutator = HavocScheduledMutator::new(havoc_mutations());
     let mut stages = tuple_list!(StdMutationalStage::new(mutator));
 
     // DirectFuzz Fuzzing Loop
-    println!("DirectFuzz: targeting module '{}', starting fuzzing loop...", target_module);
-    if max_iters.is_some() {
-        println!("Running DirectFuzz for {} iterations.", max_iters.unwrap());
+    println!(
+        "DirectFuzz: targeting module '{}', starting fuzzing loop...",
+        target_module
+    );
+    if let Some(max_iters) = max_iters {
+        println!("Running DirectFuzz for {max_iters} iterations.");
         fuzzer
-            .fuzz_loop_for(
-                &mut stages,
-                &mut executor,
-                &mut state,
-                &mut mgr,
-                max_iters.unwrap(),
-            )
+            .fuzz_loop_for(&mut stages, &mut executor, &mut state, &mut mgr, max_iters)
             .expect("DirectFuzz should not run into errors.");
     } else {
         println!("Running DirectFuzz for unlimited iterations.");
@@ -252,7 +250,7 @@ pub(crate) fn run_directed_fuzzer(
             .expect("Error in the DirectFuzz fuzzing loop");
     }
 
-    if corpus_output.is_some() {
-        monitor::store_testcases(&mut state, corpus_output.unwrap());
+    if let Some(corpus_output) = corpus_output {
+        monitor::store_testcases(&mut state, corpus_output);
     };
 }

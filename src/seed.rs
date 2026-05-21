@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use libafl::inputs::{BytesInput, HasMutatorBytes};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

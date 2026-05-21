@@ -70,6 +70,7 @@ pub fn store_testcase(input: &BytesInput, output_dir: &String, name: Option<Stri
         .expect(format!("written {filename} failed").as_str());
 }
 
+#[allow(dead_code)]
 pub fn store_structured_seed(
     seed: &StructuredSeed,
     output_dir: &String,

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::fmt::{Display, Formatter};
 
 use crate::seed::{
@@ -84,7 +86,10 @@ pub(crate) fn encode_seed(seed: &StructuredSeed) -> Result<Vec<u8>, SeedCodecErr
         &seed.metadata.description,
         "metadata.description",
     )?;
-    push_u32(&mut bytes, to_u32(seed.metadata.tags.len(), "metadata.tags")?);
+    push_u32(
+        &mut bytes,
+        to_u32(seed.metadata.tags.len(), "metadata.tags")?,
+    );
     for tag in &seed.metadata.tags {
         push_string(&mut bytes, tag, "metadata.tag")?;
     }
@@ -248,7 +253,10 @@ impl<'a> Decoder<'a> {
     }
 
     fn read_array<const N: usize>(&mut self) -> Result<[u8; N], SeedCodecError> {
-        let end = self.offset.checked_add(N).ok_or(SeedCodecError::UnexpectedEof)?;
+        let end = self
+            .offset
+            .checked_add(N)
+            .ok_or(SeedCodecError::UnexpectedEof)?;
         let slice = self
             .bytes
             .get(self.offset..end)
@@ -282,11 +290,12 @@ impl<'a> Decoder<'a> {
 mod tests {
     use crate::seed::{InterruptEvent, InterruptKind, InterruptTrigger, StructuredSeed};
 
-    use super::{decode_seed, encode_seed, SeedCodecError};
+    use super::{SeedCodecError, decode_seed, encode_seed};
 
     #[test]
     fn round_trip_structured_seed() {
-        let mut seed = StructuredSeed::new(vec![0x13, 0x00, 0x00, 0x00], vec![0x93, 0x00, 0x10, 0x00]);
+        let mut seed =
+            StructuredSeed::new(vec![0x13, 0x00, 0x00, 0x00], vec![0x93, 0x00, 0x10, 0x00]);
         seed.add_shared_segment(0x8000_0000, vec![1, 2, 3, 4]);
         seed.add_interrupt(InterruptEvent {
             hart_id: 1,
@@ -322,7 +331,9 @@ mod tests {
             value: 3,
         });
 
-        let input = seed.to_bytes_input().expect("bytes input conversion should succeed");
+        let input = seed
+            .to_bytes_input()
+            .expect("bytes input conversion should succeed");
         let decoded = StructuredSeed::from_bytes_input(&input)
             .expect("structured seed decoding from bytes input should succeed");
         assert_eq!(decoded, seed);
@@ -357,5 +368,4 @@ mod tests {
         let decoded = decode_seed(&encoded).expect("decode should succeed");
         assert_eq!(decoded, seed);
     }
-
 }

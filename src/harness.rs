@@ -162,9 +162,10 @@ pub(crate) fn fuzz_harness(input: &BytesInput) -> ExitKind {
     unsafe { NUM_RUNS += 1 };
     let do_exit = unsafe { NUM_RUNS >= MAX_RUNS };
     if do_exit {
-        println!("Exit due to max_runs == 0");
+        let max_runs = unsafe { MAX_RUNS };
+        println!("Exit due to max_runs reached: {max_runs}");
         unsafe { display_uncovered_points() }
-        panic!("Exit due to max_runs == 0");
+        panic!("Exit due to max_runs reached: {max_runs}");
     }
 
     ExitKind::Ok
