@@ -16,6 +16,7 @@ mod coverage_strategy;
 mod directed;
 mod fuzzer;
 mod harness;
+mod methods;
 mod monitor;
 mod seed;
 mod seed_codec;

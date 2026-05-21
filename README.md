@@ -7,8 +7,11 @@ in-memory `sim_main_with_input` fuzzing ABI.
 
 ## Layout
 
-- `src/`: Rust fuzzing runtime, coverage plumbing, directed scheduler, and SFUZ
-  seed codec.
+- `src/`: Rust fuzzing runtime, coverage plumbing, directed scheduler, SFUZ
+  seed codec, and method reproductions.
+- `src/methods/rfuzz/`: simulator-ABI-independent RFuzz algorithm modules.
+- `src/methods/directfuzz/`: simulator-ABI-independent DirectFuzz algorithm
+  modules.
 - `scripts/make_sfuz_seed.py`: builds SFUZ structured seed files from hex,
   raw binaries, ELF payloads, and shared-memory blobs.
 - `scripts/litmus_to_c.py`: wraps `litmus7` to generate C source trees from
@@ -18,8 +21,8 @@ in-memory `sim_main_with_input` fuzzing ABI.
 - `scripts/linknan_vcs_smoke.py`: builds/runs LinkNan VCS with a minimal SFUZ
   seed and checks that VCS reaches the SFUZ RAM expansion path.
 - `config/sfuzz.toml`: local path and toolchain defaults for smoke flows.
-- `docs/`: notes for the ABI smoke flow, litmus conversion flow, and FIRRTL
-  coverage experiments.
+- `docs/`: notes for the ABI smoke flow, litmus conversion flow, FIRRTL
+  coverage experiments, and method reproductions.
 - `vendor/`: vendored Rust dependencies for offline builds.
 
 The current workspace layout is expected to be:
@@ -49,6 +52,40 @@ The output library is:
 ```text
 target/release/libsfuzz.a
 ```
+
+## RFuzz
+
+The RFuzz reproduction is organized under `src/methods/rfuzz/`:
+
+```text
+src/methods/
+  rfuzz/
+    input.rs
+    coverage.rs
+    feedback.rs
+    mutators.rs
+```
+
+These modules contain RFuzz raw pin-stream input normalization, mux-select
+toggle coverage, interesting-input feedback, and AFL-style mutations.  See
+`docs/rfuzz.md` for the paper/SurgeFuzz cross-check and the remaining LinkNan
+harness boundary.
+
+## DirectFuzz
+
+The DirectFuzz reproduction is organized under `src/methods/directfuzz/`:
+
+```text
+src/methods/
+  directfuzz/
+    metadata.rs
+    energy.rs
+    scheduler.rs
+```
+
+These modules contain DirectFuzz instance-distance metadata, distance-based
+energy, and target-priority seed queues.  See `docs/directfuzz.md` for the
+paper/SurgeFuzz cross-check and the remaining LinkNan harness boundary.
 
 ## Test
 
