@@ -28,6 +28,10 @@ impl CoverageInstance {
     pub(crate) fn is_target(&self) -> bool {
         self.distance == Some(0)
     }
+
+    pub(crate) fn coverage_bytes(&self) -> usize {
+        self.width.div_ceil(8)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -36,12 +40,23 @@ pub(crate) struct DirectFuzzMetadata {
     max_distance: usize,
     total_width: usize,
     target_width: usize,
+    target_instance_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DirectFuzzCoverageStats {
+    pub input_distance: Option<f64>,
+    pub target_covered_bits: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum DirectFuzzMetadataError {
     Empty,
     MissingTarget,
+    ZeroWidth {
+        instance: String,
+        signal: String,
+    },
     CsvHeader {
         header: String,
     },
@@ -58,9 +73,17 @@ pub(crate) enum DirectFuzzMetadataError {
         line: usize,
         value: String,
     },
-    WidthMismatch {
+    CoverageInstanceCountMismatch {
         expected_instances: usize,
         actual_instances: usize,
+    },
+    CoverageByteLengthMismatch {
+        instance_index: usize,
+        instance: String,
+        signal: String,
+        width_bits: usize,
+        expected_bytes: usize,
+        actual_bytes: usize,
     },
 }
 
@@ -71,6 +94,10 @@ impl Display for DirectFuzzMetadataError {
             Self::MissingTarget => write!(
                 f,
                 "DirectFuzz metadata must contain at least one target instance at distance 0"
+            ),
+            Self::ZeroWidth { instance, signal } => write!(
+                f,
+                "DirectFuzz metadata instance '{instance}' signal '{signal}' must have non-zero width"
             ),
             Self::CsvHeader { header } => write!(
                 f,
@@ -92,12 +119,23 @@ impl Display for DirectFuzzMetadataError {
                 f,
                 "invalid DirectFuzz metadata distance at line {line}: '{value}'"
             ),
-            Self::WidthMismatch {
+            Self::CoverageInstanceCountMismatch {
                 expected_instances,
                 actual_instances,
             } => write!(
                 f,
                 "coverage instance count mismatch: expected {expected_instances}, got {actual_instances}"
+            ),
+            Self::CoverageByteLengthMismatch {
+                instance_index,
+                instance,
+                signal,
+                width_bits,
+                expected_bytes,
+                actual_bytes,
+            } => write!(
+                f,
+                "coverage byte length mismatch for instance #{instance_index} '{instance}' signal '{signal}' ({width_bits} bits): expected {expected_bytes} bytes, got {actual_bytes}"
             ),
         }
     }
@@ -114,14 +152,26 @@ impl DirectFuzzMetadata {
             return Err(DirectFuzzMetadataError::Empty);
         }
 
+        if let Some(instance) = instances.iter().find(|instance| instance.width == 0) {
+            return Err(DirectFuzzMetadataError::ZeroWidth {
+                instance: instance.instance.clone(),
+                signal: instance.signal.clone(),
+            });
+        }
+
+        let target_instance_count = instances
+            .iter()
+            .filter(|instance| instance.is_target())
+            .count();
+        if target_instance_count == 0 {
+            return Err(DirectFuzzMetadataError::MissingTarget);
+        }
+
         let target_width = instances
             .iter()
             .filter(|instance| instance.is_target())
             .map(|instance| instance.width)
             .sum();
-        if target_width == 0 {
-            return Err(DirectFuzzMetadataError::MissingTarget);
-        }
 
         let max_distance = instances
             .iter()
@@ -134,6 +184,7 @@ impl DirectFuzzMetadata {
             max_distance,
             total_width,
             target_width,
+            target_instance_count,
         })
     }
 
@@ -202,46 +253,98 @@ impl DirectFuzzMetadata {
         self.target_width
     }
 
-    pub(crate) fn target_covered_bits(&self, coverage: &[Vec<u8>]) -> usize {
-        self.validate_coverage(coverage)
-            .expect("coverage shape must match DirectFuzz metadata");
-        coverage
-            .iter()
-            .zip(self.instances.iter())
-            .filter(|(_, instance)| instance.is_target())
-            .map(|(bytes, instance)| count_bits_with_width(bytes, instance.width))
-            .sum()
+    pub(crate) fn target_instance_count(&self) -> usize {
+        self.target_instance_count
     }
 
-    pub(crate) fn input_distance(&self, coverage: &[Vec<u8>]) -> Option<f64> {
-        self.validate_coverage(coverage)
-            .expect("coverage shape must match DirectFuzz metadata");
+    pub(crate) fn target_covered_bits(&self, input_coverage: &[Vec<u8>]) -> usize {
+        self.try_target_covered_bits(input_coverage)
+            .expect("coverage shape must match DirectFuzz metadata")
+    }
+
+    pub(crate) fn try_target_covered_bits(
+        &self,
+        input_coverage: &[Vec<u8>],
+    ) -> Result<usize, DirectFuzzMetadataError> {
+        Ok(self.coverage_stats(input_coverage)?.target_covered_bits)
+    }
+
+    /// Computes the DirectFuzz paper distance for one testcase's local coverage.
+    ///
+    /// `input_coverage` must be the coverage produced by the current testcase,
+    /// not an accumulated/global bitmap.  Passing accumulated coverage makes old
+    /// target bits look like they belong to the current input.
+    pub(crate) fn input_distance(&self, input_coverage: &[Vec<u8>]) -> Option<f64> {
+        self.try_input_distance(input_coverage)
+            .expect("coverage shape must match DirectFuzz metadata")
+    }
+
+    pub(crate) fn try_input_distance(
+        &self,
+        input_coverage: &[Vec<u8>],
+    ) -> Result<Option<f64>, DirectFuzzMetadataError> {
+        Ok(self.coverage_stats(input_coverage)?.input_distance)
+    }
+
+    pub(crate) fn coverage_stats(
+        &self,
+        input_coverage: &[Vec<u8>],
+    ) -> Result<DirectFuzzCoverageStats, DirectFuzzMetadataError> {
+        self.validate_coverage(input_coverage)?;
 
         let mut weighted_distance = 0usize;
         let mut covered = 0usize;
-        for (bytes, instance) in coverage.iter().zip(self.instances.iter()) {
-            let Some(distance) = instance.distance else {
-                continue;
-            };
+        let mut target_covered_bits = 0usize;
+        for (bytes, instance) in input_coverage.iter().zip(self.instances.iter()) {
             let bits = count_bits_with_width(bytes, instance.width);
-            covered += bits;
-            weighted_distance += bits * distance;
+            if instance.is_target() {
+                target_covered_bits += bits;
+            }
+
+            if let Some(distance) = instance.distance {
+                covered += bits;
+                weighted_distance += bits * distance;
+            }
         }
 
-        if covered == 0 {
+        let input_distance = if covered == 0 {
             None
         } else {
             Some(weighted_distance as f64 / covered as f64)
-        }
+        };
+
+        Ok(DirectFuzzCoverageStats {
+            input_distance,
+            target_covered_bits,
+        })
     }
 
-    fn validate_coverage(&self, coverage: &[Vec<u8>]) -> Result<(), DirectFuzzMetadataError> {
-        if coverage.len() != self.instances.len() {
-            return Err(DirectFuzzMetadataError::WidthMismatch {
+    pub(crate) fn validate_coverage(
+        &self,
+        input_coverage: &[Vec<u8>],
+    ) -> Result<(), DirectFuzzMetadataError> {
+        if input_coverage.len() != self.instances.len() {
+            return Err(DirectFuzzMetadataError::CoverageInstanceCountMismatch {
                 expected_instances: self.instances.len(),
-                actual_instances: coverage.len(),
+                actual_instances: input_coverage.len(),
             });
         }
+
+        for (idx, (bytes, instance)) in input_coverage.iter().zip(self.instances.iter()).enumerate()
+        {
+            let expected_bytes = instance.coverage_bytes();
+            if bytes.len() != expected_bytes {
+                return Err(DirectFuzzMetadataError::CoverageByteLengthMismatch {
+                    instance_index: idx,
+                    instance: instance.instance.clone(),
+                    signal: instance.signal.clone(),
+                    width_bits: instance.width,
+                    expected_bytes,
+                    actual_bytes: bytes.len(),
+                });
+            }
+        }
+
         Ok(())
     }
 }
@@ -304,6 +407,33 @@ mod tests {
     }
 
     #[test]
+    fn rejects_zero_width_instances() {
+        let err = DirectFuzzMetadata::new(vec![
+            CoverageInstance::new("root", "\\coverage_root", 0, Some(1)),
+            CoverageInstance::new("target", "\\coverage_target", 1, Some(0)),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            err,
+            DirectFuzzMetadataError::ZeroWidth {
+                instance: "root".to_string(),
+                signal: "\\coverage_root".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn counts_target_instances_separately_from_target_width() {
+        let metadata = DirectFuzzMetadata::new(vec![
+            CoverageInstance::new("target_a", "\\coverage_a", 2, Some(0)),
+            CoverageInstance::new("target_b", "\\coverage_b", 3, Some(0)),
+        ])
+        .unwrap();
+        assert_eq!(metadata.target_instance_count(), 2);
+        assert_eq!(metadata.target_width(), 5);
+    }
+
+    #[test]
     fn computes_average_distance_over_covered_instances() {
         let metadata = metadata();
         let coverage = vec![vec![0b0000_0011], vec![0b0000_0001], vec![0], vec![0xff]];
@@ -325,6 +455,37 @@ mod tests {
     }
 
     #[test]
+    fn reports_target_bits_and_distance_from_one_local_input() {
+        let metadata = DirectFuzzMetadata::new(vec![
+            CoverageInstance::new("near", "\\coverage_near", 8, Some(1)),
+            CoverageInstance::new("target", "\\coverage_target", 8, Some(0)),
+        ])
+        .unwrap();
+
+        let previous_input = vec![vec![0], vec![0b0000_1111]];
+        let current_input = vec![vec![0b0000_0011], vec![0]];
+        let accumulated_bitmap = vec![vec![0b0000_0011], vec![0b0000_1111]];
+
+        assert_eq!(
+            metadata
+                .coverage_stats(&previous_input)
+                .unwrap()
+                .target_covered_bits,
+            4
+        );
+
+        let current_stats = metadata.coverage_stats(&current_input).unwrap();
+        assert_eq!(current_stats.target_covered_bits, 0);
+        assert_eq!(current_stats.input_distance, Some(1.0));
+
+        // This is what an accumulated bitmap would report; DirectFuzz's paper
+        // distance must use `current_input` instead.
+        let accumulated_stats = metadata.coverage_stats(&accumulated_bitmap).unwrap();
+        assert_eq!(accumulated_stats.target_covered_bits, 4);
+        assert_eq!(accumulated_stats.input_distance, Some(2.0 / 6.0));
+    }
+
+    #[test]
     fn ignores_padding_bits_beyond_instance_width() {
         let metadata = DirectFuzzMetadata::new(vec![
             CoverageInstance::new("near", "\\coverage_near", 3, Some(1)),
@@ -334,6 +495,44 @@ mod tests {
         let coverage = vec![vec![0xff], vec![0xff]];
         assert_eq!(metadata.input_distance(&coverage), Some(0.5));
         assert_eq!(metadata.target_covered_bits(&coverage), 3);
+    }
+
+    #[test]
+    fn validates_coverage_instance_count() {
+        let metadata = metadata();
+        let err = metadata
+            .validate_coverage(&[vec![0], vec![0], vec![0]])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DirectFuzzMetadataError::CoverageInstanceCountMismatch {
+                expected_instances: 4,
+                actual_instances: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn validates_coverage_byte_length_against_bit_width() {
+        let metadata = DirectFuzzMetadata::new(vec![
+            CoverageInstance::new("wide", "\\coverage_wide", 9, Some(1)),
+            CoverageInstance::new("target", "\\coverage_target", 1, Some(0)),
+        ])
+        .unwrap();
+        let err = metadata
+            .validate_coverage(&[vec![0xff], vec![0]])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            DirectFuzzMetadataError::CoverageByteLengthMismatch {
+                instance_index: 0,
+                instance: "wide".to_string(),
+                signal: "\\coverage_wide".to_string(),
+                width_bits: 9,
+                expected_bytes: 2,
+                actual_bytes: 1,
+            }
+        );
     }
 
     #[test]
@@ -354,6 +553,21 @@ dead,\\coverage_dead,1,256
         assert_eq!(metadata.target_width(), 3);
         assert_eq!(metadata.max_distance(), 2);
         assert_eq!(metadata.instances()[3].distance, None);
+    }
+
+    #[test]
+    fn parses_textual_unreachable_distances() {
+        for unreachable in ["undefined", "unreachable", "none"] {
+            let metadata = DirectFuzzMetadata::from_csv_str(&format!(
+                "\
+instance_name,coverage_signal_name,width,distance
+target,\\coverage_target,1,0
+dead,\\coverage_dead,1,{unreachable}
+"
+            ))
+            .unwrap();
+            assert_eq!(metadata.instances()[1].distance, None);
+        }
     }
 
     #[test]

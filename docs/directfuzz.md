@@ -1,8 +1,14 @@
-# DirectFuzz Reproduction
+# DirectFuzz Method Blocks
 
-This note describes the DirectFuzz method-level reproduction in SFuzz.
+This note describes the DirectFuzz method-level building blocks in SFuzz.
 DirectFuzz is a directed RTL fuzzer: it targets one module instance and biases
 seed selection plus mutation energy toward coverage closer to that target.
+
+Important integration boundary: the current runnable `--directed` path in
+`src/directed.rs` is not the DirectFuzz paper algorithm. It is a SanCov/guard
+directed heuristic for the current LinkNan C++ ABI. The files below are tested
+DirectFuzz components that future runner integration can use; they are not a
+complete DirectFuzz runtime by themselves.
 
 The implementation lives under:
 
@@ -28,7 +34,14 @@ instance_name,coverage_signal_name,width,distance
 
 `metadata.rs` can parse the SurgeFuzz CSV format directly.  A distance of `0`
 marks the target instance.  The SurgeFuzz placeholder distance `256` is treated
-as unreachable and stored as `None`.
+as unreachable and stored as `None`; textual `undefined`, `unreachable`, and
+`none` distances are accepted for the same state.
+
+Metadata construction rejects empty metadata, zero-width coverage signals, and
+metadata without at least one distance-`0` target instance. Runtime coverage is
+validated against the metadata before distance/target statistics are computed:
+the coverage array must have exactly one entry per metadata row, and each entry
+must have the byte length implied by that row's bit width.
 
 ## Input Distance
 
@@ -45,6 +58,12 @@ Unreachable instances are ignored because the paper defines distance only for
 muxes whose instance can reach the target.  Coverage counting respects each
 instance's declared bit width, so padding bits in packed bytes do not inflate
 target coverage or distance.
+
+The local-coverage rule is intentional. If testcase A covers target bits and
+testcase B later covers only a nearby non-target instance, B's distance and
+target-priority decision must be computed from B's own mux-toggle bytes. Using
+an accumulated bitmap would incorrectly make B inherit A's target coverage and
+receive target-priority scheduling.
 
 ## Power Scheduling
 
@@ -73,13 +92,15 @@ minimum energy.
   target-priority FIFO
 - other interesting seeds go to a regular FIFO
 - target-priority seeds are selected before regular seeds
-- after a configurable interval, default `10`, without target coverage
-  progress, the scheduler escapes local minima by selecting a low-energy
-  regular seed and marking it for default-energy mutation
+- after a configurable escape interval, default `10`, without target coverage
+  progress, the scheduler escapes local minima by selecting the currently
+  lowest-energy regular seed and marking it for default-energy mutation
 
-This is deliberately different from the older `src/directed.rs` scheduler.
-That file is a SanCov-guard directed scheduler for the current LinkNan C++ ABI;
-it is not the paper DirectFuzz algorithm.
+The original DirectFuzz description calls this escape a random/default-energy
+mutation step. This method block currently implements a deterministic
+lowest-energy regular-seed escape so it stays reproducible and does not require
+runner-level RNG plumbing. Treat that as an artifact difference until a full
+runner decides how to supply randomness.
 
 ## SurgeFuzz Cross-Check
 
@@ -98,6 +119,19 @@ per-input coverage for distance and target progress.
 
 ## Current Integration Status
 
-The method logic is unit-tested and ready to be used by future runners.  A fully
-faithful LinkNan run still needs a simulator ABI that exposes per-instance
-mux-toggle arrays to `src/methods/directfuzz/`.
+The method logic is unit-tested and ready to be used by future runners, but a
+faithful paper DirectFuzz run is still incomplete. In particular, SFuzz still
+needs:
+
+- a per-instance mux-toggle simulator ABI, not just SanCov/guard coverage
+- a static analysis/pass pipeline that emits DirectFuzz instance distance
+  metadata for the chosen target instance
+- runner logic that feeds one testcase's local mux-toggle coverage into
+  `src/methods/directfuzz/metadata.rs`
+- mapping from DirectFuzz energy values to mutation budgets
+- LibAFL scheduler/state integration for the two-queue policy and target
+  progress accounting
+
+Until those pieces exist, invoking `--directed` should be documented as the
+current guard-based directed heuristic, not as a reproduction of the DirectFuzz
+paper algorithm.

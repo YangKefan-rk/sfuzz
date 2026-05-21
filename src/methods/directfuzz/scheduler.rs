@@ -15,14 +15,14 @@ pub(crate) struct DirectFuzzSeedMeta {
 ///
 /// Seeds that cover at least one target-instance mux-select signal are served
 /// from a priority FIFO before regular RFuzz seeds.  If target coverage has not
-/// improved for `random_interval` scheduled seeds, `next` can deliberately
-/// escape to a low-energy regular seed with default energy.
+/// improved for `escape_interval` scheduled seeds, `next` can deliberately
+/// escape to the currently lowest-energy regular seed with default energy.
 #[derive(Clone, Debug)]
 pub(crate) struct DirectFuzzQueue {
     target: VecDeque<DirectFuzzSeedMeta>,
     regular: VecDeque<DirectFuzzSeedMeta>,
     no_target_progress: usize,
-    random_interval: usize,
+    escape_interval: usize,
 }
 
 impl Default for DirectFuzzQueue {
@@ -32,12 +32,12 @@ impl Default for DirectFuzzQueue {
 }
 
 impl DirectFuzzQueue {
-    pub(crate) fn new(random_interval: usize) -> Self {
+    pub(crate) fn new(escape_interval: usize) -> Self {
         Self {
             target: VecDeque::new(),
             regular: VecDeque::new(),
             no_target_progress: 0,
-            random_interval,
+            escape_interval,
         }
     }
 
@@ -91,7 +91,7 @@ impl DirectFuzzQueue {
     }
 
     fn should_escape_local_minimum(&self) -> bool {
-        self.random_interval != 0 && self.no_target_progress >= self.random_interval
+        self.escape_interval != 0 && self.no_target_progress >= self.escape_interval
     }
 
     fn pop_target_fifo(&mut self) -> Option<DirectFuzzSeedMeta> {
@@ -144,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_fifo_inside_priority_queue() {
+    fn preserves_fifo_inside_target_priority_queue() {
         let mut queue = DirectFuzzQueue::default();
         queue.push(10, feedback(1, false, 2.0));
         queue.push(11, feedback(3, false, 1.0));
@@ -153,7 +153,26 @@ mod tests {
     }
 
     #[test]
-    fn escapes_to_low_energy_regular_seed_after_stall() {
+    fn preserves_fifo_inside_regular_queue() {
+        let mut queue = DirectFuzzQueue::default();
+        queue.push(10, feedback(0, false, 2.0));
+        queue.push(11, feedback(0, false, 1.0));
+        assert_eq!(queue.next().unwrap().id, 10);
+        assert_eq!(queue.next().unwrap().id, 11);
+    }
+
+    #[test]
+    fn routes_seeds_by_target_coverage() {
+        let mut queue = DirectFuzzQueue::default();
+        queue.push(1, feedback(0, false, 2.0));
+        queue.push(2, feedback(4, false, 20.0));
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.target_len(), 1);
+        assert_eq!(queue.regular_len(), 1);
+    }
+
+    #[test]
+    fn deterministically_escapes_to_low_energy_regular_seed_after_stall() {
         let mut queue = DirectFuzzQueue::new(2);
         queue.push(1, feedback(1, false, 20.0));
         queue.push(2, feedback(1, false, 21.0));
@@ -164,6 +183,29 @@ mod tests {
         let escaped = queue.next().unwrap();
         assert_eq!(escaped.id, 4);
         assert!(escaped.use_default_energy);
+    }
+
+    #[test]
+    fn escape_falls_back_to_target_fifo_without_regular_seed() {
+        let mut queue = DirectFuzzQueue::new(1);
+        queue.push(1, feedback(1, false, 20.0));
+        queue.push(2, feedback(1, false, 21.0));
+        assert_eq!(queue.next().unwrap().id, 1);
+
+        let selected = queue.next().unwrap();
+        assert_eq!(selected.id, 2);
+        assert!(!selected.use_default_energy);
+    }
+
+    #[test]
+    fn disabling_escape_interval_preserves_priority_order() {
+        let mut queue = DirectFuzzQueue::new(0);
+        queue.push(1, feedback(1, false, 20.0));
+        queue.push(2, feedback(1, false, 21.0));
+        queue.push(3, feedback(0, false, 1.0));
+        assert_eq!(queue.next().unwrap().id, 1);
+        assert_eq!(queue.next().unwrap().id, 2);
+        assert_eq!(queue.next().unwrap().id, 3);
     }
 
     #[test]
