@@ -1,5 +1,6 @@
 [workspace]
 work_dir = "/tmp/sfuzz-linknan-abi-smoke"
+vcs_work_dir = "/tmp/sfuzz-linknan-vcs-smoke"
 
 [linknan]
 root = "~/SFUZZ/LinkNan"
@@ -24,3 +25,12 @@ build_no_diff = true
 
 [coverage]
 default = "llvm.branch"
+
+[vcs]
+num_cores = 1
+cycles = 2000
+no_diff = true
+no_fsdb = true
+no_xprop = true
+no_fgp = true
+no_initreg_random = true

@@ -118,6 +118,14 @@ def run(command: list[str | Path], cwd: Path | None = None, stdout: Any = None) 
     return subprocess.run(rendered, cwd=cwd, check=True, stdout=stdout, stderr=subprocess.STDOUT)
 
 
+def without_sancov(flags: list[str | Path]) -> list[str | Path]:
+    return [
+        flag
+        for flag in flags
+        if str(flag) not in {"-fsanitize-coverage=trace-pc-guard", "-fsanitize-coverage=pc-table"}
+    ]
+
+
 def num_cores_to_noc(num_cores: str) -> str:
     table = {"1": "small", "2": "reduced", "4": "full"}
     if num_cores not in table:
@@ -129,6 +137,8 @@ def discover_objects(real_model_comp: Path) -> list[Path]:
     excluded = {
         "main.o",
         "ram.o",
+        "coverage.o",
+        "dut.o",
         "verilated.o",
         "verilated_dpi.o",
         "verilated_threads.o",
@@ -314,6 +324,26 @@ def main() -> int:
             relink_dir / "ram.o",
         ]
     )
+    run(
+        [
+            cxx_bin,
+            *without_sancov(common_cxxflags),
+            "-c",
+            linknan_src_root / "dependencies/difftest/src/test/csrc/common/coverage.cpp",
+            "-o",
+            relink_dir / "coverage.o",
+        ]
+    )
+    run(
+        [
+            cxx_bin,
+            *common_cxxflags,
+            "-c",
+            linknan_src_root / "dependencies/difftest/src/test/csrc/common/dut.cpp",
+            "-o",
+            relink_dir / "dut.o",
+        ]
+    )
 
     run(
         [
@@ -330,7 +360,12 @@ def main() -> int:
         ]
     )
 
-    link_objects: list[Path] = [relink_dir / "main.o", relink_dir / "ram.o"]
+    link_objects: list[Path] = [
+        relink_dir / "main.o",
+        relink_dir / "ram.o",
+        relink_dir / "coverage.o",
+        relink_dir / "dut.o",
+    ]
     link_objects.extend(discover_objects(real_model_comp))
     if (real_model_comp / "verilated_cov.o").is_file():
         link_objects.append(real_model_comp / "verilated_cov.o")
