@@ -12,6 +12,9 @@ in-memory `sim_main_with_input` fuzzing ABI.
 - `src/methods/rfuzz/`: simulator-ABI-independent RFuzz algorithm modules.
 - `src/methods/directfuzz/`: simulator-ABI-independent DirectFuzz algorithm
   modules.
+- `src/methods/surgefuzz/`: simulator-ABI-independent SurgeFuzz algorithm
+  modules.
+- `src/methods/profuzz/`: simulator-ABI-independent PROFUZZ algorithm modules.
 - `scripts/make_sfuz_seed.py`: builds SFUZ structured seed files from hex,
   raw binaries, ELF payloads, and shared-memory blobs.
 - `scripts/litmus_to_c.py`: wraps `litmus7` to generate C source trees from
@@ -86,6 +89,42 @@ src/methods/
 These modules contain DirectFuzz instance-distance metadata, distance-based
 energy, and target-priority seed queues.  See `docs/directfuzz.md` for the
 paper/SurgeFuzz cross-check and the remaining LinkNan harness boundary.
+
+## SurgeFuzz
+
+The SurgeFuzz reproduction is organized under `src/methods/surgefuzz/`:
+
+```text
+src/methods/
+  surgefuzz/
+    score.rs
+    coverage.rs
+    metadata.rs
+    selector.rs
+```
+
+These modules contain SurgeFuzz annotation scoring, `score^2` power scheduling,
+ancestor-register coverage, instrument metadata parsing, and NMI-based ancestor
+selection.  See `docs/surgefuzz.md` for the paper/prototype cross-check and the
+remaining LinkNan harness boundary.
+
+## PROFUZZ
+
+The PROFUZZ reproduction is organized under `src/methods/profuzz/`:
+
+```text
+src/methods/
+  profuzz/
+    target.rs
+    pattern.rs
+    mutation.rs
+    feedback.rs
+```
+
+These modules contain PROFUZZ target signal scoring, ATPG 0/1/X pattern merge,
+bit-string mutation, and target coverage feedback policy.  See
+`docs/profuzz.md` for the paper/artifact cross-check and the remaining EDA and
+simulator boundary.
 
 ## Test
 
