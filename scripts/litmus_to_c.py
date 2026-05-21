@@ -5,7 +5,10 @@ import shutil
 import subprocess
 from pathlib import Path
 
-DEFAULT_LITMUS_HOME = Path("/nfs/home/yangkefan/Nanhu-V5.1/litmus-tests-riscv")
+SCRIPT_DIR = Path(__file__).resolve().parent
+SFUZZ_HOME = SCRIPT_DIR.parent
+WORKSPACE_ROOT = SFUZZ_HOME.parent
+DEFAULT_LITMUS_HOME = WORKSPACE_ROOT / "litmus-tests-riscv"
 
 
 def parse_args() -> argparse.Namespace:
