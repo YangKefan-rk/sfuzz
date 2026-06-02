@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import math
 import random
 import time
@@ -33,6 +34,7 @@ DIRECTFUZZ_FIELDS = [
     "retention_reason",
     "target_instance",
     "metadata_source",
+    "paper_faithful_scope",
     "wall_time_sec",
     "cycles",
     "exit_code",
@@ -45,6 +47,7 @@ DIRECTFUZZ_FIELDS = [
     "vcs_sim_time_ps",
     "coverage_backend",
     "native_coverage_source",
+    "native_coverage_path",
     "target_covered_bits",
     "target_new_bits",
     "new_coverage_bits",
@@ -78,6 +81,8 @@ MISSING_PER_INSTANCE_ABI = "directfuzz_per_instance_mux_toggle"
 MISSING_NATIVE_EXPORT = "directfuzz_vcs_native_coverage_export"
 MISSING_STATIC_METADATA = "directfuzz_static_analysis_instance_distance_metadata"
 MISSING_DYNAMIC_COVERAGE = "directfuzz_dynamic_per_testcase_coverage_export"
+MISSING_PER_INSTANCE_HIERARCHY_CSV = "directfuzz_per_instance_hierarchy_csv"
+PAPER_FAITHFUL_SCOPE = "linknan-processor-workload"
 
 
 @dataclass(frozen=True)
@@ -402,6 +407,28 @@ class DirectCoverageState:
         )
 
 
+def normalize_instance_name(name: str) -> str:
+    text = name.strip()
+    if text == "tb_top.sim":
+        return "SimTop"
+    if text.startswith("tb_top.sim."):
+        return "SimTop." + text[len("tb_top.sim.") :]
+    if text == "sim":
+        return "SimTop"
+    if text.startswith("sim."):
+        return "SimTop." + text[len("sim.") :]
+    return text
+
+
+def normalize_module_key(name: str) -> str:
+    text = name.strip()
+    if text.startswith("module:"):
+        return "module:" + text[len("module:") :]
+    if text.startswith("coverage_"):
+        return "module:" + text[len("coverage_") :]
+    return ""
+
+
 def load_direct_coverage_file(path: Path, metadata: list[InstanceMeta]) -> list[bytes]:
     """Load native DirectFuzz coverage rows in metadata order.
 
@@ -412,35 +439,65 @@ def load_direct_coverage_file(path: Path, metadata: list[InstanceMeta]) -> list[
     width after padding bits are masked.
     """
     by_instance: dict[str, bytes] = {}
+    by_module: dict[str, bytes] = {}
     metadata_instances = {meta.instance for meta in metadata}
+    metadata_modules = {normalize_module_key(meta.signal) for meta in metadata}
     with path.open(newline="", encoding="utf-8") as input_file:
         reader = csv.DictReader(input_file)
         require_csv_fields(path, reader.fieldnames, NATIVE_COVERAGE_FIELDS)
         for line_no, row in enumerate(reader, 2):
-            instance = row["instance_name"].strip()
+            instance = normalize_instance_name(row["instance_name"])
             if not instance:
                 raise ValueError(f"{path}:{line_no}: instance_name must be non-empty")
-            if instance in by_instance:
+            module_key = normalize_module_key(instance)
+            if instance in by_instance or (module_key and module_key in by_module):
                 raise ValueError(f"{path}:{line_no}: duplicate coverage row for instance {instance!r}")
-            if instance not in metadata_instances:
-                raise ValueError(f"{path}:{line_no}: coverage row for unknown instance {instance!r}")
+            if instance not in metadata_instances and module_key not in metadata_modules:
+                continue
             raw_hex = row["coverage_hex"].strip()
             try:
                 data = bytes.fromhex(raw_hex)
             except ValueError as exc:
                 raise ValueError(f"{path}:{line_no}: invalid coverage_hex for {instance}") from exc
-            by_instance[instance] = data
+            if module_key:
+                by_module[module_key] = data
+            else:
+                by_instance[instance] = data
 
     coverage: list[bytes] = []
     for meta in metadata:
         if meta.instance not in by_instance:
-            raise ValueError(f"{path}: missing coverage for instance {meta.instance!r}")
-        data = by_instance[meta.instance]
+            data = by_module.get(normalize_module_key(meta.signal), bytes(meta.byte_len))
+        else:
+            data = by_instance[meta.instance]
+        if len(data) > meta.byte_len:
+            data = data[: meta.byte_len]
+        if len(data) < meta.byte_len:
+            data = data + bytes(meta.byte_len - len(data))
         if len(data) != meta.byte_len:
             raise ValueError(
                 f"{path}: instance {meta.instance!r} coverage has {len(data)} bytes, expected {meta.byte_len}"
             )
         mutable = bytearray(data)
+        mask_padding_bits(mutable, meta.width)
+        coverage.append(bytes(mutable))
+    return coverage
+
+
+def load_direct_aggregate_bitmap(path: Path, metadata: list[InstanceMeta], target_instance: str) -> list[bytes]:
+    data = path.read_bytes()
+    target_meta = next((meta for meta in metadata if meta.instance == target_instance), None)
+    if target_meta is None:
+        raise ValueError(f"{path}: target instance {target_instance!r} missing from DirectFuzz metadata")
+
+    coverage: list[bytes] = []
+    for meta in metadata:
+        row = bytes(meta.byte_len)
+        if meta.signal == target_meta.signal:
+            row = data[: meta.byte_len]
+            if len(row) < meta.byte_len:
+                row = row + bytes(meta.byte_len - len(row))
+        mutable = bytearray(row)
         mask_padding_bits(mutable, meta.width)
         coverage.append(bytes(mutable))
     return coverage
@@ -469,6 +526,24 @@ def resolve_native_coverage_path(args: Any, case_dir: Path, input_path: Path, ex
         if candidate.is_file():
             return candidate
     return None
+
+
+def resolve_native_aggregate_bitmap(case_dir: Path) -> Path | None:
+    candidate = case_dir / "directfuzz_coverage.bin"
+    return candidate if candidate.is_file() and candidate.stat().st_size > 0 else None
+
+
+def describe_missing_native_coverage(case_dir: Path) -> str:
+    summary_path = case_dir / "directfuzz_coverage.json"
+    if not summary_path.is_file():
+        return "no DirectFuzz coverage summary json found"
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return f"DirectFuzz coverage summary exists but is not valid JSON: {exc}"
+    expected_csv = str(payload.get("directfuzz_coverage_file") or "directfuzz_coverage.csv")
+    csv_written = payload.get("directfuzz_csv_written", "unknown")
+    return f"summary={summary_path}; expected_csv={expected_csv}; directfuzz_csv_written={csv_written}"
 
 
 def mutate_workload(parent: Path, output: Path, rng: random.Random, budget: int) -> None:
@@ -524,16 +599,12 @@ def required_native_abi(args: Any, dynamic_native_coverage: bool) -> str:
         missing.append(MISSING_STATIC_METADATA)
     if args.coverage_backend == "native-file" and args.native_coverage and not dynamic_native_coverage:
         missing.append(MISSING_DYNAMIC_COVERAGE)
+    missing.append(MISSING_PER_INSTANCE_HIERARCHY_CSV)
     return ";".join(missing)
 
 
 def paper_faithful_native_file(args: Any) -> bool:
-    return (
-        args.coverage_backend == "native-file"
-        and args.metadata_source == "static-analysis"
-        and args.native_coverage_source == "vcs-native-abi"
-        and (not args.native_coverage or bool(getattr(args, "native_coverage_pattern", None)))
-    )
+    return False
 
 
 def direct_notes(args: Any, backend: str, common_backend: str, dynamic_native_coverage: bool) -> list[str]:
@@ -564,6 +635,9 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
     runs_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
     mutations_dir.mkdir(parents=True, exist_ok=True)
+
+    if not getattr(args, "firrtl_cov", None):
+        args.firrtl_cov = "DirectFuzz.mux-toggle"
 
     seeds = collect_direct_input_paths(args.seed, args.seed_list, args.seed_dir, work_dir, args.limit, True)
     metadata = load_direct_metadata(args.metadata.expanduser())
@@ -614,19 +688,39 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
         if not run_log.is_file() and not infrastructure_error:
             infrastructure_error = "run.log missing"
 
-        dynamic_native_coverage = bool(getattr(args, "native_coverage_pattern", None)) or not args.native_coverage
+        dynamic_native_coverage = not args.native_coverage
         paper_faithful = paper_faithful_native_file(args)
         missing_native_abi = required_native_abi(args, dynamic_native_coverage)
         native_coverage_source = ""
+        native_coverage_path = ""
+        coverage_notes: list[str] = []
         if args.coverage_backend == "native-file":
             coverage_path = resolve_native_coverage_path(args, case_dir, input_path, exec_idx)
             if coverage_path is None:
-                raise ValueError(
-                    "--coverage-backend native-file requires --native-coverage, "
-                    "--native-coverage-pattern, or a case-local DirectFuzz coverage CSV"
-                )
-            feedback = state.feedback(load_direct_coverage_file(coverage_path, metadata))
-            backend = "directfuzz_per_instance_mux_toggle_file"
+                aggregate_path = resolve_native_aggregate_bitmap(case_dir)
+                if aggregate_path is None:
+                    raise ValueError(
+                        "--coverage-backend native-file requires --native-coverage, "
+                        "--native-coverage-pattern, or a case-local DirectFuzz coverage CSV; "
+                        + describe_missing_native_coverage(case_dir)
+                    )
+                native_coverage_path = str(aggregate_path)
+                feedback = state.feedback(load_direct_aggregate_bitmap(aggregate_path, metadata, args.target_instance))
+                backend = "directfuzz_module_type_aggregate_mux_toggle_bitmap"
+                coverage_notes.append("case-local DirectFuzz CSV missing; used aggregate bitmap fallback")
+            else:
+                native_coverage_path = str(coverage_path)
+                try:
+                    feedback = state.feedback(load_direct_coverage_file(coverage_path, metadata))
+                    backend = "directfuzz_per_instance_mux_toggle_file"
+                except (UnicodeDecodeError, ValueError) as exc:
+                    aggregate_path = resolve_native_aggregate_bitmap(case_dir)
+                    if aggregate_path is None:
+                        raise
+                    native_coverage_path = str(aggregate_path)
+                    feedback = state.feedback(load_direct_aggregate_bitmap(aggregate_path, metadata, args.target_instance))
+                    backend = "directfuzz_module_type_aggregate_mux_toggle_bitmap"
+                    coverage_notes.append(f"per-instance CSV unavailable ({exc}); used aggregate bitmap fallback")
             native_coverage_source = args.native_coverage_source
         elif args.coverage_backend == "dev-mock":
             feedback = state.feedback(dev_direct_coverage(input_path, metadata, args.target_instance))
@@ -654,6 +748,10 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
             queue.push(entry)
 
         notes = direct_notes(args, backend, common_backend, dynamic_native_coverage)
+        notes.extend(coverage_notes)
+        if backend == "directfuzz_module_type_aggregate_mux_toggle_bitmap":
+            notes.append("module-type aggregate fallback is VCS-native mux-toggle data but not full per-instance hierarchy feedback")
+            paper_faithful = False
         if default_energy:
             notes.append("scheduler_escape_default_energy=true")
         if args.timeout_sec <= 0:
@@ -674,6 +772,7 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
                 "retention_reason": retention_reason,
                 "target_instance": args.target_instance,
                 "metadata_source": args.metadata_source,
+                "paper_faithful_scope": PAPER_FAITHFUL_SCOPE,
                 "wall_time_sec": round(result.wall_time_sec, 6),
                 "cycles": info.cycles if info.cycles is not None else "",
                 "exit_code": result.returncode,
@@ -686,6 +785,7 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
                 "vcs_sim_time_ps": info.vcs_sim_time_ps,
                 "coverage_backend": backend,
                 "native_coverage_source": native_coverage_source,
+                "native_coverage_path": native_coverage_path,
                 **feedback,
                 "common_coverage_backend": common_backend,
                 "common_coverage_name": common_coverage.coverage_name,
@@ -753,7 +853,13 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
         args.output_json or work_dir / "results.json",
         args.output_csv or work_dir / "results.csv",
         DIRECTFUZZ_FIELDS,
-        {"fuzzer": "directfuzz"},
+        {
+            "fuzzer": "directfuzz",
+            "paper_faithful": all(str(row.get("paper_faithful")) == "True" for row in rows) if rows else False,
+            "paper_faithful_scope": PAPER_FAITHFUL_SCOPE,
+            "target_instance": args.target_instance,
+            "metadata_source": args.metadata_source,
+        },
     )
     return 0
 

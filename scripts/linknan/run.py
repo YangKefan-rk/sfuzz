@@ -9,6 +9,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from linknan.config import DEFAULT_CONFIG, context_from_config
+from linknan.directfuzz_static import write_metadata as write_directfuzz_static_metadata
 from linknan.methods.directfuzz import generate_direct_metadata, run_directfuzz
 from linknan.methods.profuzz import run_profuzz
 from linknan.methods.rfuzz import run_rfuzz
@@ -157,12 +158,14 @@ def main() -> int:
         "directfuzz",
         help="run DirectFuzz seeds through real LinkNan VCS",
         epilog=(
-            "说明：当前入口保留真实 VCS 运行。vcs-log 和 dev-mock 都不是论文定义的 "
-            "DirectFuzz 覆盖/反馈，必须接入 per-instance mux-toggle ABI 后，"
-            "才能作为 paper-faithful DirectFuzz 数据。"
+            "说明：DirectFuzz 当前入口按处理器验证口径执行真实 LinkNan VCS campaign loop，"
+            "输入统一使用 LinkNan 原生 workload .bin/ELF；.sfuz 会被拒绝。"
+            "DirectFuzz.mux-toggle 导出 VCS native per-instance mux-toggle CSV，"
+            "配合 static-analysis metadata 计算 target distance 和 energy。"
         ),
     )
     add_common_vcs_args(direct)
+    direct.set_defaults(no_cycle_limit=True, firrtl_cov="DirectFuzz.mux-toggle")
     direct.add_argument("--seed", action="append", default=[], help="DirectFuzz workload .bin/.elf path; repeatable")
     direct.add_argument("--seed-list", type=Path, help="text file with one .bin/.elf path per non-comment line")
     direct.add_argument("--seed-dir", type=Path, help="directory containing .bin/.elf workload inputs")
@@ -185,7 +188,7 @@ def main() -> int:
     direct.add_argument(
         "--coverage-backend",
         choices=["vcs-log", "dev-mock", "native-file"],
-        default="vcs-log",
+        default="native-file",
         help="native-file consumes DirectFuzz per-instance mux-toggle CSV; dev-mock is only for pipeline debugging",
     )
     direct.add_argument(
@@ -206,7 +209,7 @@ def main() -> int:
     direct.add_argument(
         "--native-coverage-source",
         choices=["vcs-native-abi", "manual", "dev-generated"],
-        default="manual",
+        default="vcs-native-abi",
         help="provenance of --native-coverage; manual/dev-generated keep paper_faithful=false",
     )
     direct.set_defaults(case_prefix="directfuzz", handler=run_directfuzz)
@@ -275,6 +278,15 @@ def main() -> int:
     gen_direct.add_argument("--target-instance", required=True)
     gen_direct.add_argument("--target-module", default="")
 
+    gen_direct_static = subparsers.add_parser(
+        "gen-directfuzz-static-metadata",
+        help="generate DirectFuzz static-analysis metadata from LinkNan generated RTL",
+    )
+    gen_direct_static.add_argument("--rtl-dir", type=Path, required=True)
+    gen_direct_static.add_argument("--output", type=Path, required=True)
+    gen_direct_static.add_argument("--target-instance", required=True)
+    gen_direct_static.add_argument("--top-module", default="SimTop")
+
     gen_surge = subparsers.add_parser(
         "gen-surgefuzz-dev-profile",
         help="generate a small SurgeFuzz development profile; not paper-faithful data",
@@ -284,6 +296,14 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "gen-directfuzz-dev-metadata":
         generate_direct_metadata(args.output.expanduser(), args.target_instance, args.target_module)
+        return 0
+    if args.command == "gen-directfuzz-static-metadata":
+        write_directfuzz_static_metadata(
+            args.rtl_dir.expanduser().resolve(),
+            args.output.expanduser().resolve(),
+            args.target_instance,
+            args.top_module,
+        )
         return 0
     if args.command == "gen-surgefuzz-dev-profile":
         write_dev_surge_profile(args.output_dir.expanduser())

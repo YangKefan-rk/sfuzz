@@ -80,6 +80,72 @@ class CoverageResult:
     total: int | None = None
 
 
+def proc_children(root_pid: int) -> list[int]:
+    children_by_parent: dict[int, list[int]] = {}
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            status = (proc / "status").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        ppid = None
+        for line in status.splitlines():
+            if line.startswith("PPid:"):
+                try:
+                    ppid = int(line.split()[1])
+                except (IndexError, ValueError):
+                    ppid = None
+                break
+        if ppid is not None:
+            children_by_parent.setdefault(ppid, []).append(int(proc.name))
+
+    descendants: list[int] = []
+    queue = list(children_by_parent.get(root_pid, []))
+    while queue:
+        pid = queue.pop(0)
+        descendants.append(pid)
+        queue.extend(children_by_parent.get(pid, []))
+    return descendants
+
+
+def proc_running(pid: int) -> bool:
+    status_path = Path("/proc") / str(pid) / "status"
+    try:
+        status = status_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    for line in status.splitlines():
+        if line.startswith("State:"):
+            return "\tZ" not in line and " zombie" not in line.lower()
+    return True
+
+
+def signal_pids(pids: list[int], signo: int, log_file: Any, label: str) -> None:
+    seen: set[int] = set()
+    for pid in pids:
+        if pid in seen or pid <= 1:
+            continue
+        seen.add(pid)
+        try:
+            os.kill(pid, signo)
+            log_file.write(f"{label}: pid={pid} signal={signo}\n")
+        except ProcessLookupError:
+            continue
+        except PermissionError as exc:
+            log_file.write(f"{label}_ERROR: pid={pid} error={exc}\n")
+
+
+def wait_pids_exit(pids: list[int], timeout_sec: int) -> list[int]:
+    deadline = time.monotonic() + timeout_sec
+    remaining = sorted(set(pid for pid in pids if pid > 1))
+    while remaining and time.monotonic() < deadline:
+        remaining = [pid for pid in remaining if proc_running(pid)]
+        if remaining:
+            time.sleep(0.1)
+    return [pid for pid in remaining if proc_running(pid)]
+
+
 def num_cores_to_noc(num_cores: str) -> str:
     table = {"1": "small", "2": "reduced", "4": "full"}
     if num_cores not in table:
@@ -94,6 +160,8 @@ def normalize_firrtl_coverage_name(value: str | None) -> str:
     if text.lower() == "firrtl" or text.lower().startswith("firrtl."):
         return text
     if text.lower() == "rfuzz" or text.lower().startswith("rfuzz.") or text.lower().startswith("rfuzz_"):
+        return text
+    if text.lower() == "directfuzz" or text.lower().startswith("directfuzz.") or text.lower().startswith("directfuzz_"):
         return text
     return f"FIRRTL.{text}"
 
@@ -116,6 +184,14 @@ def requested_firrtl_groups(firrtl_cov: str) -> set[str]:
         return {"common"}
     if normalized in {"rfuzz", "rfuzz.mux", "rfuzz.mux-toggle", "rfuzz.mux_toggle", "rfuzz_mux_toggle"}:
         return {"rfuzz_mux_toggle"}
+    if normalized in {
+        "directfuzz",
+        "directfuzz.mux",
+        "directfuzz.mux-toggle",
+        "directfuzz.mux_toggle",
+        "directfuzz_mux_toggle",
+    }:
+        return {"directfuzz_mux_toggle"}
     if normalized.startswith("firrtl."):
         return {normalized[len("firrtl.") :]}
     if normalized.startswith("rfuzz."):
@@ -269,19 +345,36 @@ def run_command(
             timed_out = True
             error = f"timeout after {timeout_sec} seconds"
             returncode = 124
+            child_pids = proc_children(process.pid)
             log_file.write(f"\nTIMEOUT: {error}; sending SIGTERM to process group\n")
+            if child_pids:
+                log_file.write(f"TIMEOUT_CHILDREN: {' '.join(str(pid) for pid in child_pids)}\n")
             log_file.flush()
             try:
                 os.killpg(process.pid, signal.SIGTERM)
-                returncode = process.wait(timeout=TIMEOUT_GRACE_SEC)
+                signal_pids(child_pids, signal.SIGTERM, log_file, "TIMEOUT_CHILD_SIGTERM")
+                remaining = wait_pids_exit(child_pids, TIMEOUT_GRACE_SEC)
+                if remaining:
+                    log_file.write(f"TIMEOUT_ORPHANED_CHILDREN_AFTER_TERM: {' '.join(str(pid) for pid in remaining)}\n")
+                    signal_pids(remaining, signal.SIGTERM, log_file, "TIMEOUT_ORPHAN_SIGTERM")
+                    remaining = wait_pids_exit(remaining, 5)
+                if remaining:
+                    log_file.write(f"TIMEOUT_ORPHAN_TERM_GRACE_EXPIRED: {' '.join(str(pid) for pid in remaining)}\n")
+                    signal_pids(remaining, signal.SIGKILL, log_file, "TIMEOUT_ORPHAN_SIGKILL")
+                    remaining = wait_pids_exit(remaining, 2)
+                returncode = process.wait(timeout=1)
                 log_file.write(f"TIMEOUT_GRACEFUL_EXIT: returncode={returncode}\n")
+                if remaining:
+                    log_file.write(f"TIMEOUT_ORPHANED_CHILDREN_AFTER_KILL: {' '.join(str(pid) for pid in remaining)}\n")
             except (ProcessLookupError, PermissionError) as signal_error:
                 log_file.write(f"TIMEOUT_SIGNAL_ERROR: {signal_error}\n")
             except subprocess.TimeoutExpired:
+                remaining = proc_children(process.pid) + child_pids
                 log_file.write(f"TIMEOUT_SIGTERM_GRACE_EXPIRED: {TIMEOUT_GRACE_SEC} seconds; sending SIGKILL\n")
                 log_file.flush()
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
+                    signal_pids(remaining, signal.SIGKILL, log_file, "TIMEOUT_CHILD_SIGKILL")
                 except (ProcessLookupError, PermissionError) as signal_error:
                     log_file.write(f"TIMEOUT_SIGKILL_ERROR: {signal_error}\n")
                 returncode = process.wait()
@@ -477,7 +570,11 @@ def parse_coverage_from_text(path: Path) -> CoverageResult | None:
 
 
 def sfuzz_firrtl_summary_candidates(case_dir: Path) -> list[Path]:
-    candidates = [case_dir / f"{SFUZZ_FIRRTL_COV_PREFIX}.json"]
+    candidates = [
+        case_dir / f"{SFUZZ_FIRRTL_COV_PREFIX}.json",
+        case_dir / "rfuzz_toggle_bitmap.json",
+        case_dir / "directfuzz_coverage.json",
+    ]
     out_prefix = os.environ.get(SFUZZ_FIRRTL_COV_OUT_ENV)
     if out_prefix:
         out_summary = Path(f"{out_prefix}.json").expanduser()
