@@ -409,7 +409,7 @@ def evaluate_feedback(
             backend,
             trace_source,
             str(trace),
-            "T2_paper_faithful_native_feedback" if paper_faithful else "T0_trace_loop",
+            "T2_processor_workload_native_feedback" if paper_faithful else "T0_trace_loop",
             paper_faithful,
             required_native_abi,
             notes,

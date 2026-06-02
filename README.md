@@ -74,10 +74,10 @@ src/methods/
     mutators.rs
 ```
 
-These modules contain RFuzz raw pin-stream input normalization, mux-select
-toggle coverage, interesting-input feedback, and AFL-style mutations.  See
-`docs/rfuzz.md` for the paper/SurgeFuzz cross-check and the remaining LinkNan
-harness boundary.
+These modules contain the original RFuzz raw-stream input model, mux-select
+toggle coverage, interesting-input feedback, and AFL-style mutations. LinkNan
+processor-verification runs intentionally use native `.bin`/ELF workloads while
+keeping RFuzz mux-toggle feedback. See `docs/rfuzz.md` for that scope.
 
 ## DirectFuzz
 
@@ -244,10 +244,10 @@ scripts/linknan/
     profuzz.py
 ```
 
-注意：这些入口保留真实 LinkNan VCS 构建和运行路径。RFuzz 的 LinkNan 入口现在
-执行 coverage feedback -> corpus retention -> mutate/generate -> VCS run 的循环，
-但当前适配器只使用正常 workload `.bin`/ELF 文件；`.sfuz` 会被拒绝，RFuzz paper
-定义的逐周期 raw top-level pin-stream ABI 和 VCS native mux-select bitmap ABI 仍未接入。
+注意：这些入口保留真实 LinkNan VCS 构建和运行路径。RFuzz 的 LinkNan 入口按处理器验证
+口径执行 coverage feedback -> corpus retention -> mutate/generate -> VCS run 的循环，
+输入统一使用正常 workload `.bin`/ELF 文件；`.sfuz` 会被拒绝。RFuzz.mux-toggle 已接入
+VCS native mux-select bitmap，作为 LinkNan workload 模式下的 RFuzz 原生反馈。
 RFuzz 默认使用 `--no-cycle-limit`，不向 `xmake simv-run` 传 `--cycles`；LinkNan
 内部默认会落到 `+max-cycles=0`，按 LinkNan 文档表示无 cycle 上限，实验应使用
 外层 `--timeout-sec` 控制墙钟。DirectFuzz 必须接入 per-instance mux-toggle

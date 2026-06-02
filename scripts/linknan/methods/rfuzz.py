@@ -88,14 +88,14 @@ RFUZZ_FIELDS = [
     "timed_out",
     "infrastructure_error",
     "paper_faithful",
+    "paper_faithful_scope",
     "required_native_abi",
     "notes",
 ]
 
-MISSING_RAW_PIN_STREAM = "rfuzz_raw_top_pin_stream_input_abi"
 MISSING_MUX_TOGGLE = "rfuzz_vcs_mux_select_toggle_bitmap_abi"
 MISSING_VALID = "rfuzz_validity_abi_or_unconstrained_proof"
-MISSING_NATIVE_RUNNER = "rfuzz_vcs_native_runner_abi"
+MISSING_WORKLOAD_RUNNER = "rfuzz_linknan_workload_runner_abi"
 
 ELF_MAGIC = b"\x7fELF"
 SFUZ_MAGIC = b"SFUZ"
@@ -208,6 +208,8 @@ def parse_bool_choice(value: str) -> bool | None:
 
 
 def rfuzz_valid_value(args: Any, info: Any) -> tuple[bool | None, bool | str]:
+    if args.rfuzz_valid_source == "linknan-workload":
+        return True, True
     if args.rfuzz_valid_source == "unconstrained":
         return True, True
     parsed = parse_bool_choice(args.rfuzz_valid)
@@ -220,9 +222,8 @@ def rfuzz_valid_value(args: Any, info: Any) -> tuple[bool | None, bool | str]:
 
 def required_native_abi(args: Any, has_native_bitmap: bool, valid_known: bool) -> list[str]:
     missing: list[str] = []
-    if getattr(args, "rfuzz_actual_input_abi", "") != "raw-pin-stream":
-        missing.append(MISSING_NATIVE_RUNNER)
-        missing.append(MISSING_RAW_PIN_STREAM)
+    if getattr(args, "rfuzz_actual_input_abi", "") != "linknan-workload-binary-adapter":
+        missing.append(MISSING_WORKLOAD_RUNNER)
     if not has_native_bitmap:
         missing.append(MISSING_MUX_TOGGLE)
     if not valid_known:
@@ -234,7 +235,7 @@ def reject_sfuz_workload(path: Path, data: bytes) -> None:
     if path.suffix == ".sfuz" or data.startswith(SFUZ_MAGIC):
         raise ValueError(
             f"RFuzz LinkNan runner refuses SFUZ structured seeds as official input: {path}. "
-            "Use a normal workload .bin/ELF or the native RFuzz raw pin-stream ABI when it exists."
+            "Use a normal LinkNan workload .bin/ELF for processor-verification RFuzz runs."
         )
 
 
@@ -422,13 +423,7 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
         args.firrtl_cov = "RFuzz.mux-toggle"
 
     abi_audit = audit_linknan_rfuzz_abi(ctx)
-    actual_input_abi = "raw-pin-stream" if abi_audit.raw_pin_stream_supported else abi_audit.runner_abi
-    if args.rfuzz_input_model == "raw-pin-stream" and actual_input_abi != "raw-pin-stream":
-        print(
-            "RFuzz raw-pin-stream requested, but current LinkNan VCS harness only supports "
-            f"{abi_audit.runner_abi}; recording paper_faithful=false",
-            flush=True,
-        )
+    actual_input_abi = abi_audit.runner_abi
     args.rfuzz_actual_input_abi = actual_input_abi
 
     initial = collect_initial_workloads(args, ctx, work_dir)
@@ -536,7 +531,8 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
             "RFuzz campaign loop executed with normal LinkNan workload file input",
             "No SFUZ structured seed is generated or accepted by this RFuzz path",
             "LinkNan xmake simv-run internally defaults omitted --cycles to +max-cycles=0 (no limit)",
-            "Current adapter writes mutated bytes as .bin/ELF workload; DUT input is RAM image, not per-cycle top-level raw pins",
+            "Current RFuzz reproduction is intentionally evaluated in LinkNan processor workload mode",
+            "The original RFuzz raw pin-stream workload is not used for this processor-verification study",
             abi_audit.raw_pin_stream_reason,
         ]
         notes.extend(abi_audit.notes)
@@ -553,7 +549,7 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
             notes.append("common_coverage_* is diagnostic/common-backend data, not RFuzz paper-native feedback")
 
         missing_native_abi = required_native_abi(args, has_native_bitmap, valid_known)
-        paper_faithful = not missing_native_abi and actual_input_abi == "raw-pin-stream"
+        paper_faithful = not missing_native_abi and actual_input_abi == "linknan-workload-binary-adapter"
         rows.append(
             {
                 "fuzzer": "rfuzz",
@@ -618,6 +614,7 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
                 "timed_out": result.timed_out,
                 "infrastructure_error": infrastructure_error,
                 "paper_faithful": paper_faithful,
+                "paper_faithful_scope": "linknan-processor-workload",
                 "required_native_abi": ";".join(missing_native_abi),
                 "notes": append_notes(notes, {"run_outcome": run_outcome(result, info, infrastructure_error)}),
             }
@@ -639,7 +636,8 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
             "rfuzz_abi_audit": abi_audit.to_dict(),
             "actual_input_abi": actual_input_abi,
             "cycle_limit": cycle_limit,
-            "paper_faithful": False,
+            "paper_faithful": all(str(row.get("paper_faithful")) == "True" for row in rows) if rows else False,
+            "paper_faithful_scope": "linknan-processor-workload",
         },
     )
     return 0

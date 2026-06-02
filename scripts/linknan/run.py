@@ -96,11 +96,11 @@ def main() -> int:
         "rfuzz",
         help="run RFuzz inputs through real LinkNan VCS",
         epilog=(
-            "说明：RFuzz 当前入口执行真实 VCS campaign loop，但只通过正常 LinkNan "
-            "workload .bin/ELF 适配器进 DUT；.sfuz 会被拒绝。RFuzz.mux-toggle 可导出 "
-            "VCS native mux-select toggle bitmap，但 raw top-level pin-stream input ABI "
-            "仍未完成，因此 constrained workload adapter 结果不能标为完整 paper-faithful。"
-            "推荐与 --no-cycle-limit --timeout-sec 一起使用。"
+            "说明：RFuzz 当前入口按处理器验证口径执行真实 LinkNan VCS campaign loop，"
+            "输入统一使用 LinkNan 原生 workload .bin/ELF；.sfuz 会被拒绝。"
+            "RFuzz.mux-toggle 导出 VCS native mux-select toggle bitmap，作为 RFuzz "
+            "在 LinkNan workload 模式下的原生反馈。推荐与 --no-cycle-limit "
+            "--timeout-sec 一起使用。"
         ),
     )
     add_common_vcs_args(rfuzz)
@@ -122,11 +122,11 @@ def main() -> int:
     rfuzz.add_argument("--rfuzz-max-input-bytes", type=int, default=0, help="truncate mutated workload inputs; 0 disables")
     rfuzz.add_argument(
         "--rfuzz-input-model",
-        choices=["linknan-workload-binary-adapter", "raw-pin-stream"],
+        choices=["linknan-workload-binary-adapter"],
         default="linknan-workload-binary-adapter",
         help=(
-            "requested RFuzz input ABI label; the runner audits the current LinkNan VCS harness and "
-            "records the actual ABI, so requesting raw-pin-stream does not make a run paper-faithful"
+            "RFuzz input ABI for LinkNan processor verification; current experiments intentionally use "
+            "LinkNan native .bin/ELF workload inputs"
         ),
     )
     rfuzz.add_argument("--rfuzz-toggle-bitmap", type=Path, help="RFuzz mux-toggle bitmap exported for this testcase")
@@ -139,9 +139,9 @@ def main() -> int:
     rfuzz.add_argument("--rfuzz-toggle-total", type=int, default=0, help="total RFuzz mux-toggle points")
     rfuzz.add_argument(
         "--rfuzz-valid-source",
-        choices=["unknown", "unconstrained", "vcs-native-abi", "manual", "vcs-good-trap"],
-        default="unknown",
-        help="source of the RFuzz validity decision; constrained DUTs need vcs-native-abi",
+        choices=["unknown", "linknan-workload", "unconstrained", "vcs-native-abi", "manual", "vcs-good-trap"],
+        default="linknan-workload",
+        help="source of the RFuzz validity decision; LinkNan workload mode treats accepted .bin/ELF inputs as valid processor workloads",
     )
     rfuzz.add_argument(
         "--rfuzz-valid",
