@@ -24,6 +24,7 @@ SFUZZ_FIRRTL_COV_ENV = "SFUZZ_FIRRTL_COV"
 SFUZZ_FIRRTL_COV_OUT_ENV = "SFUZZ_FIRRTL_COV_OUT"
 SFUZZ_FIRRTL_COV_PREFIX = "sfuzz_firrtl_coverage"
 SFUZZ_FIRRTL_GENERATOR = Path("scripts/linknan/sfuzz_firrtl_cov.py")
+EXPECTED_EXPANDED_COMMON_POINTS = 17920
 
 BUG_PATTERNS = [
     ("hit_bad_trap", re.compile(r"HIT BAD TRAP", re.IGNORECASE)),
@@ -105,7 +106,50 @@ def simv_cmd_file(sim_dir: Path) -> Path:
     return sim_dir / "simv" / "comp" / "vcs_cmd.sh"
 
 
-def simv_compiled_with_firrtl_coverage(sim_dir: Path) -> bool | None:
+def requested_firrtl_groups(firrtl_cov: str) -> set[str]:
+    normalized = normalize_firrtl_coverage_name(firrtl_cov).lower()
+    if normalized in {"firrtl", "firrtl.all", "firrtl.common", "firrtl.sfuzz.firrtl.common.v0"}:
+        return {"common"}
+    if normalized.startswith("firrtl."):
+        return {normalized[len("firrtl.") :]}
+    return {normalized} if normalized else set()
+
+
+def generated_firrtl_metadata(build_dir: Path) -> dict[str, Any] | None:
+    path = build_dir / "generated-src" / "sfuzz_firrtl_cover.json"
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def generated_firrtl_metadata_matches(build_dir: Path, firrtl_cov: str) -> bool:
+    metadata = generated_firrtl_metadata(build_dir)
+    if not metadata or metadata.get("backend") != "sfuzz_firrtl_sv_bind":
+        return False
+    groups = metadata.get("groups")
+    if not isinstance(groups, dict):
+        return False
+    requested = requested_firrtl_groups(firrtl_cov)
+    if not requested:
+        return True
+    for group in requested:
+        if group not in groups:
+            return False
+        try:
+            count = int(groups[group])
+        except (TypeError, ValueError):
+            return False
+        if count <= 0:
+            return False
+        if group in {"common", "all"} and count < EXPECTED_EXPANDED_COMMON_POINTS:
+            return False
+    return True
+
+
+def simv_compiled_with_firrtl_coverage(sim_dir: Path, build_dir: Path | None = None, firrtl_cov: str = "") -> bool | None:
     cmd_file = simv_cmd_file(sim_dir)
     if not cmd_file.is_file():
         return None
@@ -122,13 +166,20 @@ def simv_compiled_with_firrtl_coverage(sim_dir: Path) -> bool | None:
     if daidir.is_dir():
         binaries.extend(sorted(daidir.glob("*.so")))
     marker = b"SFUZZ_FIRRTL_COVERAGE"
+    marker_found = False
     for binary in binaries:
         try:
             if binary.is_file() and marker in binary.read_bytes():
-                return True
+                marker_found = True
+                break
         except OSError:
             continue
-    return False
+    if not marker_found:
+        return False
+
+    if firrtl_cov and build_dir is not None:
+        return generated_firrtl_metadata_matches(build_dir, firrtl_cov)
+    return True
 
 
 def ensure_firrtl_coverage_artifacts(firrtl_cov: str, ctx: VcsContext, work_dir: Path, timeout_sec: int = 0) -> None:
@@ -234,12 +285,12 @@ def build_simv_if_needed(args: Any, ctx: VcsContext, work_dir: Path) -> None:
     firrtl_cov = requested_firrtl_coverage(args)
     if getattr(args, "skip_build", False):
         require_file(simv)
-        if firrtl_cov and simv_compiled_with_firrtl_coverage(ctx.sim_dir) is not True:
+        if firrtl_cov and simv_compiled_with_firrtl_coverage(ctx.sim_dir, ctx.build_dir, firrtl_cov) is not True:
             raise RuntimeError(
                 f"existing simv was not built with SFuzz FIRRTL coverage; rebuild with {SFUZZ_FIRRTL_COV_ENV}={firrtl_cov}"
             )
         return
-    needs_firrtl_rebuild = firrtl_cov and simv_compiled_with_firrtl_coverage(ctx.sim_dir) is not True
+    needs_firrtl_rebuild = firrtl_cov and simv_compiled_with_firrtl_coverage(ctx.sim_dir, ctx.build_dir, firrtl_cov) is not True
     if (
         simv.is_file()
         and not getattr(args, "build", False)
