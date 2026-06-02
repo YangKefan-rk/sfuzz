@@ -46,7 +46,7 @@ def add_common_vcs_args(parser: argparse.ArgumentParser) -> None:
         "--firrtl-cov",
         dest="firrtl_cov",
         help=(
-            "enable SFuzz FIRRTL common coverage export, e.g. FIRRTL.common or FIRRTL.mux; "
+            "enable LinkNan FIRRTL/native coverage export, e.g. FIRRTL.common, FIRRTL.mux, or RFuzz.mux-toggle; "
             "requires an instrumented LinkNan build with firrtl-cover.h/.cpp"
         ),
     )
@@ -97,9 +97,10 @@ def main() -> int:
         help="run RFuzz inputs through real LinkNan VCS",
         epilog=(
             "说明：RFuzz 当前入口执行真实 VCS campaign loop，但只通过正常 LinkNan "
-            "workload .bin/ELF 适配器进 DUT；.sfuz 会被拒绝。若未提供 VCS native "
-            "RFuzz mux-select bitmap，覆盖字段只能表示 ABI 缺失，不能作为 paper-faithful "
-            "RFuzz 数据。推荐与 --no-cycle-limit --timeout-sec 一起使用。"
+            "workload .bin/ELF 适配器进 DUT；.sfuz 会被拒绝。RFuzz.mux-toggle 可导出 "
+            "VCS native mux-select toggle bitmap，但 raw top-level pin-stream input ABI "
+            "仍未完成，因此 constrained workload adapter 结果不能标为完整 paper-faithful。"
+            "推荐与 --no-cycle-limit --timeout-sec 一起使用。"
         ),
     )
     add_common_vcs_args(rfuzz)

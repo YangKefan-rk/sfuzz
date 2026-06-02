@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import random
 import re
 from pathlib import Path
@@ -50,6 +51,9 @@ RFUZZ_FIELDS = [
     "coverage_value",
     "covered",
     "total",
+    "rfuzz_mux_covered",
+    "rfuzz_mux_total",
+    "rfuzz_new_bits",
     "new_total_coverage",
     "new_valid_coverage",
     "total_covered",
@@ -333,30 +337,45 @@ def mutate_bytes(parent: bytes, rng: random.Random, round_index: int, max_input_
     return bytes(candidate), mutation
 
 
-def find_toggle_bitmap(args: Any, case_name: str, input_path: Path, case_dir: Path) -> tuple[bytes, str]:
-    candidates: list[Path] = []
+def rfuzz_bitmap_total_from_json(bitmap: Path) -> int:
+    summary = bitmap.with_suffix(".json")
+    if not summary.is_file():
+        return 0
+    try:
+        payload = json.loads(summary.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    if payload.get("native_backend") != "rfuzz_mux_select_toggle":
+        return 0
+    try:
+        return int(payload.get("total", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def find_toggle_bitmap(args: Any, case_name: str, input_path: Path, case_dir: Path) -> tuple[bytes, str, int]:
+    candidates: list[tuple[Path, str]] = []
     if args.rfuzz_toggle_bitmap:
-        candidates.append(args.rfuzz_toggle_bitmap.expanduser())
+        candidates.append((args.rfuzz_toggle_bitmap.expanduser(), args.rfuzz_toggle_bitmap_source))
     if args.rfuzz_toggle_bitmap_dir:
         bitmap_dir = args.rfuzz_toggle_bitmap_dir.expanduser()
-        candidates.extend(
-            [
-                bitmap_dir / f"{case_name}.bin",
-                bitmap_dir / f"{input_path.stem}.bin",
-                bitmap_dir / "rfuzz_toggle_bitmap.bin",
-            ]
-        )
+        for candidate in [
+            bitmap_dir / f"{case_name}.bin",
+            bitmap_dir / f"{input_path.stem}.bin",
+            bitmap_dir / "rfuzz_toggle_bitmap.bin",
+        ]:
+            candidates.append((candidate, args.rfuzz_toggle_bitmap_source))
     candidates.extend(
         [
-            case_dir / "rfuzz_toggle_bitmap.bin",
-            case_dir / "rfuzz_mux_toggle.bin",
-            case_dir / f"{case_name}.rfuzz.bin",
+            (case_dir / "rfuzz_toggle_bitmap.bin", "vcs-native-abi"),
+            (case_dir / "rfuzz_mux_toggle.bin", "vcs-native-abi"),
+            (case_dir / f"{case_name}.rfuzz.bin", "vcs-native-abi"),
         ]
     )
-    for candidate in candidates:
+    for candidate, source in candidates:
         if candidate.is_file():
-            return candidate.read_bytes(), args.rfuzz_toggle_bitmap_source
-    return b"", "absent"
+            return candidate.read_bytes(), source, rfuzz_bitmap_total_from_json(candidate)
+    return b"", "absent", 0
 
 
 def run_outcome(result: Any, info: Any, infrastructure_error: str) -> str:
@@ -386,6 +405,8 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
 
     if ctx.cycles is None and args.timeout_sec <= 0:
         raise ValueError("RFuzz --no-cycle-limit runs require --timeout-sec to bound wall-clock time")
+    if not getattr(args, "firrtl_cov", None):
+        args.firrtl_cov = "RFuzz.mux-toggle"
 
     initial = collect_initial_workloads(args, ctx, work_dir)
     build_simv_if_needed(args, ctx, work_dir)
@@ -443,8 +464,11 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
         if not run_log.is_file() and not infrastructure_error:
             infrastructure_error = "run.log missing"
 
-        bitmap, toggle_bitmap_source = find_toggle_bitmap(args, case_name, candidate_path, case_dir)
+        bitmap, toggle_bitmap_source, bitmap_total = find_toggle_bitmap(args, case_name, candidate_path, case_dir)
         has_native_bitmap = bool(bitmap) and toggle_bitmap_source == "vcs-native-abi"
+        rfuzz_total = bitmap_total or args.rfuzz_toggle_total or (len(bitmap) * 8 if bitmap else 0)
+        if rfuzz_total and coverage.max_coverage == 0:
+            coverage.max_coverage = rfuzz_total
         valid_bool, valid_value = rfuzz_valid_value(args, info)
         valid_known = valid_bool is not None
         coverage_delta = coverage.classify(bitmap, bool(valid_bool)) if bitmap else {
@@ -453,7 +477,7 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
             "total_covered": coverage.total_covered(),
             "valid_covered": coverage.valid_covered(),
             "growth": 0,
-            "total_points": args.rfuzz_toggle_total,
+            "total_points": rfuzz_total,
         }
 
         retention_reasons: list[str] = []
@@ -483,7 +507,7 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
         common_backend = common_coverage_backend(common_coverage)
         coverage_backend = "rfuzz_mux_select_vcs_native_abi" if has_native_bitmap else "unavailable"
         covered = popcount_bytes(bitmap) if bitmap else ""
-        total = args.rfuzz_toggle_total or (len(bitmap) * 8 if bitmap else "")
+        total = rfuzz_total or ""
         coverage_value = round(100.0 * covered / total, 6) if bitmap and total else ""
         notes = [
             "RFuzz campaign loop executed with normal LinkNan workload file input",
@@ -533,6 +557,9 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
                 "coverage_value": coverage_value,
                 "covered": covered,
                 "total": total,
+                "rfuzz_mux_covered": covered,
+                "rfuzz_mux_total": total,
+                "rfuzz_new_bits": coverage_delta["growth"],
                 "new_total_coverage": coverage_delta["new_total"],
                 "new_valid_coverage": coverage_delta["new_valid"],
                 "total_covered": coverage_delta["total_covered"],

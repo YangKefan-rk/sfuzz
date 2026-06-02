@@ -4,11 +4,11 @@ This note describes the RFuzz method-level reproduction in SFuzz. RFuzz is a
 coverage-directed RTL fuzzer: it treats a test as raw bytes over top-level input
 pins across time and uses mux-select toggle coverage as feedback.
 
-This is not a complete LinkNan, Verilator, or VCS RFuzz runner. The Rust code
+This is not yet a complete paper-faithful LinkNan RFuzz runner. The Rust code
 below provides testable building blocks for input normalization, toggle
-coverage, feedback decisions, and mutation. It deliberately does not add a
-placeholder runner or CLI until the simulator ABI and instrumentation pieces are
-available.
+coverage, feedback decisions, and mutation. The LinkNan/VCS runner now has a
+native mux-select toggle feedback path, but the DUT input is still a constrained
+LinkNan workload adapter rather than RFuzz's raw top-level pin stream.
 
 The implementation lives under:
 
@@ -104,8 +104,8 @@ belongs with a future runner/scheduler integration and should be tested there.
 `scripts/linknan/run.py rfuzz` is intentionally conservative. It launches the
 real LinkNan VCS `simv-run` path in a campaign loop and records the real command
 status, logs, natural finish/timeout state, corpus retention decisions, and
-optional diagnostic coverage sources. It no longer accepts SFUZ structured
-seeds as RFuzz input. The current LinkNan bridge is a native workload-file
+native mux-select toggle coverage. It no longer accepts SFUZ structured seeds
+as RFuzz input. The current LinkNan bridge is a constrained workload-file
 adapter:
 
 - it feeds LinkNan through `xmake simv-run --workload=<input.bin|input.elf>`,
@@ -114,10 +114,16 @@ adapter:
 - the adapter writes mutated bytes as workload `.bin` files and can seed from
   existing `.bin`/ELF workloads; this is a compatibility adapter, not the RFuzz
   paper's per-cycle top-level raw pin stream
-- it has no VCS DPI/PLI/shared-memory hook that samples a native `coverage`
-  mux-select bus every cycle and returns the local toggle bitmap to the fuzzer
-- it has no native valid/invalid decision exported from constrained LinkNan
-  interfaces
+- by default it builds `--firrtl-cov RFuzz.mux-toggle`, which inserts a VCS
+  bind probe for each extracted 2:1 mux condition; each probe reports coverage
+  only when the select has observed both `0` and `1` within the same testcase
+- the VCS exporter writes `rfuzz_toggle_bitmap.bin` using bit-packed LSB0
+  encoding plus `rfuzz_toggle_bitmap.json` metadata; the runner treats these
+  case-local files as `toggle_bitmap_source=vcs-native-abi`
+- it still has no native valid/invalid decision exported from constrained
+  LinkNan interfaces; `valid_source=unconstrained` is only appropriate for
+  explicitly unconstrained harnesses, and LinkNan workload-adapter runs should
+  keep this boundary visible
 
 The RFuzz CSV now records these boundaries explicitly:
 
@@ -149,8 +155,8 @@ Supplying a manual bitmap with `--rfuzz-toggle-bitmap` is useful for pipeline
 diagnostics, but it does not make the row paper-faithful. VCS built-in
 line/toggle coverage, annotated-source counts, VCS logs, run success, and cycle
 counts are likewise diagnostic only and must not be reported as RFuzz paper
-coverage. A paper-faithful LinkNan result still needs the missing native ABI
-items listed in `required_native_abi`.
+coverage. A fully paper-faithful LinkNan result still needs the missing native
+input/reset/validity ABI items listed in `required_native_abi`.
 
 ## SurgeFuzz Cross-Check
 
@@ -163,11 +169,8 @@ The local RFuzz reproduction mirrors these SurgeFuzz components:
 The Rust code intentionally stops at the method boundary. A fully faithful
 LinkNan/Verilator/VCS run still needs:
 
-- mux-select instrumentation generated from the RTL/FIRRTL pass
 - a pin-stream ABI that maps testcase bytes onto top-level input pins every
   cycle
-- a per-cycle simulator hook that samples mux-select coverage and feeds
-  `ToggleTracker`
 - reset/memory handling equivalent to RFuzz's `MetaReset` and `SparseMem`
   transforms
 - a defined source for constrained-interface validity, including how invalid,
@@ -177,10 +180,14 @@ LinkNan/Verilator/VCS run still needs:
 
 ## Current Integration Status
 
-The method logic is unit-tested and ready to be used by future runners. The
-default `--fuzzing` path still uses the existing LibAFL byte-input harness, so
-it should not be described as a fully faithful RFuzz runner yet.
+The method logic is unit-tested, and the LinkNan/VCS RFuzz runner now consumes
+native mux-select toggle feedback from real simulation. It should still be
+described as a constrained LinkNan workload-adapter reproduction until raw
+pin-stream input, deterministic reset/memory handling, and validity feedback
+are implemented.
 
 Recommended README wording, when coordination allows: "RFuzz currently provides
-method-level building blocks under `src/methods/rfuzz/`; a full RFuzz runner
-still requires simulator pin-stream and mux-coverage integration."
+method-level building blocks under `src/methods/rfuzz/` and a LinkNan/VCS
+mux-toggle feedback runner; a fully paper-faithful RFuzz runner still requires
+raw pin-stream input, deterministic RFuzz reset semantics, and validity
+feedback."

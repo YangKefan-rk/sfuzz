@@ -93,6 +93,8 @@ def normalize_firrtl_coverage_name(value: str | None) -> str:
         return ""
     if text.lower() == "firrtl" or text.lower().startswith("firrtl."):
         return text
+    if text.lower() == "rfuzz" or text.lower().startswith("rfuzz.") or text.lower().startswith("rfuzz_"):
+        return text
     return f"FIRRTL.{text}"
 
 
@@ -112,8 +114,12 @@ def requested_firrtl_groups(firrtl_cov: str) -> set[str]:
     normalized = normalize_firrtl_coverage_name(firrtl_cov).lower()
     if normalized in {"firrtl", "firrtl.all", "firrtl.common", "firrtl.sfuzz.firrtl.common.v0"}:
         return {"common"}
+    if normalized in {"rfuzz", "rfuzz.mux", "rfuzz.mux-toggle", "rfuzz.mux_toggle", "rfuzz_mux_toggle"}:
+        return {"rfuzz_mux_toggle"}
     if normalized.startswith("firrtl."):
         return {normalized[len("firrtl.") :]}
+    if normalized.startswith("rfuzz."):
+        return {normalized[len("rfuzz.") :].replace("-", "_")}
     return {normalized} if normalized else set()
 
 
