@@ -125,8 +125,8 @@ def main() -> int:
         choices=["linknan-workload-binary-adapter", "raw-pin-stream"],
         default="linknan-workload-binary-adapter",
         help=(
-            "requested RFuzz input ABI label; current LinkNan path uses the workload binary adapter, "
-            "while raw-pin-stream remains a missing native ABI"
+            "requested RFuzz input ABI label; the runner audits the current LinkNan VCS harness and "
+            "records the actual ABI, so requesting raw-pin-stream does not make a run paper-faithful"
         ),
     )
     rfuzz.add_argument("--rfuzz-toggle-bitmap", type=Path, help="RFuzz mux-toggle bitmap exported for this testcase")

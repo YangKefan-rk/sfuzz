@@ -124,14 +124,31 @@ adapter:
   LinkNan interfaces; `valid_source=unconstrained` is only appropriate for
   explicitly unconstrained harnesses, and LinkNan workload-adapter runs should
   keep this boundary visible
+- before each campaign the runner performs a static RFuzz ABI audit of the
+  current LinkNan VCS harness. The current generated `SimTop` exposes only
+  clock/reset, difftest/log/perf controls, and UART-related pins to `tb_top`;
+  `xmake simv-run` injects testcase bytes through `+workload=` RAM/ELF loading.
+  Therefore `raw_pin_stream_supported=false` for this path today.
 
 The RFuzz CSV now records these boundaries explicitly:
 
 ```text
 runner_abi              linknan-workload-binary-adapter today
 requested_input_model   linknan-workload-binary-adapter or raw-pin-stream
+actual_input_abi        audited ABI actually used by the runner
 input_model             actual workload format: binary-workload, elf-workload,
                         gzip-workload, or zstd-workload
+raw_pin_stream_supported
+                        true only when the audited LinkNan harness exposes
+                        non-control top-level input pins to the fuzzer
+raw_pin_stream_reason   static audit explanation for the current harness
+top_input_pins          total audited SimTop input width, including controls
+fuzzable_input_pins     audited non-control input width exposed by SimTop
+pin_stream_driver_supported
+                        whether a VCS RFuzz pin-stream driver is integrated
+deterministic_reset_model
+                        current reset model; not RFuzz MetaReset yet
+sparse_memory_model     current memory model; not RFuzz SparseMem yet
 cycle_limit             none when --no-cycle-limit is active; otherwise the
                         explicit VCS max-cycle bound
 toggle_bitmap_source    absent, manual, dev-generated, or vcs-native-abi
@@ -156,7 +173,9 @@ diagnostics, but it does not make the row paper-faithful. VCS built-in
 line/toggle coverage, annotated-source counts, VCS logs, run success, and cycle
 counts are likewise diagnostic only and must not be reported as RFuzz paper
 coverage. A fully paper-faithful LinkNan result still needs the missing native
-input/reset/validity ABI items listed in `required_native_abi`.
+input/reset/validity ABI items listed in `required_native_abi`. Supplying
+`--rfuzz-input-model raw-pin-stream` is treated as a request, not proof; the
+static ABI audit still controls `actual_input_abi` and `paper_faithful`.
 
 ## SurgeFuzz Cross-Check
 

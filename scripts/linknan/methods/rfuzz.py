@@ -14,6 +14,7 @@ from ..common import (
     write_table,
 )
 from ..config import VcsContext
+from ..rfuzz_abi import audit_linknan_rfuzz_abi
 from ..seeds import parse_hex_blob
 from ..vcs import (
     build_simv_if_needed,
@@ -34,7 +35,16 @@ RFUZZ_FIELDS = [
     "mutation",
     "runner_abi",
     "requested_input_model",
+    "actual_input_abi",
     "input_model",
+    "raw_pin_stream_supported",
+    "raw_pin_stream_reason",
+    "top_input_pins",
+    "fuzzable_input_pins",
+    "pin_stream_driver_supported",
+    "validity_supported",
+    "deterministic_reset_model",
+    "sparse_memory_model",
     "cycle_limit",
     "toggle_bitmap_source",
     "valid_source",
@@ -209,7 +219,10 @@ def rfuzz_valid_value(args: Any, info: Any) -> tuple[bool | None, bool | str]:
 
 
 def required_native_abi(args: Any, has_native_bitmap: bool, valid_known: bool) -> list[str]:
-    missing: list[str] = [MISSING_NATIVE_RUNNER, MISSING_RAW_PIN_STREAM]
+    missing: list[str] = []
+    if getattr(args, "rfuzz_actual_input_abi", "") != "raw-pin-stream":
+        missing.append(MISSING_NATIVE_RUNNER)
+        missing.append(MISSING_RAW_PIN_STREAM)
     if not has_native_bitmap:
         missing.append(MISSING_MUX_TOGGLE)
     if not valid_known:
@@ -408,6 +421,16 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
     if not getattr(args, "firrtl_cov", None):
         args.firrtl_cov = "RFuzz.mux-toggle"
 
+    abi_audit = audit_linknan_rfuzz_abi(ctx)
+    actual_input_abi = "raw-pin-stream" if abi_audit.raw_pin_stream_supported else abi_audit.runner_abi
+    if args.rfuzz_input_model == "raw-pin-stream" and actual_input_abi != "raw-pin-stream":
+        print(
+            "RFuzz raw-pin-stream requested, but current LinkNan VCS harness only supports "
+            f"{abi_audit.runner_abi}; recording paper_faithful=false",
+            flush=True,
+        )
+    args.rfuzz_actual_input_abi = actual_input_abi
+
     initial = collect_initial_workloads(args, ctx, work_dir)
     build_simv_if_needed(args, ctx, work_dir)
 
@@ -514,7 +537,9 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
             "No SFUZ structured seed is generated or accepted by this RFuzz path",
             "LinkNan xmake simv-run internally defaults omitted --cycles to +max-cycles=0 (no limit)",
             "Current adapter writes mutated bytes as .bin/ELF workload; DUT input is RAM image, not per-cycle top-level raw pins",
+            abi_audit.raw_pin_stream_reason,
         ]
+        notes.extend(abi_audit.notes)
         if ctx.cycles is None:
             notes.append("cycle limit disabled by --no-cycle-limit; wall-clock bounded by --timeout-sec")
         if bitmap and not has_native_bitmap:
@@ -528,7 +553,7 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
             notes.append("common_coverage_* is diagnostic/common-backend data, not RFuzz paper-native feedback")
 
         missing_native_abi = required_native_abi(args, has_native_bitmap, valid_known)
-        paper_faithful = not missing_native_abi and args.rfuzz_input_model == "raw-pin-stream"
+        paper_faithful = not missing_native_abi and actual_input_abi == "raw-pin-stream"
         rows.append(
             {
                 "fuzzer": "rfuzz",
@@ -538,9 +563,18 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
                 "input_path": str(candidate_path),
                 "input_size_bytes": len(candidate_bytes),
                 "mutation": mutation,
-                "runner_abi": "linknan-workload-binary-adapter",
+                "runner_abi": abi_audit.runner_abi,
                 "requested_input_model": args.rfuzz_input_model,
+                "actual_input_abi": actual_input_abi,
                 "input_model": input_model,
+                "raw_pin_stream_supported": abi_audit.raw_pin_stream_supported,
+                "raw_pin_stream_reason": abi_audit.raw_pin_stream_reason,
+                "top_input_pins": abi_audit.top_input_pins,
+                "fuzzable_input_pins": abi_audit.fuzzable_input_pins,
+                "pin_stream_driver_supported": abi_audit.pin_stream_driver_supported,
+                "validity_supported": abi_audit.validity_supported,
+                "deterministic_reset_model": abi_audit.deterministic_reset_model,
+                "sparse_memory_model": abi_audit.sparse_memory_model,
                 "cycle_limit": cycle_limit,
                 "toggle_bitmap_source": toggle_bitmap_source,
                 "valid_source": args.rfuzz_valid_source,
@@ -601,7 +635,9 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
         RFUZZ_FIELDS,
         {
             "fuzzer": "rfuzz",
-            "runner_abi": "linknan-workload-binary-adapter",
+            "runner_abi": abi_audit.runner_abi,
+            "rfuzz_abi_audit": abi_audit.to_dict(),
+            "actual_input_abi": actual_input_abi,
             "cycle_limit": cycle_limit,
             "paper_faithful": False,
         },
