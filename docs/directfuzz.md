@@ -138,9 +138,21 @@ paper algorithm.
 
 ## LinkNan VCS Runner Boundary
 
-`scripts/linknan/run.py directfuzz` always runs the selected SFUZ seed through
-the real LinkNan VCS path, but the DirectFuzz feedback source is selected
-separately:
+`scripts/linknan/run.py directfuzz` runs normal LinkNan workload files through
+the real VCS path.  DirectFuzz inputs are `.bin` or ELF workload images; `.sfuz`
+is SFuzz-specific and is rejected for this method.  This matches the
+SurgeFuzz/DirectFuzz artifact shape: the fuzzer mutates a generated RISC-V
+program, builds a target input image, runs the RTL simulator, and uses
+per-testcase feedback to decide whether to retain the program.
+
+Use `--no-cycle-limit --timeout-sec <N>` for LinkNan DirectFuzz campaigns.
+With `--no-cycle-limit`, `scripts/linknan/vcs.py` does not pass `--cycles` to
+`xmake simv-run`; in the current LinkNan checkout this means the generated
+`tmp.sh` contains no `+max-cycles` argument.  Termination is therefore by
+natural workload finish or the external command timeout.  The old fixed-cycle
+replay shape is not the DirectFuzz campaign model.
+
+The DirectFuzz feedback source is selected separately:
 
 ```text
 --coverage-backend vcs-log      real VCS run only; no DirectFuzz mux-toggle feedback
@@ -173,6 +185,17 @@ It also records VCS smoke health fields such as `vcs_report_seen`,
 and `infrastructure_error`, so T0 reports can distinguish runner health from
 DirectFuzz feedback faithfulness.
 
+The runner is now a campaign loop, not manifest replay.  It:
+
+- imports initial `.bin`/ELF workload seeds
+- runs each seed once and computes DirectFuzz feedback when available
+- stores retained inputs in a corpus only when DirectFuzz feedback is present
+  and the input is an initial seed or adds new coverage
+- schedules retained inputs through the target-priority/regular DirectFuzz
+  queues
+- mutates scheduled workload bytes with an energy-derived budget
+- reruns VCS and keeps only inputs with new DirectFuzz coverage
+
 `paper_faithful` is `true` only when all DirectFuzz paper feedback inputs are
 declared as real method inputs:
 
@@ -193,3 +216,11 @@ metadata comes from `gen-directfuzz-dev-metadata`. For a native-file ABI smoke
 backed by hand-written or generated CSV coverage, use
 `--native-coverage-source manual` or `dev-generated`; those runs are valid
 pipeline checks, but their output must still show `paper_faithful=false`.
+
+Current LinkNan limitation: there is no confirmed native per-instance
+mux-toggle coverage ABI for DirectFuzz in the checked-out VCS flow.  The
+`vcs-log` backend records this as
+`required_native_abi=directfuzz_per_instance_mux_toggle;...` and does not
+invent distance/coverage feedback.  `dev-mock` can be used to validate that the
+campaign loop mutates and retains inputs based on feedback, but the result is
+explicitly diagnostic and not paper-faithful.

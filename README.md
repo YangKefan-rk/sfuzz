@@ -207,12 +207,19 @@ python3 scripts/linknan/run.py sfuzz \
 The same platform entry point exposes method-specific commands:
 
 ```bash
-python3 scripts/linknan/run.py rfuzz --raw-hex 73001000 --skip-build
+python3 scripts/linknan/run.py rfuzz \
+  --seed /nfs/home/yangkefan/SFUZZ/LinkNan/ready-to-run/dhrystone.bin \
+  --rfuzz-rounds 3 \
+  --no-cycle-limit \
+  --timeout-sec 60 \
+  --skip-build
 python3 scripts/linknan/run.py directfuzz \
   --metadata /tmp/directfuzz_metadata.csv \
   --target-instance Tile0.mshr \
-  --seed-dir /tmp/sfuzz-corpus \
-  --skip-build
+  --seed /path/to/workload.bin \
+  --skip-build \
+  --no-cycle-limit \
+  --timeout-sec 60
 python3 scripts/linknan/run.py surgefuzz \
   --score-trace-dir /tmp/surgefuzz_profile \
   --seed-dir /tmp/sfuzz-corpus \
@@ -237,12 +244,17 @@ scripts/linknan/
     profuzz.py
 ```
 
-注意：这些入口保留真实 LinkNan VCS 构建和运行路径。RFuzz 当前只有外部
-mux-select bitmap 才能表示论文定义的覆盖；DirectFuzz 必须接入 per-instance
-mux-toggle 覆盖/反馈 ABI；SurgeFuzz 必须接入 per-cycle score 和 ancestor
-coverage ABI；PROFUZZ 必须接入论文定义的目标点覆盖/反馈 ABI。凡使用 VCS log、
-dev mock、VCS built-in coverage 或离线 trace 的结果，都只能作为调试/冒烟数据，
-不能作为 paper-faithful 对比数据。
+注意：这些入口保留真实 LinkNan VCS 构建和运行路径。RFuzz 的 LinkNan 入口现在
+执行 coverage feedback -> corpus retention -> mutate/generate -> VCS run 的循环，
+但当前适配器只使用正常 workload `.bin`/ELF 文件；`.sfuz` 会被拒绝，RFuzz paper
+定义的逐周期 raw top-level pin-stream ABI 和 VCS native mux-select bitmap ABI 仍未接入。
+RFuzz 默认使用 `--no-cycle-limit`，不向 `xmake simv-run` 传 `--cycles`；LinkNan
+内部默认会落到 `+max-cycles=0`，按 LinkNan 文档表示无 cycle 上限，实验应使用
+外层 `--timeout-sec` 控制墙钟。DirectFuzz 必须接入 per-instance mux-toggle
+覆盖/反馈 ABI；SurgeFuzz 必须接入 per-cycle score 和 ancestor coverage ABI；
+PROFUZZ 必须接入论文定义的目标点覆盖/反馈 ABI。凡使用 VCS log、dev mock、
+VCS built-in coverage 或离线 trace 的结果，都只能作为调试/冒烟数据，不能作为
+paper-faithful 对比数据。
 
 ## Seed Creation
 

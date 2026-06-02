@@ -72,6 +72,9 @@ class CoverageResult:
     coverage_value: str = ""
     coverage_source: str = ""
     coverage_status: str = "unavailable"
+    bitmap_path: str = ""
+    covered: int | None = None
+    total: int | None = None
 
 
 def num_cores_to_noc(num_cores: str) -> str:
@@ -110,7 +113,22 @@ def simv_compiled_with_firrtl_coverage(sim_dir: Path) -> bool | None:
     csrc_file = sim_dir / "simv" / "comp" / "csrc.f"
     if csrc_file.is_file():
         text += "\n" + csrc_file.read_text(encoding="utf-8", errors="replace")
-    return "-DFIRRTL_COVER" in text and "sfuzz_firrtl_cov_export.cpp" in text
+    if "-DFIRRTL_COVER" not in text or "sfuzz_firrtl_cov_export.cpp" not in text:
+        return False
+
+    comp_dir = sim_dir / "simv" / "comp"
+    binaries = [comp_dir / "simv"]
+    daidir = comp_dir / "simv.daidir"
+    if daidir.is_dir():
+        binaries.extend(sorted(daidir.glob("*.so")))
+    marker = b"SFUZZ_FIRRTL_COVERAGE"
+    for binary in binaries:
+        try:
+            if binary.is_file() and marker in binary.read_bytes():
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def ensure_firrtl_coverage_artifacts(firrtl_cov: str, ctx: VcsContext, work_dir: Path, timeout_sec: int = 0) -> None:
@@ -154,13 +172,27 @@ def ensure_firrtl_coverage_artifacts(firrtl_cov: str, ctx: VcsContext, work_dir:
         require_file(path)
 
 
-def run_command(command: list[str], cwd: Path, log_path: Path, timeout_sec: int = 0) -> CommandResult:
+def run_command(
+    command: list[str],
+    cwd: Path,
+    log_path: Path,
+    timeout_sec: int = 0,
+    extra_env: dict[str, str] | None = None,
+) -> CommandResult:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     start = time.monotonic()
     with log_path.open("w", encoding="utf-8", errors="replace") as log_file:
         log_file.write(f"COMMAND: {' '.join(command)}\n")
         log_file.write(f"START: {now_iso()}\n\n")
         log_file.flush()
+        env = None
+        if extra_env:
+            env = os.environ.copy()
+            env.update(extra_env)
+            for key, value in sorted(extra_env.items()):
+                log_file.write(f"ENV: {key}={value}\n")
+            log_file.write("\n")
+            log_file.flush()
         try:
             process = subprocess.run(
                 command,
@@ -169,6 +201,7 @@ def run_command(command: list[str], cwd: Path, log_path: Path, timeout_sec: int 
                 stderr=subprocess.STDOUT,
                 text=True,
                 timeout=timeout_sec if timeout_sec > 0 else None,
+                env=env,
             )
             returncode = process.returncode
             timed_out = False
@@ -262,6 +295,7 @@ def run_vcs_seed(
     timeout_sec: int = 0,
     cov: bool = False,
     simv_args: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[CommandResult, Path, Path, Path]:
     case_dir = runs_dir / case_name
     if case_dir.exists():
@@ -270,11 +304,12 @@ def run_vcs_seed(
         "xmake",
         "simv-run",
         f"--workload={seed}",
-        f"--cycles={ctx.cycles}",
         f"--case_name={case_name}",
         f"--sim_dir={ctx.sim_dir}",
         f"--run_dir={runs_dir}",
     ]
+    if ctx.cycles is not None and ctx.cycles > 0:
+        command.append(f"--cycles={ctx.cycles}")
     if ctx.no_diff:
         command.append("--no_diff")
     if ctx.no_fsdb:
@@ -285,11 +320,11 @@ def run_vcs_seed(
         command.append("--cov")
     if simv_args:
         command.append(f"--simv_args={simv_args}")
-    result = run_command(command, ctx.linknan_root, logs_dir / f"{case_name}.command.log", timeout_sec)
+    result = run_command(command, ctx.linknan_root, logs_dir / f"{case_name}.command.log", timeout_sec, extra_env)
     return result, case_dir, case_dir / "run.log", case_dir / "assert.log"
 
 
-def scan_vcs_logs(run_log: Path, assert_log: Path, requested_cycles: int) -> VcsLogInfo:
+def scan_vcs_logs(run_log: Path, assert_log: Path, requested_cycles: int | None) -> VcsLogInfo:
     info = VcsLogInfo()
     if assert_log.is_file() and assert_log.stat().st_size > 0:
         info.bug_reasons.append("assert_log_nonempty")
@@ -323,7 +358,7 @@ def scan_vcs_logs(run_log: Path, assert_log: Path, requested_cycles: int) -> Vcs
     cpu_time = re.findall(r"\bCPU Time:\s*([0-9]+(?:\.[0-9]+)?)\s*seconds", text)
     if cpu_time:
         info.vcs_cpu_time_sec = float(cpu_time[-1])
-    if info.cycles is None and requested_cycles:
+    if info.cycles is None and requested_cycles is not None:
         info.cycles = requested_cycles
         info.cycles_are_requested_only = True
     info.bug_triggered = bool(info.bug_reasons)
@@ -439,6 +474,9 @@ def parse_sfuzz_firrtl_coverage(path: Path) -> CoverageResult | None:
         coverage_value=f"{percent:.6f}",
         coverage_source=source,
         coverage_status=f"{status}: covered={covered} total={total}",
+        bitmap_path=str(bitmap_path) if bitmap_path.is_file() else "",
+        covered=covered,
+        total=total,
     )
 
 

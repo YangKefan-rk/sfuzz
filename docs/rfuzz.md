@@ -101,44 +101,56 @@ belongs with a future runner/scheduler integration and should be tested there.
 
 ## LinkNan/VCS Runner Status
 
-`scripts/linknan/run.py rfuzz` is intentionally conservative. It can launch the
-real LinkNan VCS `simv-run` path and record the real command status, logs,
-cycles, and optional diagnostic coverage sources. It does not yet implement the
-RFuzz paper runner ABI:
+`scripts/linknan/run.py rfuzz` is intentionally conservative. It launches the
+real LinkNan VCS `simv-run` path in a campaign loop and records the real command
+status, logs, natural finish/timeout state, corpus retention decisions, and
+optional diagnostic coverage sources. It no longer accepts SFUZ structured
+seeds as RFuzz input. The current LinkNan bridge is a native workload-file
+adapter:
 
-- it feeds LinkNan through `xmake simv-run --workload=<seed.sfuz>`, so the input
-  is an SFUZ program image or memory payload rather than per-cycle raw top-level
-  pin bytes
+- it feeds LinkNan through `xmake simv-run --workload=<input.bin|input.elf>`,
+  so the input reaching DUT memory is a normal binary/ELF workload file rather
+  than SFuzz's `.sfuz` container
+- the adapter writes mutated bytes as workload `.bin` files and can seed from
+  existing `.bin`/ELF workloads; this is a compatibility adapter, not the RFuzz
+  paper's per-cycle top-level raw pin stream
 - it has no VCS DPI/PLI/shared-memory hook that samples a native `coverage`
   mux-select bus every cycle and returns the local toggle bitmap to the fuzzer
 - it has no native valid/invalid decision exported from constrained LinkNan
   interfaces
-- it does not run a campaign loop where total and valid-only RFuzz coverage maps
-  decide corpus retention
 
 The RFuzz CSV now records these boundaries explicitly:
 
 ```text
-runner_abi              linknan-workload-simv-run today
-requested_input_model   requested CLI label, for example sfuz-core0-payload
-                        or raw-pin-stream
-input_model             actual VCS path used today: sfuz-core0-payload,
-                        sfuz-seed, or linknan-workload-file
+runner_abi              linknan-workload-binary-adapter today
+requested_input_model   linknan-workload-binary-adapter or raw-pin-stream
+input_model             actual workload format: binary-workload, elf-workload,
+                        gzip-workload, or zstd-workload
+cycle_limit             none when --no-cycle-limit is active; otherwise the
+                        explicit VCS max-cycle bound
 toggle_bitmap_source    absent, manual, dev-generated, or vcs-native-abi
-valid_source            unknown, unconstrained, manual, or vcs-native-abi
+valid_source            unknown, unconstrained, manual, vcs-good-trap, or
+                        vcs-native-abi
+retained                true when an initial seed, new RFuzz coverage, or bug
+                        objective is retained in the corpus
+coverage_growth         increment in the accumulated RFuzz mux-toggle map
 paper_faithful          true only when no required RFuzz ABI is missing
 required_native_abi     semicolon-separated missing ABI pieces
 ```
 
-Because the current runner is still the LinkNan SFUZ workload path,
-`required_native_abi` includes `rfuzz_vcs_native_runner_abi` and
-`rfuzz_raw_top_pin_stream_input_abi` even if `--rfuzz-input-model
-raw-pin-stream` is requested; the output `input_model` records the actual path
-that reached VCS. Supplying a manual bitmap with `--rfuzz-toggle-bitmap` is
-useful for pipeline diagnostics, but it does not make the row paper-faithful.
-VCS built-in line/toggle coverage, annotated-source counts, VCS logs, run
-success, and cycle counts are likewise diagnostic only and must not be reported
-as RFuzz paper coverage.
+The runner defaults to `--no-cycle-limit` for RFuzz, which means the wrapper does
+not pass `--cycles` to `xmake simv-run`. LinkNan's `simv-run` task has an
+internal `cycles` default of `0` and still emits `+max-cycles=0`; LinkNan's
+README documents `0` as no max-cycle limit. Use `--timeout-sec` to bound wall
+clock time in this mode. Supplying an explicit `--cycles N` overrides this and
+is recorded as a bounded diagnostic run.
+
+Supplying a manual bitmap with `--rfuzz-toggle-bitmap` is useful for pipeline
+diagnostics, but it does not make the row paper-faithful. VCS built-in
+line/toggle coverage, annotated-source counts, VCS logs, run success, and cycle
+counts are likewise diagnostic only and must not be reported as RFuzz paper
+coverage. A paper-faithful LinkNan result still needs the missing native ABI
+items listed in `required_native_abi`.
 
 ## SurgeFuzz Cross-Check
 

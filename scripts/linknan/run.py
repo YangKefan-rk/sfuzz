@@ -13,7 +13,15 @@ from linknan.methods.directfuzz import generate_direct_metadata, run_directfuzz
 from linknan.methods.profuzz import run_profuzz
 from linknan.methods.rfuzz import run_rfuzz
 from linknan.methods.sfuzz import run_sfuzz
-from linknan.methods.surgefuzz import run_surgefuzz, write_dev_surge_profile
+
+try:
+    from linknan.methods.surgefuzz import run_surgefuzz, write_dev_surge_profile
+except ModuleNotFoundError:
+    def run_surgefuzz(args: argparse.Namespace, ctx: object) -> int:
+        raise SystemExit("SurgeFuzz LinkNan runner module is unavailable in this worktree")
+
+    def write_dev_surge_profile(output_dir: Path) -> None:
+        raise SystemExit("SurgeFuzz development profile generator is unavailable in this worktree")
 
 
 def add_common_vcs_args(parser: argparse.ArgumentParser) -> None:
@@ -22,6 +30,11 @@ def add_common_vcs_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--sim-dir", type=Path, help="LinkNan sim directory")
     parser.add_argument("--work-dir", type=Path, default=Path("/tmp/sfuzz-linknan"))
     parser.add_argument("--cycles", type=int, help="max VCS simulation cycles")
+    parser.add_argument(
+        "--no-cycle-limit",
+        action="store_true",
+        help="do not pass --cycles to xmake simv-run; rely on workload natural finish and --timeout-sec",
+    )
     parser.add_argument("--case-prefix", default=None)
     parser.add_argument("--timeout-sec", type=int, default=0, help="per-command timeout; 0 disables")
     parser.add_argument("--build", action="store_true", help="run xmake simv before executing seeds")
@@ -33,7 +46,7 @@ def add_common_vcs_args(parser: argparse.ArgumentParser) -> None:
         "--firrtl-cov",
         dest="firrtl_cov",
         help=(
-            "enable SFuzz FIRRTL common coverage export, e.g. FIRRTL.mux; "
+            "enable SFuzz FIRRTL common coverage export, e.g. FIRRTL.common or FIRRTL.mux; "
             "requires an instrumented LinkNan build with firrtl-cover.h/.cpp"
         ),
     )
@@ -65,32 +78,54 @@ def main() -> int:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    sfuzz = subparsers.add_parser("sfuzz", help="run SFuzz SFUZ seeds through real LinkNan VCS")
+    sfuzz = subparsers.add_parser("sfuzz", help="run an online SFuzz loop through real LinkNan VCS")
     add_common_vcs_args(sfuzz)
     add_seed_batch_args(sfuzz)
+    sfuzz.add_argument(
+        "--batch-replay",
+        action="store_true",
+        help="legacy mode: run provided SFUZ seeds once without online selection/mutation",
+    )
+    sfuzz.add_argument("--campaign-runs", type=int, default=8, help="online SFuzz testcase budget")
+    sfuzz.add_argument("--rng-seed", type=int, default=1, help="deterministic host RNG seed for mutation order")
+    sfuzz.add_argument("--min-energy", type=int, default=1, help="minimum mutations before rotating a corpus seed")
+    sfuzz.add_argument("--max-energy", type=int, default=8, help="maximum mutations for high-yield corpus seeds")
     sfuzz.set_defaults(case_prefix="sfuzz", handler=run_sfuzz)
 
     rfuzz = subparsers.add_parser(
         "rfuzz",
         help="run RFuzz inputs through real LinkNan VCS",
         epilog=(
-            "说明：当前入口保留真实 VCS 运行。若未提供 RFuzz mux-select bitmap，"
-            "覆盖来自日志、VCS built-in coverage 或 FIRRTL 诊断解析时，必须接入论文定义的 "
-            "RFuzz raw pin-stream runner、mux-select 覆盖和反馈 ABI 后，"
-            "才能作为 paper-faithful RFuzz 数据。"
+            "说明：RFuzz 当前入口执行真实 VCS campaign loop，但只通过正常 LinkNan "
+            "workload .bin/ELF 适配器进 DUT；.sfuz 会被拒绝。若未提供 VCS native "
+            "RFuzz mux-select bitmap，覆盖字段只能表示 ABI 缺失，不能作为 paper-faithful "
+            "RFuzz 数据。推荐与 --no-cycle-limit --timeout-sec 一起使用。"
         ),
     )
     add_common_vcs_args(rfuzz)
-    rfuzz.add_argument("--seed", action="append", default=[], help="existing .sfuz seed; first seed is used")
-    rfuzz.add_argument("--raw-hex", default="73001000", help="raw bytes packed into a generated SFUZ core0 payload")
+    rfuzz.set_defaults(no_cycle_limit=True)
+    rfuzz.add_argument(
+        "--seed",
+        action="append",
+        default=[],
+        help="normal LinkNan workload .bin/ELF seed; repeatable; .sfuz is rejected",
+    )
+    rfuzz.add_argument("--input", action="append", default=[], help="alias for --seed; normal workload .bin/ELF only")
+    rfuzz.add_argument("--seed-list", type=Path, help="text file with one workload .bin/ELF path per non-comment line")
+    rfuzz.add_argument("--seed-dir", type=Path, help="directory containing initial workload .bin/ELF seeds")
+    rfuzz.add_argument("--limit", type=int, default=0, help="load at most this many initial workload seeds; 0 means all")
+    rfuzz.add_argument("--raw-hex", default="73001000", help="fallback bytes written to a normal .bin workload seed")
     rfuzz.add_argument("--case-name", default="rfuzz-smoke")
+    rfuzz.add_argument("--rfuzz-rounds", type=int, default=1, help="number of RFuzz campaign iterations")
+    rfuzz.add_argument("--rfuzz-random-seed", type=int, default=1, help="PRNG seed for RFuzz workload mutations")
+    rfuzz.add_argument("--rfuzz-max-input-bytes", type=int, default=0, help="truncate mutated workload inputs; 0 disables")
     rfuzz.add_argument(
         "--rfuzz-input-model",
-        choices=["sfuz-core0-payload", "raw-pin-stream"],
-        default="sfuz-core0-payload",
+        choices=["linknan-workload-binary-adapter", "raw-pin-stream"],
+        default="linknan-workload-binary-adapter",
         help=(
-            "requested RFuzz input ABI label; T0 still runs through LinkNan --workload, "
-            "so output input_model records the actual path"
+            "requested RFuzz input ABI label; current LinkNan path uses the workload binary adapter, "
+            "while raw-pin-stream remains a missing native ABI"
         ),
     )
     rfuzz.add_argument("--rfuzz-toggle-bitmap", type=Path, help="RFuzz mux-toggle bitmap exported for this testcase")
@@ -103,7 +138,7 @@ def main() -> int:
     rfuzz.add_argument("--rfuzz-toggle-total", type=int, default=0, help="total RFuzz mux-toggle points")
     rfuzz.add_argument(
         "--rfuzz-valid-source",
-        choices=["unknown", "unconstrained", "vcs-native-abi", "manual"],
+        choices=["unknown", "unconstrained", "vcs-native-abi", "manual", "vcs-good-trap"],
         default="unknown",
         help="source of the RFuzz validity decision; constrained DUTs need vcs-native-abi",
     )
@@ -113,11 +148,7 @@ def main() -> int:
         default="unknown",
         help="current testcase validity when --rfuzz-valid-source can justify it",
     )
-    rfuzz.add_argument(
-        "--rfuzz-campaign-feedback",
-        action="store_true",
-        help="set only when total/valid RFuzz coverage maps drive corpus retention for this campaign",
-    )
+    rfuzz.add_argument("--rfuzz-toggle-bitmap-dir", type=Path, help="directory containing VCS native per-case RFuzz bitmap files")
     rfuzz.add_argument("--firrtl-annotated-dir", type=Path, help="parse annotated FIRRTL/VCS files as diagnostic coverage")
     rfuzz.set_defaults(case_prefix="rfuzz", handler=run_rfuzz)
 
@@ -131,9 +162,16 @@ def main() -> int:
         ),
     )
     add_common_vcs_args(direct)
-    add_seed_batch_args(direct)
+    direct.add_argument("--seed", action="append", default=[], help="DirectFuzz workload .bin/.elf path; repeatable")
+    direct.add_argument("--seed-list", type=Path, help="text file with one .bin/.elf path per non-comment line")
+    direct.add_argument("--seed-dir", type=Path, help="directory containing .bin/.elf workload inputs")
+    direct.add_argument("--limit", type=int, default=0, help="import at most this many initial inputs; 0 means all")
     direct.add_argument("--target-instance", required=True)
     direct.add_argument("--metadata", type=Path, required=True, help="DirectFuzz metadata CSV")
+    direct.add_argument("--max-execs", type=int, default=0, help="maximum VCS executions; 0 means seeds plus --mutations")
+    direct.add_argument("--mutations", type=int, default=8, help="number of feedback-guided DirectFuzz mutation attempts")
+    direct.add_argument("--escape-interval", type=int, default=10, help="regular-queue escape interval after target stalls")
+    direct.add_argument("--rng-seed", type=int, default=0, help="deterministic mutation RNG seed")
     direct.add_argument(
         "--metadata-source",
         choices=["static-analysis", "dev-generated", "manual"],
@@ -152,7 +190,17 @@ def main() -> int:
     direct.add_argument(
         "--native-coverage",
         type=Path,
-        help="CSV exported by the DirectFuzz native ABI: instance_name,coverage_hex",
+        help=(
+            "static diagnostic CSV exported by the DirectFuzz native ABI: "
+            "instance_name,coverage_hex; prefer --native-coverage-pattern for campaigns"
+        ),
+    )
+    direct.add_argument(
+        "--native-coverage-pattern",
+        help=(
+            "per-execution DirectFuzz native coverage CSV pattern; supports "
+            "{case_dir}, {input}, {input_stem}, and {exec}"
+        ),
     )
     direct.add_argument(
         "--native-coverage-source",
@@ -166,13 +214,22 @@ def main() -> int:
         "surgefuzz",
         help="run SurgeFuzz seeds through real LinkNan VCS",
         epilog=(
-            "说明：当前入口保留真实 VCS 运行。日志健康特征、dev mock trace 或离线 trace "
-            "都必须替换为论文定义的 per-cycle score/ancestor coverage ABI 后，"
-            "才能作为 paper-faithful SurgeFuzz 数据。"
+            "说明：当前入口执行真实 VCS campaign loop，并使用正常 LinkNan workload "
+            ".bin/ELF 输入；.sfuz 会被拒绝。日志健康特征、dev mock trace 或离线 trace "
+            "都必须替换为论文定义的 per-cycle score/ancestor coverage ABI 后，才能作为 "
+            "paper-faithful SurgeFuzz 数据。推荐与 --no-cycle-limit --timeout-sec 一起使用。"
         ),
     )
     add_common_vcs_args(surge)
-    add_seed_batch_args(surge)
+    surge.set_defaults(no_cycle_limit=True)
+    surge.add_argument("--seed", action="append", default=[], help="SurgeFuzz workload .bin/.elf path; repeatable")
+    surge.add_argument("--seed-list", type=Path, help="text file with one .bin/.elf path per non-comment line")
+    surge.add_argument("--seed-dir", type=Path, help="directory containing .bin/.elf workload inputs")
+    surge.add_argument("--limit", type=int, default=0, help="import at most this many initial inputs; 0 means all")
+    surge.add_argument("--max-execs", type=int, default=0, help="maximum VCS executions; 0 means seeds plus --mutations")
+    surge.add_argument("--mutations", type=int, default=8, help="number of score-guided SurgeFuzz mutation attempts")
+    surge.add_argument("--rng-seed", type=int, default=0, help="deterministic mutation RNG seed")
+    surge.add_argument("--max-input-bytes", type=int, default=0, help="truncate mutated workload inputs; 0 disables")
     surge.add_argument("--annotation-type", default="SURGE_FREQ=1")
     surge.add_argument("--target-signal-or-group", default="MSHR")
     surge.add_argument(

@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import hashlib
 import math
+import random
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,13 +15,22 @@ from ..common import (
     write_table,
 )
 from ..config import VcsContext
-from ..seeds import collect_seed_paths
 from ..vcs import build_simv_if_needed, collect_vcs_coverage, common_coverage_backend, run_vcs_seed, scan_vcs_logs
 
 
 DIRECTFUZZ_FIELDS = [
     "fuzzer",
+    "campaign_exec",
     "seed",
+    "input_path",
+    "input_kind",
+    "input_size_bytes",
+    "corpus_id",
+    "parent_corpus_id",
+    "mutation_index",
+    "scheduler_queue",
+    "retained",
+    "retention_reason",
     "target_instance",
     "metadata_source",
     "wall_time_sec",
@@ -35,6 +46,10 @@ DIRECTFUZZ_FIELDS = [
     "coverage_backend",
     "native_coverage_source",
     "target_covered_bits",
+    "target_new_bits",
+    "new_coverage_bits",
+    "accumulated_covered_bits",
+    "accumulated_target_covered_bits",
     "distance",
     "energy",
     "new_coverage",
@@ -58,6 +73,11 @@ DIRECTFUZZ_FIELDS = [
 
 DIRECT_METADATA_FIELDS = ["instance_name", "coverage_signal_name", "width", "distance"]
 NATIVE_COVERAGE_FIELDS = ["instance_name", "coverage_hex"]
+DIRECTFUZZ_INPUT_SUFFIXES = {".bin", ".elf"}
+MISSING_PER_INSTANCE_ABI = "directfuzz_per_instance_mux_toggle"
+MISSING_NATIVE_EXPORT = "directfuzz_vcs_native_coverage_export"
+MISSING_STATIC_METADATA = "directfuzz_static_analysis_instance_distance_metadata"
+MISSING_DYNAMIC_COVERAGE = "directfuzz_dynamic_per_testcase_coverage_export"
 
 
 @dataclass(frozen=True)
@@ -74,6 +94,73 @@ class InstanceMeta:
     @property
     def is_target(self) -> bool:
         return self.distance == 0
+
+
+@dataclass
+class CorpusEntry:
+    corpus_id: int
+    path: Path
+    feedback: dict[str, Any]
+
+    @property
+    def covered_target(self) -> bool:
+        return int(self.feedback.get("target_covered_bits") or 0) > 0
+
+    @property
+    def target_progress(self) -> bool:
+        return bool(self.feedback.get("target_progress"))
+
+    @property
+    def energy(self) -> float:
+        value = self.feedback.get("energy")
+        return float(value) if value not in {None, ""} else 0.0
+
+
+@dataclass
+class ScheduledEntry:
+    entry: CorpusEntry
+    queue_name: str
+    use_default_energy: bool = False
+
+
+class DirectFuzzQueue:
+    def __init__(self, escape_interval: int) -> None:
+        self.target: list[CorpusEntry] = []
+        self.regular: list[CorpusEntry] = []
+        self.no_target_progress = 0
+        self.escape_interval = max(0, escape_interval)
+
+    def push(self, entry: CorpusEntry) -> None:
+        if entry.covered_target:
+            self.target.append(entry)
+        else:
+            self.regular.append(entry)
+        if entry.target_progress:
+            self.no_target_progress = 0
+
+    def next(self) -> ScheduledEntry | None:
+        scheduled: ScheduledEntry | None = None
+        if self._should_escape() and self.regular:
+            idx = min(range(len(self.regular)), key=lambda pos: self.regular[pos].energy)
+            scheduled = ScheduledEntry(self.regular.pop(idx), "regular-escape", True)
+        elif self.target:
+            scheduled = ScheduledEntry(self.target.pop(0), "target", False)
+        elif self.regular:
+            scheduled = ScheduledEntry(self.regular.pop(0), "regular", False)
+
+        if scheduled is None:
+            return None
+        if scheduled.entry.target_progress:
+            self.no_target_progress = 0
+        else:
+            self.no_target_progress += 1
+        return scheduled
+
+    def __bool__(self) -> bool:
+        return bool(self.target or self.regular)
+
+    def _should_escape(self) -> bool:
+        return self.escape_interval > 0 and self.no_target_progress >= self.escape_interval
 
 
 def parse_distance(value: str) -> int | None:
@@ -128,6 +215,76 @@ def load_direct_metadata(path: Path) -> list[InstanceMeta]:
     return rows
 
 
+def detect_input_kind(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".sfuz":
+        return "sfuz"
+    if suffix in DIRECTFUZZ_INPUT_SUFFIXES:
+        return suffix[1:]
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return "unknown"
+    if data.startswith(b"\x7fELF"):
+        return "elf"
+    return "bin"
+
+
+def validate_direct_input(path: Path) -> None:
+    kind = detect_input_kind(path)
+    if kind == "sfuz":
+        raise ValueError(f"{path}: DirectFuzz LinkNan input must be normal ELF/bin, not .sfuz")
+    if kind not in {"elf", "bin"}:
+        raise ValueError(f"{path}: DirectFuzz LinkNan input must be normal ELF/bin")
+
+
+def collect_direct_input_paths(
+    seed_args: list[str],
+    seed_list: Path | None,
+    seed_dir: Path | None,
+    work_dir: Path,
+    limit: int = 0,
+    generate_smoke: bool = True,
+) -> list[Path]:
+    seeds: list[Path] = []
+    for item in seed_args:
+        seeds.append(Path(item).expanduser())
+
+    if seed_list:
+        base = seed_list.expanduser().resolve().parent
+        for raw_line in seed_list.expanduser().read_text(encoding="utf-8").splitlines():
+            line = raw_line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            seed = Path(line).expanduser()
+            seeds.append(seed if seed.is_absolute() else base / seed)
+
+    if seed_dir:
+        seed_dir = seed_dir.expanduser()
+        if not seed_dir.is_dir():
+            raise FileNotFoundError(f"missing required directory: {seed_dir}")
+        for suffix in sorted(DIRECTFUZZ_INPUT_SUFFIXES):
+            seeds.extend(sorted(seed_dir.glob(f"*{suffix}")))
+
+    if not seeds and generate_smoke:
+        generated = work_dir / "seeds" / "directfuzz-smoke.bin"
+        generated.parent.mkdir(parents=True, exist_ok=True)
+        generated.write_bytes(bytes.fromhex("73001000"))
+        seeds.append(generated)
+
+    resolved: list[Path] = []
+    seen: set[Path] = set()
+    for seed in seeds:
+        path = seed.resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"missing required file: {path}")
+        validate_direct_input(path)
+        if path not in seen:
+            resolved.append(path)
+            seen.add(path)
+    return resolved[:limit] if limit > 0 else resolved
+
+
 def count_bits_with_width(data: bytes, width: int) -> int:
     full_bytes = width // 8
     tail_bits = width % 8
@@ -168,7 +325,17 @@ class DirectCoverageState:
 
     def feedback(self, coverage: list[bytes] | None, min_energy: float = 0.0, max_energy: float = 25.0) -> dict[str, Any]:
         if coverage is None:
-            return {"target_covered_bits": "", "distance": "", "energy": "", "new_coverage": "", "target_progress": ""}
+            return {
+                "target_covered_bits": "",
+                "target_new_bits": "",
+                "new_coverage_bits": "",
+                "accumulated_covered_bits": self.accumulated_covered_bits(),
+                "accumulated_target_covered_bits": self.accumulated_target_covered_bits(),
+                "distance": "",
+                "energy": "",
+                "new_coverage": "",
+                "target_progress": "",
+            }
         if len(coverage) != len(self.metadata):
             raise ValueError("coverage length does not match DirectFuzz metadata length")
         for idx, (meta, data) in enumerate(zip(self.metadata, coverage)):
@@ -183,6 +350,8 @@ class DirectCoverageState:
         weighted = 0
         new_cov = False
         target_progress = False
+        new_coverage_bits = 0
+        target_new_bits = 0
         for idx, (meta, data) in enumerate(zip(self.metadata, coverage)):
             bits = count_bits_with_width(data, meta.width)
             if meta.is_target:
@@ -191,8 +360,11 @@ class DirectCoverageState:
             for byte_idx, byte in enumerate(data):
                 new_bits = byte & (~old[byte_idx] & 0xFF)
                 if new_bits:
+                    new_count = new_bits.bit_count()
+                    new_coverage_bits += new_count
                     new_cov = True
                     if meta.is_target:
+                        target_new_bits += new_count
                         target_progress = True
                 old[byte_idx] |= byte
             if meta.distance is not None:
@@ -209,11 +381,25 @@ class DirectCoverageState:
             energy = max_energy - (max_energy - min_energy) * min(max(distance / max_distance, 0.0), 1.0)
         return {
             "target_covered_bits": target_bits,
+            "target_new_bits": target_new_bits,
+            "new_coverage_bits": new_coverage_bits,
+            "accumulated_covered_bits": self.accumulated_covered_bits(),
+            "accumulated_target_covered_bits": self.accumulated_target_covered_bits(),
             "distance": "" if distance is None else round(distance, 6),
             "energy": round(energy, 6),
             "new_coverage": new_cov,
             "target_progress": target_progress,
         }
+
+    def accumulated_covered_bits(self) -> int:
+        return sum(count_bits_with_width(bytes(data), meta.width) for meta, data in zip(self.metadata, self.accumulated))
+
+    def accumulated_target_covered_bits(self) -> int:
+        return sum(
+            count_bits_with_width(bytes(data), meta.width)
+            for meta, data in zip(self.metadata, self.accumulated)
+            if meta.is_target
+        )
 
 
 def load_direct_coverage_file(path: Path, metadata: list[InstanceMeta]) -> list[bytes]:
@@ -260,44 +446,154 @@ def load_direct_coverage_file(path: Path, metadata: list[InstanceMeta]) -> list[
     return coverage
 
 
+def resolve_native_coverage_path(args: Any, case_dir: Path, input_path: Path, exec_idx: int) -> Path | None:
+    pattern = getattr(args, "native_coverage_pattern", None)
+    if pattern:
+        return Path(
+            pattern.format(
+                case_dir=case_dir,
+                input=input_path,
+                input_stem=input_path.stem,
+                exec=exec_idx,
+            )
+        ).expanduser()
+    if args.native_coverage:
+        return args.native_coverage.expanduser()
+
+    candidates = [
+        case_dir / "directfuzz_coverage.csv",
+        case_dir / "directfuzz" / "coverage.csv",
+        case_dir / f"{input_path.stem}.directfuzz.csv",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def mutate_workload(parent: Path, output: Path, rng: random.Random, budget: int) -> None:
+    data = bytearray(parent.read_bytes())
+    if not data:
+        data.append(0)
+    steps = max(1, budget)
+    for _ in range(steps):
+        op = rng.randrange(6)
+        if op == 0:
+            idx = rng.randrange(len(data))
+            data[idx] ^= 1 << rng.randrange(8)
+        elif op == 1:
+            idx = rng.randrange(len(data))
+            data[idx] = rng.randrange(256)
+        elif op == 2 and len(data) > 1:
+            del data[rng.randrange(len(data))]
+        elif op == 3 and len(data) < 1 << 20:
+            idx = rng.randrange(len(data) + 1)
+            data[idx:idx] = bytes([rng.randrange(256)])
+        elif op == 4 and len(data) > 4:
+            start = rng.randrange(len(data))
+            end = min(len(data), start + rng.randrange(1, min(16, len(data) - start) + 1))
+            chunk = data[start:end]
+            insert_at = rng.randrange(len(data) + 1)
+            data[insert_at:insert_at] = chunk
+        else:
+            width = min(4, len(data))
+            idx = rng.randrange(len(data) - width + 1)
+            value = int.from_bytes(data[idx : idx + width], "little")
+            value = (value + rng.choice([-35, -16, -1, 1, 16, 35])) % (1 << (8 * width))
+            data[idx : idx + width] = value.to_bytes(width, "little")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(bytes(data))
+
+
+def mutation_budget(feedback: dict[str, Any], default_energy: bool) -> int:
+    if default_energy:
+        return 1
+    value = feedback.get("energy")
+    if value in {None, ""}:
+        return 1
+    return max(1, min(64, int(round(float(value))) + 1))
+
+
+def required_native_abi(args: Any, dynamic_native_coverage: bool) -> str:
+    missing: list[str] = []
+    if args.coverage_backend != "native-file":
+        missing.append(MISSING_PER_INSTANCE_ABI)
+    elif args.native_coverage_source != "vcs-native-abi":
+        missing.append(MISSING_NATIVE_EXPORT)
+    if args.metadata_source != "static-analysis":
+        missing.append(MISSING_STATIC_METADATA)
+    if args.coverage_backend == "native-file" and args.native_coverage and not dynamic_native_coverage:
+        missing.append(MISSING_DYNAMIC_COVERAGE)
+    return ";".join(missing)
+
+
 def paper_faithful_native_file(args: Any) -> bool:
     return (
         args.coverage_backend == "native-file"
         and args.metadata_source == "static-analysis"
         and args.native_coverage_source == "vcs-native-abi"
+        and (not args.native_coverage or bool(getattr(args, "native_coverage_pattern", None)))
     )
 
 
-def required_native_abi(args: Any) -> str:
-    missing: list[str] = []
-    if args.coverage_backend != "native-file":
-        missing.append("directfuzz_per_instance_mux_toggle")
-    elif args.native_coverage_source != "vcs-native-abi":
-        missing.append("directfuzz_vcs_native_coverage_export")
-    if args.metadata_source != "static-analysis":
-        missing.append("directfuzz_static_analysis_instance_distance_metadata")
-    return ";".join(missing)
+def direct_notes(args: Any, backend: str, common_backend: str, dynamic_native_coverage: bool) -> list[str]:
+    notes = [
+        "真实 LinkNan VCS 已运行",
+        "DirectFuzz 输入为 LinkNan workload .bin/ELF，不使用 .sfuz",
+        "DirectFuzz campaign 由 target-priority/regular corpus queue、distance energy 和 new coverage retention 驱动",
+        "使用 --no-cycle-limit 时 xmake 未收到 --cycles；当前 LinkNan 生成的 simv 命令不追加 +max-cycles，外部终止由 --timeout-sec 控制",
+    ]
+    if args.coverage_backend == "native-file":
+        notes.append(f"native coverage backend={backend}; source={args.native_coverage_source}")
+        if not dynamic_native_coverage:
+            notes.append("当前 native coverage 文件为静态输入，不是每个 testcase 的 VCS 动态导出，不能标记 paper-faithful")
+    elif args.coverage_backend == "dev-mock":
+        notes.append("coverage/feedback 为 deterministic dev mock，仅用于验证 DirectFuzz 循环管线")
+    else:
+        notes.append("当前 LinkNan VCS 缺少 DirectFuzz per-instance mux-toggle coverage ABI，stub 不生成 coverage/distance feedback，不进入 feedback-guided mutation queue")
+    if common_backend != "none":
+        notes.append("common_coverage_* 只用于共同后端诊断，不是 DirectFuzz paper-native feedback")
+    return notes
 
 
 def run_directfuzz(args: Any, ctx: VcsContext) -> int:
     work_dir = args.work_dir.expanduser().resolve()
     runs_dir = work_dir / "runs"
     logs_dir = work_dir / "logs"
+    mutations_dir = work_dir / "mutations"
     runs_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
+    mutations_dir.mkdir(parents=True, exist_ok=True)
 
-    seeds = collect_seed_paths(args.seed, args.seed_list, args.seed_dir, work_dir, args.limit, True, "directfuzz-smoke")
+    seeds = collect_direct_input_paths(args.seed, args.seed_list, args.seed_dir, work_dir, args.limit, True)
     metadata = load_direct_metadata(args.metadata.expanduser())
     if not any(row.instance == args.target_instance and row.is_target for row in metadata):
         raise ValueError(f"{args.metadata}: target instance {args.target_instance!r} is not present at distance 0")
+    if ctx.cycles is not None:
+        raise ValueError("DirectFuzz LinkNan runs must use --no-cycle-limit and external --timeout-sec")
 
     state = DirectCoverageState(metadata)
+    queue = DirectFuzzQueue(args.escape_interval)
+    corpus: list[CorpusEntry] = []
+    rng = random.Random(args.rng_seed)
     build_simv_if_needed(args, ctx, work_dir)
     rows: list[dict[str, Any]] = []
-    for idx, seed in enumerate(seeds):
-        case_name = f"{slugify(args.case_prefix)}-{idx:04d}-{slugify(seed.stem)}"
+    campaign_start = time.monotonic()
+    exec_budget = args.max_execs if args.max_execs > 0 else len(seeds) + args.mutations
+
+    def run_one(
+        *,
+        input_path: Path,
+        exec_idx: int,
+        parent_id: int | str,
+        mutation_index: int | str,
+        scheduler_queue: str,
+        initial_seed: bool,
+        default_energy: bool,
+    ) -> CorpusEntry | None:
+        case_name = f"{slugify(args.case_prefix)}-{exec_idx:04d}-{slugify(input_path.stem)}"
         result, case_dir, run_log, assert_log = run_vcs_seed(
-            seed=seed,
+            seed=input_path,
             case_name=case_name,
             runs_dir=runs_dir,
             logs_dir=logs_dir,
@@ -318,53 +614,68 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
         if not run_log.is_file() and not infrastructure_error:
             infrastructure_error = "run.log missing"
 
+        dynamic_native_coverage = bool(getattr(args, "native_coverage_pattern", None)) or not args.native_coverage
         paper_faithful = paper_faithful_native_file(args)
-        missing_native_abi = required_native_abi(args)
+        missing_native_abi = required_native_abi(args, dynamic_native_coverage)
         native_coverage_source = ""
         if args.coverage_backend == "native-file":
-            if not args.native_coverage:
-                raise ValueError("--coverage-backend native-file requires --native-coverage")
-            feedback = state.feedback(load_direct_coverage_file(args.native_coverage.expanduser(), metadata))
+            coverage_path = resolve_native_coverage_path(args, case_dir, input_path, exec_idx)
+            if coverage_path is None:
+                raise ValueError(
+                    "--coverage-backend native-file requires --native-coverage, "
+                    "--native-coverage-pattern, or a case-local DirectFuzz coverage CSV"
+                )
+            feedback = state.feedback(load_direct_coverage_file(coverage_path, metadata))
             backend = "directfuzz_per_instance_mux_toggle_file"
             native_coverage_source = args.native_coverage_source
-            if paper_faithful:
-                notes = (
-                    "真实 LinkNan VCS 已运行;"
-                    "覆盖/反馈来自声明为 VCS native ABI 导出的 DirectFuzz per-instance mux-toggle 文件;"
-                    "metadata_source=static-analysis"
-                )
-            else:
-                notes = (
-                    "真实 LinkNan VCS 已运行;"
-                    "native-file ABI 已解析并计算 DirectFuzz 反馈;"
-                    "但未同时声明 static-analysis metadata 和 vcs-native-abi coverage export，"
-                    "因此不标记为 paper-faithful"
-                )
         elif args.coverage_backend == "dev-mock":
-            feedback = state.feedback(dev_direct_coverage(seed, metadata, args.target_instance))
+            feedback = state.feedback(dev_direct_coverage(input_path, metadata, args.target_instance))
             backend = "dev_mock_directfuzz_feedback"
-            notes = (
-                "真实 LinkNan VCS 已运行;"
-                "当前覆盖/反馈为 deterministic dev mock，仅用于调试数据管线;"
-                "必须接入论文定义的 DirectFuzz per-instance mux-toggle 覆盖/反馈 ABI 后，"
-                "才能作为 paper-faithful DirectFuzz 数据"
-            )
         else:
             feedback = state.feedback(None)
             backend = "vcs_log_no_directfuzz_coverage"
-            notes = (
-                "真实 LinkNan VCS 已运行;"
-                "当前 VCS log 不提供论文定义的 DirectFuzz per-instance mux-toggle 覆盖/反馈;"
-                "必须接入论文定义的真实覆盖/反馈 ABI"
-            )
+
+        has_direct_feedback = args.coverage_backend in {"native-file", "dev-mock"}
+        retained = has_direct_feedback and (initial_seed or bool(feedback.get("new_coverage")))
+        if not has_direct_feedback:
+            retention_reason = "no-directfuzz-feedback-stub"
+        elif initial_seed:
+            retention_reason = "initial-seed"
+        elif retained:
+            retention_reason = "new-coverage"
+        else:
+            retention_reason = "no-new-coverage"
+        entry: CorpusEntry | None = None
+        corpus_id: int | str = ""
+        if retained:
+            corpus_id = len(corpus)
+            entry = CorpusEntry(int(corpus_id), input_path, feedback)
+            corpus.append(entry)
+            queue.push(entry)
+
+        notes = direct_notes(args, backend, common_backend, dynamic_native_coverage)
+        if default_energy:
+            notes.append("scheduler_escape_default_energy=true")
+        if args.timeout_sec <= 0:
+            notes.append("未设置外部 --timeout-sec，若 workload 不自然结束可能长期运行")
         rows.append(
             {
                 "fuzzer": "directfuzz",
-                "seed": str(seed),
+                "campaign_exec": exec_idx,
+                "seed": str(input_path),
+                "input_path": str(input_path),
+                "input_kind": detect_input_kind(input_path),
+                "input_size_bytes": input_path.stat().st_size,
+                "corpus_id": corpus_id,
+                "parent_corpus_id": parent_id,
+                "mutation_index": mutation_index,
+                "scheduler_queue": scheduler_queue,
+                "retained": retained,
+                "retention_reason": retention_reason,
                 "target_instance": args.target_instance,
                 "metadata_source": args.metadata_source,
                 "wall_time_sec": round(result.wall_time_sec, 6),
-                "cycles": info.cycles or ctx.cycles,
+                "cycles": info.cycles if info.cycles is not None else "",
                 "exit_code": result.returncode,
                 "vcs_report_seen": info.vcs_report_seen,
                 "sfuz_expansion_seen": info.sfuz_expansion_seen,
@@ -390,9 +701,53 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
                 "infrastructure_error": infrastructure_error,
                 "paper_faithful": paper_faithful,
                 "required_native_abi": missing_native_abi,
-                "notes": append_notes(notes, {"sfuz_seen": info.sfuz_expansion_seen, "vcs_report": info.vcs_report_seen}),
+                "notes": append_notes(
+                    notes,
+                    {
+                        "sfuz_seen": info.sfuz_expansion_seen,
+                        "vcs_report": info.vcs_report_seen,
+                        "elapsed_campaign_sec": round(time.monotonic() - campaign_start, 6),
+                    },
+                ),
             }
         )
+        return entry
+
+    exec_idx = 0
+    for seed in seeds:
+        if exec_budget and exec_idx >= exec_budget:
+            break
+        run_one(
+            input_path=seed,
+            exec_idx=exec_idx,
+            parent_id="",
+            mutation_index="seed",
+            scheduler_queue="initial",
+            initial_seed=True,
+            default_energy=False,
+        )
+        exec_idx += 1
+
+    mutation_idx = 0
+    while queue and exec_idx < exec_budget and mutation_idx < args.mutations:
+        scheduled = queue.next()
+        if scheduled is None:
+            break
+        budget = mutation_budget(scheduled.entry.feedback, scheduled.use_default_energy)
+        mutation_path = mutations_dir / f"mut-{mutation_idx:04d}-parent-{scheduled.entry.corpus_id}.bin"
+        mutate_workload(scheduled.entry.path, mutation_path, rng, budget)
+        run_one(
+            input_path=mutation_path,
+            exec_idx=exec_idx,
+            parent_id=scheduled.entry.corpus_id,
+            mutation_index=mutation_idx,
+            scheduler_queue=scheduled.queue_name,
+            initial_seed=False,
+            default_energy=scheduled.use_default_energy,
+        )
+        exec_idx += 1
+        mutation_idx += 1
+
     write_table(
         rows,
         args.output_json or work_dir / "results.json",

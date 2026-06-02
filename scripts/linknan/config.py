@@ -19,7 +19,7 @@ class VcsContext:
     linknan_root: Path
     build_dir: Path
     sim_dir: Path
-    cycles: int
+    cycles: int | None
     num_cores: str
     no_diff: bool
     no_fsdb: bool
@@ -116,7 +116,19 @@ def context_from_config(args: Any) -> VcsContext:
         getattr(args, "sim_dir", "")
         or cfg_path(config, "linknan", "sim_dir", linknan_root / "sim", linknan_root)
     ).expanduser().resolve()
-    cycles = int(getattr(args, "cycles", None) or os.environ.get("VCS_CYCLES", cfg(config, "vcs", "cycles", 2000)))
+    no_cycle_limit = bool(getattr(args, "no_cycle_limit", False))
+    cycle_value = getattr(args, "cycles", None)
+    if no_cycle_limit:
+        cycles = None
+    elif cycle_value is not None:
+        cycles_value = int(cycle_value)
+        cycles = cycles_value if cycles_value > 0 else None
+    elif os.environ.get("VCS_CYCLES"):
+        cycles_value = int(os.environ["VCS_CYCLES"])
+        cycles = cycles_value if cycles_value > 0 else None
+    else:
+        configured_cycles = cfg(config, "vcs", "cycles", 0)
+        cycles = int(configured_cycles) if configured_cycles not in {None, "", 0, "0"} else None
     num_cores = str(os.environ.get("NUM_CORES", cfg(config, "vcs", "num_cores", cfg(config, "emu", "num_cores", 1))))
     return VcsContext(
         linknan_root=linknan_root,
