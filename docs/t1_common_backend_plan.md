@@ -37,18 +37,24 @@ SFUZZ_FIRRTL_COV=FIRRTL.all python3 scripts/linknan/run.py rfuzz ...
 SFuzz FIRRTL 覆盖点；它要求 LinkNan 构建目录已经生成
 `generated-src/firrtl-cover.h` 和 `generated-src/firrtl-cover.cpp`。
 
-当前可审计库存来自 [firrtl_litmus_coverage_report.md](firrtl_litmus_coverage_report.md)。
-这组信号主要覆盖 LinkNan L2/CHI/coherence 初版协议点，适合作为 T1 的共同评价后端。
+当前可审计库存来自 LinkNan 侧
+`scripts/linknan/sfuzz_firrtl_cov.py --groups FIRRTL.common` 自动生成的
+`common_coverage_inventory.csv`。T1 仍然要做，但定位是四个 fuzzer 在同一
+FIRRTL/common 覆盖库存下的健康检查和辅助横向评价；论文主对比仍然放在 T2 的
+paper-native feedback。
 
 | Group | Total Points | T1 用途 |
 | --- | ---: | --- |
-| `all` | 23 | 主覆盖率分母 |
-| `Directory_1` | 3 | directory hit state |
-| `MSHR` | 10 | MSHR probe/grant/retry/response |
-| `RXSNP` | 1 | snoop/release 嵌套路径 |
-| `SinkA` | 4 | acquire/hint/cbo flush |
-| `SinkC` | 3 | probe ack/release |
-| `SourceB` | 2 | probe conflict/fire |
+| `all/common` | 17,920 | T1 主覆盖率分母 |
+| `ready_valid` | 2,048 | ready/valid transaction fire |
+| `mux` | 4,096 | FIRRTL/SystemVerilog 三目 mux select condition |
+| `toggle` | 4,096 | 窄位宽 reg/logic toggle |
+| `control_event` | 1,536 | flush、redirect、replay、stall、cancel 等控制事件 |
+| `queue_event` | 1,024 | queue full/empty/enq/deq 类事件 |
+| `memory_event` | 2,048 | miss、MSHR、TLB/PTW、AMO、uncache、retry 等内存事件 |
+| `branch_event` | 1,024 | mispredict、taken、CFI、FTQ、BPU/TAGE/RAS 等分支事件 |
+| `exception_event` | 1,024 | exception、trap、interrupt、fault、illegal 等异常事件 |
+| `resource_event` | 1,024 | busy、hazard、bank conflict、arbiter、credit 等资源事件 |
 
 T1 必须使用同一份 inventory 文件，建议由 sub5 在 LinkNan 构建产物旁导出：
 
@@ -384,10 +390,10 @@ run summary 的 `Status` 中说明。
 | `.sfuz` workload 送入 LinkNan/VCS | 已有 runner 路径 | 可用于 T1 输入执行 |
 | 日志扫描、退出码、周期、超时、bug pattern | 已有 runner 字段 | 可进入 run summary |
 | VCS `.vdb`/`urg` coverage 健康检查 | 已有 `collect_vcs_coverage` | 只能作为诊断，不是 T1 指定 common FIRRTL local bitmap |
-| FIRRTL coverage inventory | 已有 23 点报告 | 可作为 T1 v0 分母 |
+| FIRRTL coverage inventory | 已扩展为 17,920 点自动生成库存 | 可作为 T1 common 分母 |
 | LinkNan/VCS 读取 `firrtl_cover[]` 并导出 `sfuzz_firrtl_coverage.json/bin` | 已有 `--firrtl_cov` 和 C++ export shim | 插装文件存在后可直接用于 T1 |
 | 四个 runner 解析 common sidecar 并输出 `common_coverage_*` | 已完成 | 可用于 T1 raw case 表 |
-| 当前 Chisel 7/firtool 生成流程自动产出 `firrtl-cover.h/.cpp` | 进行中 | T1 主指标 blocker |
+| 当前 Chisel 7/firtool 生成流程自动产出 `firrtl-cover.h/.cpp` | 已接入 `--firrtl_cov`，需在 T1 smoke 中重建确认 | T1 smoke 检查项 |
 | coverage-over-time snapshots 和 campaign accumulator | 需要聚合层 | T1 曲线 blocker |
 
 因此，T1 报告中可以先把当前 runner 字段作为执行健康和审计附件；只有当 run 产出
