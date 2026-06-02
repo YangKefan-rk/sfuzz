@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,7 @@ SFUZZ_FIRRTL_COV_OUT_ENV = "SFUZZ_FIRRTL_COV_OUT"
 SFUZZ_FIRRTL_COV_PREFIX = "sfuzz_firrtl_coverage"
 SFUZZ_FIRRTL_GENERATOR = Path("scripts/linknan/sfuzz_firrtl_cov.py")
 EXPECTED_EXPANDED_COMMON_POINTS = 17920
+TIMEOUT_GRACE_SEC = 20
 
 BUG_PATTERNS = [
     ("hit_bad_trap", re.compile(r"HIT BAD TRAP", re.IGNORECASE)),
@@ -245,27 +247,38 @@ def run_command(
             log_file.write("\n")
             log_file.flush()
         try:
-            process = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 cwd=cwd,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 text=True,
-                timeout=timeout_sec if timeout_sec > 0 else None,
                 env=env,
+                start_new_session=True,
             )
-            returncode = process.returncode
+            returncode = process.wait(timeout=timeout_sec if timeout_sec > 0 else None)
             timed_out = False
             error = ""
         except subprocess.TimeoutExpired as exc:
-            returncode = 124
             timed_out = True
             error = f"timeout after {timeout_sec} seconds"
-            log_file.write(f"\nTIMEOUT: {error}\n")
-            if exc.stdout:
-                log_file.write(str(exc.stdout))
-            if exc.stderr:
-                log_file.write(str(exc.stderr))
+            returncode = 124
+            log_file.write(f"\nTIMEOUT: {error}; sending SIGTERM to process group\n")
+            log_file.flush()
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                returncode = process.wait(timeout=TIMEOUT_GRACE_SEC)
+                log_file.write(f"TIMEOUT_GRACEFUL_EXIT: returncode={returncode}\n")
+            except (ProcessLookupError, PermissionError) as signal_error:
+                log_file.write(f"TIMEOUT_SIGNAL_ERROR: {signal_error}\n")
+            except subprocess.TimeoutExpired:
+                log_file.write(f"TIMEOUT_SIGTERM_GRACE_EXPIRED: {TIMEOUT_GRACE_SEC} seconds; sending SIGKILL\n")
+                log_file.flush()
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError) as signal_error:
+                    log_file.write(f"TIMEOUT_SIGKILL_ERROR: {signal_error}\n")
+                returncode = process.wait()
         wall_time = time.monotonic() - start
         log_file.write(f"\nEND: {now_iso()}\n")
         log_file.write(f"RETURNCODE: {returncode}\n")
