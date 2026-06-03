@@ -17,11 +17,16 @@ from ..seeds import (
 )
 from ..vcs import (
     CoverageResult,
+    assertion_failure,
     build_simv_if_needed,
+    classify_infrastructure_error,
     collect_vcs_coverage,
     common_coverage_backend,
+    design_bug,
+    design_bug_reasons,
     run_vcs_seed,
     scan_vcs_logs,
+    wall_timeout,
 )
 
 
@@ -71,6 +76,10 @@ SFUZZ_FIELDS = [
     "case_dir",
     "case_name",
     "timed_out",
+    "wall_timeout",
+    "design_bug",
+    "assertion_failure",
+    "design_bug_reasons",
     "infrastructure_error",
     "no_max_cycle_limit",
     "command_has_cycles_arg",
@@ -91,10 +100,10 @@ class CorpusEntry:
 
 
 def run_outcome(result: Any, info: Any, infrastructure_error: str) -> str:
-    if infrastructure_error:
-        return "infrastructure_error"
     if result.timed_out:
         return "timeout"
+    if infrastructure_error:
+        return "infrastructure_error"
     if info.bug_triggered:
         return "bug_triggered"
     if info.good_trap_seen:
@@ -206,15 +215,8 @@ def run_one(args: Any, ctx: VcsContext, runs_dir: Path, logs_dir: Path, seed: Pa
         extra_env=extra_env or None,
     )
     info = scan_vcs_logs(run_log, assert_log, ctx.cycles)
-    if result.timed_out and "timeout" not in info.bug_reasons:
-        info.bug_reasons.append("timeout")
-        info.bug_triggered = True
 
-    infrastructure_error = result.error
-    if result.returncode != 0 and not infrastructure_error and not info.bug_triggered:
-        infrastructure_error = f"command returned non-zero exit code {result.returncode}"
-    if not run_log.is_file() and not infrastructure_error:
-        infrastructure_error = "run.log missing"
+    infrastructure_error = classify_infrastructure_error(result, info, run_log)
 
     coverage = collect_vcs_coverage(args, case_dir, ctx.sim_dir)
     has_cycles_arg, has_max_cycles_plusarg = command_cycle_markers(result.command_log_path)
@@ -306,6 +308,10 @@ def row_from_run(
         "case_dir": str(run["case_dir"]),
         "case_name": run["case_name"],
         "timed_out": run["result"].timed_out,
+        "wall_timeout": wall_timeout(run["result"]),
+        "design_bug": design_bug(run["info"]),
+        "assertion_failure": assertion_failure(run["info"]),
+        "design_bug_reasons": design_bug_reasons(run["info"]),
         "infrastructure_error": run["infrastructure_error"],
         "no_max_cycle_limit": not run["command_has_cycles_arg"] and not run["command_has_max_cycles_plusarg"],
         "command_has_cycles_arg": run["command_has_cycles_arg"],
@@ -385,7 +391,7 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
         run = run_one(args, ctx, runs_dir, logs_dir, entry.path, case_name)
         bitmap = read_bitmap(run["coverage"])
         new_bits = coverage_delta(bitmap, accumulated)
-        retained = new_bits > 0 or run["run_outcome"] in {"bug_triggered", "timeout"}
+        retained = new_bits > 0 or run["run_outcome"] == "bug_triggered"
         retention_reason = "new_coverage" if new_bits > 0 else run["run_outcome"] if retained else "not_interesting"
         if retained:
             entry.energy = bounded_energy(new_bits, args.min_energy, args.max_energy)

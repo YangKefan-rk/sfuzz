@@ -69,6 +69,36 @@ class VcsLogInfo:
     vcs_cpu_time_sec: float | None = None
 
 
+ASSERTION_REASONS = {"assert_log_nonempty", "assertion_failed"}
+
+
+def wall_timeout(result: CommandResult) -> bool:
+    return bool(result.timed_out)
+
+
+def design_bug(info: VcsLogInfo) -> bool:
+    return bool(info.bug_triggered)
+
+
+def assertion_failure(info: VcsLogInfo) -> bool:
+    return any(reason in ASSERTION_REASONS for reason in info.bug_reasons)
+
+
+def design_bug_reasons(info: VcsLogInfo) -> list[str]:
+    return list(info.bug_reasons)
+
+
+def classify_infrastructure_error(result: CommandResult, info: VcsLogInfo, run_log: Path) -> str:
+    if result.timed_out:
+        return ""
+    infrastructure_error = result.error
+    if result.returncode != 0 and not infrastructure_error and not info.bug_triggered:
+        infrastructure_error = f"command returned non-zero exit code {result.returncode}"
+    if not run_log.is_file() and not infrastructure_error:
+        infrastructure_error = "run.log missing"
+    return infrastructure_error
+
+
 @dataclass
 class CoverageResult:
     coverage_name: str = ""

@@ -11,7 +11,18 @@ from typing import Any
 
 from ..common import append_notes, require_dir, require_file, slugify, write_table
 from ..config import VcsContext
-from ..vcs import build_simv_if_needed, collect_vcs_coverage, common_coverage_backend, run_vcs_seed, scan_vcs_logs
+from ..vcs import (
+    assertion_failure,
+    build_simv_if_needed,
+    classify_infrastructure_error,
+    collect_vcs_coverage,
+    common_coverage_backend,
+    design_bug,
+    design_bug_reasons,
+    run_vcs_seed,
+    scan_vcs_logs,
+    wall_timeout,
+)
 
 
 REQUIRED_SURGE_NATIVE_ABI = "surgefuzz_per_cycle_score_and_ancestor_coverage"
@@ -66,6 +77,10 @@ SURGEFUZZ_FIELDS = [
     "command_log_path",
     "case_dir",
     "timed_out",
+    "wall_timeout",
+    "design_bug",
+    "assertion_failure",
+    "design_bug_reasons",
     "infrastructure_error",
     "paper_faithful",
     "required_native_abi",
@@ -507,15 +522,8 @@ def run_one(
     info = scan_vcs_logs(run_log, assert_log, ctx.cycles)
     common_coverage = collect_vcs_coverage(args, case_dir, ctx.sim_dir)
     common_backend = common_coverage_backend(common_coverage)
-    if result.timed_out and "timeout" not in info.bug_reasons:
-        info.bug_reasons.append("timeout")
-        info.bug_triggered = True
 
-    infrastructure_error = result.error
-    if result.returncode != 0 and not infrastructure_error and not info.bug_triggered:
-        infrastructure_error = f"command returned non-zero exit code {result.returncode}"
-    if not run_log.is_file() and not infrastructure_error:
-        infrastructure_error = "run.log missing"
+    infrastructure_error = classify_infrastructure_error(result, info, run_log)
 
     feedback = evaluate_feedback(args, workload, case_dir, payload, annotation, global_ancestor_states)
     return result, case_dir, run_log, assert_log, info, common_coverage, common_backend, infrastructure_error, feedback
@@ -594,6 +602,10 @@ def append_row(
             "command_log_path": result.command_log_path,
             "case_dir": str(case_dir),
             "timed_out": result.timed_out,
+            "wall_timeout": wall_timeout(result),
+            "design_bug": design_bug(info),
+            "assertion_failure": assertion_failure(info),
+            "design_bug_reasons": design_bug_reasons(info),
             "infrastructure_error": infrastructure_error,
             "paper_faithful": feedback.paper_faithful,
             "required_native_abi": feedback.required_native_abi,

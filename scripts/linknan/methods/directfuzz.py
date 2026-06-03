@@ -16,7 +16,18 @@ from ..common import (
     write_table,
 )
 from ..config import VcsContext
-from ..vcs import build_simv_if_needed, collect_vcs_coverage, common_coverage_backend, run_vcs_seed, scan_vcs_logs
+from ..vcs import (
+    assertion_failure,
+    build_simv_if_needed,
+    classify_infrastructure_error,
+    collect_vcs_coverage,
+    common_coverage_backend,
+    design_bug,
+    design_bug_reasons,
+    run_vcs_seed,
+    scan_vcs_logs,
+    wall_timeout,
+)
 
 
 DIRECTFUZZ_FIELDS = [
@@ -68,6 +79,10 @@ DIRECTFUZZ_FIELDS = [
     "case_dir",
     "case_name",
     "timed_out",
+    "wall_timeout",
+    "design_bug",
+    "assertion_failure",
+    "design_bug_reasons",
     "infrastructure_error",
     "paper_faithful",
     "required_native_abi",
@@ -685,14 +700,7 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
         info = scan_vcs_logs(run_log, assert_log, ctx.cycles)
         common_coverage = collect_vcs_coverage(args, case_dir, ctx.sim_dir)
         common_backend = common_coverage_backend(common_coverage)
-        if result.timed_out and "timeout" not in info.bug_reasons:
-            info.bug_reasons.append("timeout")
-            info.bug_triggered = True
-        infrastructure_error = result.error
-        if result.returncode != 0 and not infrastructure_error and not info.bug_triggered:
-            infrastructure_error = f"command returned non-zero exit code {result.returncode}"
-        if not run_log.is_file() and not infrastructure_error:
-            infrastructure_error = "run.log missing"
+        infrastructure_error = classify_infrastructure_error(result, info, run_log)
 
         dynamic_native_coverage = not args.native_coverage
         native_coverage_source = ""
@@ -805,6 +813,10 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
                 "case_dir": str(case_dir),
                 "case_name": case_name,
                 "timed_out": result.timed_out,
+                "wall_timeout": wall_timeout(result),
+                "design_bug": design_bug(info),
+                "assertion_failure": assertion_failure(info),
+                "design_bug_reasons": design_bug_reasons(info),
                 "infrastructure_error": infrastructure_error,
                 "paper_faithful": paper_faithful,
                 "required_native_abi": missing_native_abi,

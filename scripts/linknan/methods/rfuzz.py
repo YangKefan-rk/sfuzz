@@ -17,11 +17,16 @@ from ..config import VcsContext
 from ..rfuzz_abi import audit_linknan_rfuzz_abi
 from ..seeds import parse_hex_blob
 from ..vcs import (
+    assertion_failure,
     build_simv_if_needed,
+    classify_infrastructure_error,
     collect_vcs_coverage,
     common_coverage_backend,
+    design_bug,
+    design_bug_reasons,
     run_vcs_seed,
     scan_vcs_logs,
+    wall_timeout,
 )
 
 
@@ -86,6 +91,10 @@ RFUZZ_FIELDS = [
     "case_dir",
     "case_name",
     "timed_out",
+    "wall_timeout",
+    "design_bug",
+    "assertion_failure",
+    "design_bug_reasons",
     "infrastructure_error",
     "paper_faithful",
     "paper_faithful_scope",
@@ -393,10 +402,10 @@ def find_toggle_bitmap(args: Any, case_name: str, input_path: Path, case_dir: Pa
 
 
 def run_outcome(result: Any, info: Any, infrastructure_error: str) -> str:
-    if infrastructure_error:
-        return "infrastructure_error"
     if result.timed_out:
         return "timeout"
+    if infrastructure_error:
+        return "infrastructure_error"
     if info.bug_triggered:
         return "bug_triggered"
     if info.good_trap_seen:
@@ -472,15 +481,8 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
             simv_args=args.simv_args,
         )
         info = scan_vcs_logs(run_log, assert_log, ctx.cycles)
-        if result.timed_out and "timeout" not in info.bug_reasons:
-            info.bug_reasons.append("timeout")
-            info.bug_triggered = True
 
-        infrastructure_error = result.error
-        if result.returncode != 0 and not infrastructure_error and not info.bug_triggered:
-            infrastructure_error = f"command returned non-zero exit code {result.returncode}"
-        if not run_log.is_file() and not infrastructure_error:
-            infrastructure_error = "run.log missing"
+        infrastructure_error = classify_infrastructure_error(result, info, run_log)
 
         bitmap, toggle_bitmap_source, bitmap_total = find_toggle_bitmap(args, case_name, candidate_path, case_dir)
         has_native_bitmap = bool(bitmap) and toggle_bitmap_source == "vcs-native-abi"
@@ -506,7 +508,7 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
         if coverage_delta["new_valid"]:
             retention_reasons.append("new_valid_coverage")
         if info.bug_triggered:
-            retention_reasons.append("bug_or_timeout")
+            retention_reasons.append("design_bug")
         retained = bool(retention_reasons)
         if retained:
             corpus_path = corpus_dir / candidate_path.name
@@ -612,6 +614,10 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
                 "case_dir": str(case_dir),
                 "case_name": case_name,
                 "timed_out": result.timed_out,
+                "wall_timeout": wall_timeout(result),
+                "design_bug": design_bug(info),
+                "assertion_failure": assertion_failure(info),
+                "design_bug_reasons": design_bug_reasons(info),
                 "infrastructure_error": infrastructure_error,
                 "paper_faithful": paper_faithful,
                 "paper_faithful_scope": "linknan-processor-workload",
