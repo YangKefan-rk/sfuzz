@@ -53,6 +53,11 @@ SURGEFUZZ_FIELDS = [
     "mutation_operations",
     "surgefuzz_target_id",
     "surgefuzz_target_category",
+    "paper_based",
+    "extension",
+    "rotation_mode",
+    "active_target_index",
+    "active_target_id",
     "annotation_type",
     "target_signal_or_group",
     "ancestor_selector",
@@ -143,6 +148,63 @@ class Feedback:
 
 
 @dataclass(frozen=True)
+class RotationTarget:
+    id: str
+    category: str
+    module: str
+    instance: str
+    signal: str
+    annotation: str
+    ancestor_selector: str
+    ancestor_profile: str
+    selected_ancestors: tuple[str, ...]
+    distance_selected_ancestors: tuple[str, ...]
+    mi_selected_ancestors: tuple[str, ...]
+    mi_pruning_applied: bool
+    raw: dict[str, Any]
+
+
+@dataclass
+class RotationState:
+    targets: list[RotationTarget]
+    mode: str
+    budget_per_target: int
+    stall_threshold: int
+    current_index: int = 0
+    no_new_by_target: dict[str, int] | None = None
+
+    def __post_init__(self) -> None:
+        if self.no_new_by_target is None:
+            self.no_new_by_target = {target.id: 0 for target in self.targets}
+
+    def choose(self, exec_count: int) -> tuple[int, RotationTarget]:
+        if not self.targets:
+            raise ValueError("SurgeFuzz rotation requires at least one target")
+        if self.mode == "round-robin":
+            self.current_index = exec_count % len(self.targets)
+        elif self.mode == "fixed-budget":
+            budget = max(1, self.budget_per_target)
+            self.current_index = (exec_count // budget) % len(self.targets)
+        elif self.mode == "stall-based":
+            self.current_index %= len(self.targets)
+        else:
+            self.current_index = 0
+        return self.current_index, self.targets[self.current_index]
+
+    def observe(self, target: RotationTarget, new_coverage: int) -> None:
+        if not self.targets or self.mode != "stall-based":
+            return
+        assert self.no_new_by_target is not None
+        if new_coverage > 0:
+            self.no_new_by_target[target.id] = 0
+            return
+        self.no_new_by_target[target.id] = self.no_new_by_target.get(target.id, 0) + 1
+        if self.no_new_by_target[target.id] >= max(1, self.stall_threshold):
+            self.no_new_by_target[target.id] = 0
+            self.current_index = (self.current_index + 1) % len(self.targets)
+
+
+@dataclass(frozen=True)
 class ElfSegment:
     load_addr: int
     file_offset: int
@@ -190,7 +252,12 @@ def score_series(kind: str, active: bool, direction: str, values: list[int], win
     return scores
 
 
-def load_surge_trace(path: Path, score_column: str) -> tuple[list[int], list[tuple[int, ...]]]:
+def load_surge_trace(
+    path: Path,
+    score_column: str,
+    target_index: int | None = None,
+    target_id: str | None = None,
+) -> tuple[list[int], list[tuple[int, ...]]]:
     with path.open(newline="", encoding="utf-8") as input_file:
         reader = csv.DictReader(input_file)
         if reader.fieldnames is None:
@@ -198,9 +265,21 @@ def load_surge_trace(path: Path, score_column: str) -> tuple[list[int], list[tup
         if score_column not in reader.fieldnames:
             raise ValueError(f"{path}: CSV is missing score column {score_column!r}")
         rows = list(reader)
+    if target_index is not None and "target_index" in (reader.fieldnames or []):
+        rows = [row for row in rows if row.get("target_index") == str(target_index)]
+    if target_id and "target_id" in (reader.fieldnames or []):
+        rows = [row for row in rows if row.get("target_id") == target_id]
     values = [int(row[score_column], 0) for row in rows]
     dep_cols = [name for name in (reader.fieldnames or []) if name.startswith("dependent_")]
-    dependents = [tuple(int(row[name], 0) for name in dep_cols) for row in rows]
+    dependents = []
+    for row in rows:
+        values_for_row: list[int] = []
+        for name in dep_cols:
+            raw = row.get(name, "")
+            if raw in {None, ""}:
+                continue
+            values_for_row.append(int(raw, 0))
+        dependents.append(tuple(values_for_row))
     return values, dependents
 
 
@@ -240,6 +319,87 @@ def resolve_surge_target(args: Any) -> SurgeTarget:
     if getattr(args, "target_signal_or_group", None) is None:
         args.target_signal_or_group = target.signal
     return target
+
+
+def _string_tuple(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return tuple(item.strip() for item in re.split(r"[,:\s]+", value) if item.strip())
+    if isinstance(value, list):
+        return tuple(str(item).strip() for item in value if str(item).strip())
+    return ()
+
+
+def load_rotation_targets(path: Path, *, disable_mi: bool = False) -> list[RotationTarget]:
+    payload = json.loads(path.expanduser().read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path}: SurgeFuzz rotation manifest must be a JSON object")
+    raw_targets = payload.get("targets", [])
+    if not isinstance(raw_targets, list) or not raw_targets:
+        raise ValueError(f"{path}: SurgeFuzz rotation manifest requires a non-empty targets list")
+    targets: list[RotationTarget] = []
+    for index, raw in enumerate(raw_targets):
+        if not isinstance(raw, dict):
+            raise ValueError(f"{path}: targets[{index}] must be an object")
+        mi_selected = _string_tuple(raw.get("mi_selected_ancestors"))
+        distance_selected = _string_tuple(raw.get("distance_selected_ancestors"))
+        selected = distance_selected if disable_mi and distance_selected else _string_tuple(raw.get("selected_ancestors"))
+        if not selected and mi_selected and not disable_mi:
+            selected = mi_selected
+        if not selected and distance_selected:
+            selected = distance_selected
+        if not selected:
+            raise ValueError(f"{path}: targets[{index}] is missing selected ancestors")
+        targets.append(
+            RotationTarget(
+                id=str(raw.get("id") or f"target_{index}"),
+                category=str(raw.get("category") or ""),
+                module=str(raw.get("module") or ""),
+                instance=str(raw.get("instance") or raw.get("target_instance") or ""),
+                signal=str(raw.get("signal") or raw.get("target_signal") or ""),
+                annotation=str(raw.get("annotation") or "SURGE_FREQ=1"),
+                ancestor_selector="distance" if disable_mi else str(raw.get("ancestor_selector") or "manual"),
+                ancestor_profile=str(raw.get("ancestor_profile") or ""),
+                selected_ancestors=selected,
+                distance_selected_ancestors=distance_selected,
+                mi_selected_ancestors=mi_selected,
+                mi_pruning_applied=bool(raw.get("mi_pruning_applied")) and not disable_mi,
+                raw=dict(raw),
+            )
+        )
+    for target in targets:
+        if not target.module or not target.instance or not target.signal:
+            raise ValueError(f"{path}: rotation target {target.id!r} requires module, instance, and signal")
+    return targets
+
+
+def write_instrumentation_target_config(path: Path, targets: list[RotationTarget], *, disable_mi: bool) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "mode": "surgefuzz_target_rotation_extension",
+        "paper_faithful": False,
+        "paper_based": True,
+        "extension": "target_rotation",
+        "ablation": {"disable_mi": disable_mi},
+        "targets": [
+            {
+                "id": target.id,
+                "category": target.category,
+                "module": target.module,
+                "instance": target.instance,
+                "signal": target.signal,
+                "annotation": target.annotation,
+                "ancestor_selector": target.ancestor_selector,
+                "ancestor_profile": target.ancestor_profile,
+                "selected_ancestors": list(target.selected_ancestors),
+                "distance_selected_ancestors": list(target.distance_selected_ancestors),
+                "mi_selected_ancestors": list(target.mi_selected_ancestors),
+                "mi_pruning_applied": target.mi_pruning_applied,
+            }
+            for target in targets
+        ],
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def temporary_env(overrides: dict[str, str]):
@@ -491,13 +651,18 @@ def evaluate_feedback(
     payload: bytes,
     annotation: tuple[str, bool, str],
     global_ancestor_states: set[tuple[int, ...]],
+    active_target_index: int | None = None,
+    active_target_id: str | None = None,
 ) -> Feedback:
     trace = find_trace(args, workload, case_dir)
     if trace is not None:
-        values, dependents = load_surge_trace(trace, args.score_column)
+        values, dependents = load_surge_trace(trace, args.score_column, active_target_index, active_target_id)
         meta = load_trace_meta(trace)
         best_score = max(score_series(*annotation, values, args.freq_window), default=0)
-        ancestor_states = set(dependents)
+        if active_target_index is None:
+            ancestor_states = set(dependents)
+        else:
+            ancestor_states = {(active_target_index, *state) for state in dependents}
         new_states = ancestor_states - global_ancestor_states
         global_ancestor_states.update(ancestor_states)
         trace_source = "dev-mock" if args.trace_is_dev_mock else args.trace_source
@@ -505,7 +670,10 @@ def evaluate_feedback(
         if not values:
             paper_faithful = False
             required_native_abi = REQUIRED_SURGE_NATIVE_ABI
+        energy = 1.0 if getattr(args, "disable_power_scheduling", False) else float(max(1, best_score * best_score))
         notes = f"consumed per-cycle SurgeFuzz trace {trace}"
+        if active_target_id:
+            notes += f"; active_target={active_target_id}"
         meta_note = trace_meta_notes(meta)
         if meta_note:
             notes += f"; {meta_note}"
@@ -513,9 +681,11 @@ def evaluate_feedback(
             notes += "; trace has no per-cycle samples, so native SurgeFuzz feedback is not usable yet"
         if not paper_faithful:
             notes += "; trace provenance is not the LinkNan/VCS native ABI"
+        if getattr(args, "disable_power_scheduling", False):
+            notes += "; ablation=without_power_scheduling"
         return Feedback(
             best_score,
-            float(max(1, best_score * best_score)),
+            energy,
             ancestor_states,
             len(new_states),
             backend,
@@ -566,8 +736,8 @@ def evaluate_feedback(
     )
 
 
-def select_seed(corpus: list[CorpusEntry], rnd: random.Random) -> CorpusEntry:
-    weights = [max(1e-6, entry.energy) for entry in corpus]
+def select_seed(corpus: list[CorpusEntry], rnd: random.Random, *, disable_power_scheduling: bool = False) -> CorpusEntry:
+    weights = [1.0 if disable_power_scheduling else max(1e-6, entry.energy) for entry in corpus]
     entry = rnd.choices(corpus, weights=weights, k=1)[0]
     entry.uses += 1
     return entry
@@ -660,6 +830,8 @@ def run_one(
     logs_dir: Path,
     annotation: tuple[str, bool, str],
     global_ancestor_states: set[tuple[int, ...]],
+    active_target_index: int | None = None,
+    active_target_id: str | None = None,
 ) -> tuple[Any, Path, Path, Path, Any, Any, str, str, Feedback]:
     case_dir = runs_dir / case_name
     extra_env = {
@@ -683,7 +855,16 @@ def run_one(
 
     infrastructure_error = classify_infrastructure_error(result, info, run_log)
 
-    feedback = evaluate_feedback(args, workload, case_dir, payload, annotation, global_ancestor_states)
+    feedback = evaluate_feedback(
+        args,
+        workload,
+        case_dir,
+        payload,
+        annotation,
+        global_ancestor_states,
+        active_target_index,
+        active_target_id,
+    )
     return result, case_dir, run_log, assert_log, info, common_coverage, common_backend, infrastructure_error, feedback
 
 
@@ -713,11 +894,20 @@ def append_row(
     global_ancestor_states: set[tuple[int, ...]],
     corpus_size: int,
     extra_notes: str = "",
+    active_target_index: int | str = "",
+    active_target: RotationTarget | None = None,
 ) -> None:
-    target = getattr(args, "_surge_target", None)
+    target = active_target or getattr(args, "_surge_target", None)
     mutation_ops = ",".join(mutation_operations) if isinstance(mutation_operations, list) else str(mutation_operations)
     input_is_artifact = getattr(args, "input_mode", "workload") == "artifact-program"
-    paper_faithful = feedback.paper_faithful and input_is_artifact
+    rotation_mode = getattr(args, "rotation_mode", "none")
+    extension = "target_rotation" if rotation_mode != "none" else ""
+    paper_faithful = feedback.paper_faithful and input_is_artifact and rotation_mode == "none"
+    paper_based = rotation_mode != "none"
+    annotation_type = target.annotation if isinstance(target, RotationTarget) else args.annotation_type
+    signal_or_group = target.signal if isinstance(target, RotationTarget) else args.target_signal_or_group
+    ancestor_selector = target.ancestor_selector if isinstance(target, RotationTarget) else getattr(args, "ancestor_selector", "")
+    ancestor_profile = target.ancestor_profile if isinstance(target, RotationTarget) else str(getattr(args, "ancestor_profile", "") or "")
     rows.append(
         {
             "fuzzer": "surgefuzz",
@@ -735,10 +925,15 @@ def append_row(
             "mutation_operations": mutation_ops,
             "surgefuzz_target_id": target.id if target is not None else "",
             "surgefuzz_target_category": target.category if target is not None else "",
-            "annotation_type": args.annotation_type,
-            "target_signal_or_group": args.target_signal_or_group,
-            "ancestor_selector": getattr(args, "ancestor_selector", ""),
-            "ancestor_profile": str(getattr(args, "ancestor_profile", "") or ""),
+            "paper_based": paper_based,
+            "extension": extension,
+            "rotation_mode": rotation_mode,
+            "active_target_index": active_target_index,
+            "active_target_id": target.id if target is not None else "",
+            "annotation_type": annotation_type,
+            "target_signal_or_group": signal_or_group,
+            "ancestor_selector": ancestor_selector,
+            "ancestor_profile": ancestor_profile,
             "best_score": feedback.best_score,
             "energy": feedback.energy,
             "ancestor_coverage_bits": len(feedback.ancestor_states),
@@ -783,6 +978,9 @@ def append_row(
                 feedback.notes,
                 extra_notes,
                 "" if input_is_artifact else "input_generation=legacy_linknan_workload_adapter_not_artifact_program",
+                "paper_based_extension=target_rotation" if extension else "",
+                "ablation=without_mi" if getattr(args, "disable_mi", False) else "",
+                "ablation=without_power_scheduling" if getattr(args, "disable_power_scheduling", False) else "",
                 {
                     "cycle_policy": "natural-end-or-timeout",
                     "xmake_default_max_cycles": "0_when_--cycles_omitted",
@@ -813,15 +1011,6 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
     if not getattr(args, "firrtl_cov", None):
         args.firrtl_cov = "SurgeFuzz.trace"
 
-    args.target_manifest = Path(args.target_manifest or DEFAULT_TARGET_MANIFEST).expanduser()
-    target = resolve_surge_target(args)
-    args._surge_target = target
-    args.ancestor_selector = args.ancestor_selector or target.ancestor_selector
-    args.ancestor_profile = args.ancestor_profile or target.ancestor_profile
-    args.max_surgefuzz_ancestor_width = args.max_surgefuzz_ancestor_width or target.max_ancestor_width
-    args.annotation_type = args.annotation_type or target.annotation
-    args.target_signal_or_group = args.target_signal_or_group or target.signal
-
     work_dir = args.work_dir.expanduser().resolve()
     runs_dir = work_dir / "vcs-runs"
     logs_dir = work_dir / "logs"
@@ -832,15 +1021,55 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
 
     if args.trace_is_dev_mock and args.trace_source == "vcs-native-abi":
         raise ValueError("--trace-is-dev-mock conflicts with --trace-source vcs-native-abi")
-    env = target_env(target)
-    env["SFUZZ_SURGEFUZZ_ANCESTOR_SELECTOR"] = args.ancestor_selector
-    env["SFUZZ_SURGEFUZZ_MAX_ANCESTOR_WIDTH"] = str(args.max_surgefuzz_ancestor_width)
-    if args.ancestor_profile:
-        env["SFUZZ_SURGEFUZZ_ANCESTOR_PROFILE"] = str(Path(args.ancestor_profile).expanduser())
+
+    args.target_manifest = Path(args.target_manifest or DEFAULT_TARGET_MANIFEST).expanduser()
+    rotation_targets: list[RotationTarget] = []
+    rotation_state: RotationState | None = None
+    rotation_config_path: Path | None = None
+    target: SurgeTarget | RotationTarget
+    if getattr(args, "rotation_manifest", None) or getattr(args, "rotation_mode", "none") != "none":
+        if getattr(args, "rotation_mode", "none") == "none":
+            raise ValueError("--rotation-manifest requires --rotation-mode other than none")
+        if not getattr(args, "rotation_manifest", None):
+            raise ValueError("--rotation-mode requires --rotation-manifest")
+        rotation_manifest = Path(args.rotation_manifest).expanduser().resolve()
+        require_file(rotation_manifest)
+        rotation_targets = load_rotation_targets(rotation_manifest, disable_mi=getattr(args, "disable_mi", False))
+        rotation_state = RotationState(
+            rotation_targets,
+            args.rotation_mode,
+            args.rotation_budget_per_target,
+            args.rotation_stall_threshold,
+        )
+        rotation_config_path = work_dir / "surgefuzz_instrumentation_targets.json"
+        write_instrumentation_target_config(rotation_config_path, rotation_targets, disable_mi=getattr(args, "disable_mi", False))
+        target = rotation_targets[0]
+        args._surge_target = target
+        args.annotation_type = args.annotation_type or target.annotation
+        args.target_signal_or_group = args.target_signal_or_group or target.signal
+        args.ancestor_selector = args.ancestor_selector or target.ancestor_selector
+        args.ancestor_profile = args.ancestor_profile or target.ancestor_profile
+        args.max_surgefuzz_ancestor_width = args.max_surgefuzz_ancestor_width or 64
+        env = {
+            "SFUZZ_SURGEFUZZ_TARGET_CONFIG": str(rotation_config_path),
+        }
+    else:
+        target = resolve_surge_target(args)
+        args._surge_target = target
+        args.ancestor_selector = args.ancestor_selector or target.ancestor_selector
+        args.ancestor_profile = args.ancestor_profile or target.ancestor_profile
+        args.max_surgefuzz_ancestor_width = args.max_surgefuzz_ancestor_width or target.max_ancestor_width
+        args.annotation_type = args.annotation_type or target.annotation
+        args.target_signal_or_group = args.target_signal_or_group or target.signal
+        env = target_env(target)
+        env["SFUZZ_SURGEFUZZ_ANCESTOR_SELECTOR"] = args.ancestor_selector
+        env["SFUZZ_SURGEFUZZ_MAX_ANCESTOR_WIDTH"] = str(args.max_surgefuzz_ancestor_width)
+        if args.ancestor_profile:
+            env["SFUZZ_SURGEFUZZ_ANCESTOR_PROFILE"] = str(Path(args.ancestor_profile).expanduser())
+
     with temporary_env(env):
         build_simv_if_needed(args, ctx, work_dir)
 
-    annotation = parse_annotation(args.annotation_type)
     global_ancestor_states: set[tuple[int, ...]] = set()
     corpus: list[CorpusEntry] = []
     rows: list[dict[str, Any]] = []
@@ -865,6 +1094,13 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                 stem=stem,
                 args=args,
             )
+            active_target_index: int | None = None
+            active_target: RotationTarget | None = None
+            if rotation_state is not None:
+                active_target_index, active_target = rotation_state.choose(exec_count)
+                annotation = parse_annotation(active_target.annotation)
+            else:
+                annotation = parse_annotation(args.annotation_type)
             case_name = f"{slugify(args.case_prefix)}-init-{index:04d}"
             result, case_dir, run_log, assert_log, info, common_coverage, common_backend, infrastructure_error, feedback = run_one(
                 args=args,
@@ -876,8 +1112,12 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                 logs_dir=logs_dir,
                 annotation=annotation,
                 global_ancestor_states=global_ancestor_states,
+                active_target_index=active_target_index,
+                active_target_id=active_target.id if active_target is not None else None,
             )
             exec_count += 1
+            if rotation_state is not None and active_target is not None:
+                rotation_state.observe(active_target, feedback.new_coverage)
             seed_id = len(corpus)
             corpus.append(
                 CorpusEntry(
@@ -915,6 +1155,8 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                 global_ancestor_states=global_ancestor_states,
                 corpus_size=len(corpus),
                 extra_notes=append_notes(compile_notes, f"asm={asm_path}", f"elf={elf_path}", "artifact_initial_seed=true"),
+                active_target_index=active_target_index if active_target_index is not None else "",
+                active_target=active_target,
             )
             print(
                 f"[artifact init {index + 1}/{args.initial_seed_count}] exit={result.returncode} "
@@ -925,7 +1167,7 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
         for round_index in range(args.mutations):
             if exec_count >= max_execs or not corpus:
                 break
-            parent = select_seed(corpus, rnd)
+            parent = select_seed(corpus, rnd, disable_power_scheduling=getattr(args, "disable_power_scheduling", False))
             if parent.program is None:
                 raise RuntimeError("artifact-program corpus entry is missing Program state")
             child_program = parent.program.clone()
@@ -938,6 +1180,13 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                 stem=stem,
                 args=args,
             )
+            active_target_index = None
+            active_target = None
+            if rotation_state is not None:
+                active_target_index, active_target = rotation_state.choose(exec_count)
+                annotation = parse_annotation(active_target.annotation)
+            else:
+                annotation = parse_annotation(args.annotation_type)
             case_name = f"{slugify(args.case_prefix)}-round-{round_index:04d}-p{parent.seed_id:04d}"
             result, case_dir, run_log, assert_log, info, common_coverage, common_backend, infrastructure_error, feedback = run_one(
                 args=args,
@@ -949,8 +1198,12 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                 logs_dir=logs_dir,
                 annotation=annotation,
                 global_ancestor_states=global_ancestor_states,
+                active_target_index=active_target_index,
+                active_target_id=active_target.id if active_target is not None else None,
             )
             exec_count += 1
+            if rotation_state is not None and active_target is not None:
+                rotation_state.observe(active_target, feedback.new_coverage)
             keep = feedback.new_coverage > 0
             child_seed_id: int | str = ""
             if keep:
@@ -998,6 +1251,8 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                     f"selected_parent={parent.seed_id}",
                     f"kept={keep}",
                 ),
+                active_target_index=active_target_index if active_target_index is not None else "",
+                active_target=active_target,
             )
             print(
                 f"[artifact round {round_index}] parent={parent.seed_id} keep={keep} exit={result.returncode} "
@@ -1013,6 +1268,13 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
             if exec_count >= max_execs:
                 break
             seed = load_workload_seed(workload)
+            active_target_index = None
+            active_target = None
+            if rotation_state is not None:
+                active_target_index, active_target = rotation_state.choose(exec_count)
+                annotation = parse_annotation(active_target.annotation)
+            else:
+                annotation = parse_annotation(args.annotation_type)
             case_name = f"{slugify(args.case_prefix)}-bootstrap-{index:03d}-{slugify(workload.stem)}"
             result, case_dir, run_log, assert_log, info, common_coverage, common_backend, infrastructure_error, feedback = run_one(
                 args=args,
@@ -1024,8 +1286,12 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                 logs_dir=logs_dir,
                 annotation=annotation,
                 global_ancestor_states=global_ancestor_states,
+                active_target_index=active_target_index,
+                active_target_id=active_target.id if active_target is not None else None,
             )
             exec_count += 1
+            if rotation_state is not None and active_target is not None:
+                rotation_state.observe(active_target, feedback.new_coverage)
             seed_id = len(corpus)
             corpus.append(
                 CorpusEntry(
@@ -1061,6 +1327,8 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                 global_ancestor_states=global_ancestor_states,
                 corpus_size=len(corpus),
                 extra_notes=seed.source_notes,
+                active_target_index=active_target_index if active_target_index is not None else "",
+                active_target=active_target,
             )
             print(
                 f"[bootstrap {index + 1}/{len(workloads)}] exit={result.returncode} "
@@ -1071,10 +1339,17 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
         for round_index in range(args.mutations):
             if exec_count >= max_execs or not corpus:
                 break
-            parent = select_seed(corpus, rnd)
+            parent = select_seed(corpus, rnd, disable_power_scheduling=getattr(args, "disable_power_scheduling", False))
             child_payload, mutation_kind = mutate_payload(parent.payload, rnd, args.max_input_bytes)
             child_path = generated_dir / f"surgefuzz-round-{round_index:04d}-parent-{parent.seed_id:04d}.bin"
             child_path.write_bytes(child_payload)
+            active_target_index = None
+            active_target = None
+            if rotation_state is not None:
+                active_target_index, active_target = rotation_state.choose(exec_count)
+                annotation = parse_annotation(active_target.annotation)
+            else:
+                annotation = parse_annotation(args.annotation_type)
             case_name = f"{slugify(args.case_prefix)}-round-{round_index:04d}-p{parent.seed_id:04d}"
             result, case_dir, run_log, assert_log, info, common_coverage, common_backend, infrastructure_error, feedback = run_one(
                 args=args,
@@ -1086,8 +1361,12 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                 logs_dir=logs_dir,
                 annotation=annotation,
                 global_ancestor_states=global_ancestor_states,
+                active_target_index=active_target_index,
+                active_target_id=active_target.id if active_target is not None else None,
             )
             exec_count += 1
+            if rotation_state is not None and active_target is not None:
+                rotation_state.observe(active_target, feedback.new_coverage)
             keep = feedback.new_coverage > 0
             child_seed_id: int | str = ""
             if keep:
@@ -1126,6 +1405,8 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                 global_ancestor_states=global_ancestor_states,
                 corpus_size=len(corpus),
                 extra_notes=f"selected_parent={parent.seed_id};kept={keep}",
+                active_target_index=active_target_index if active_target_index is not None else "",
+                active_target=active_target,
             )
             print(
                 f"[round {round_index}] parent={parent.seed_id} keep={keep} exit={result.returncode} "
@@ -1152,6 +1433,20 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
             "input_mode": input_mode,
             "target_manifest": str(args.target_manifest),
             "surgefuzz_targets": manifest_table(args.target_manifest),
+            "paper_based": getattr(args, "rotation_mode", "none") != "none",
+            "extension": "target_rotation" if getattr(args, "rotation_mode", "none") != "none" else "",
+            "rotation": {
+                "mode": getattr(args, "rotation_mode", "none"),
+                "manifest": str(getattr(args, "rotation_manifest", "") or ""),
+                "instrumentation_config": str(rotation_config_path or ""),
+                "target_count": len(rotation_targets),
+                "budget_per_target": getattr(args, "rotation_budget_per_target", ""),
+                "stall_threshold": getattr(args, "rotation_stall_threshold", ""),
+            },
+            "ablation": {
+                "disable_mi": bool(getattr(args, "disable_mi", False)),
+                "disable_power_scheduling": bool(getattr(args, "disable_power_scheduling", False)),
+            },
             "selected_target": {
                 "id": target.id,
                 "category": target.category,

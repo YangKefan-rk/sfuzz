@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -245,6 +246,14 @@ def generated_firrtl_metadata(build_dir: Path) -> dict[str, Any] | None:
         return None
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as input_file:
+        for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def generated_firrtl_metadata_matches(build_dir: Path, firrtl_cov: str) -> bool:
     metadata = generated_firrtl_metadata(build_dir)
     if not metadata or metadata.get("backend") != "sfuzz_firrtl_sv_bind":
@@ -270,6 +279,15 @@ def generated_firrtl_metadata_matches(build_dir: Path, firrtl_cov: str) -> bool:
         surge = metadata.get("surgefuzz")
         if not isinstance(surge, dict):
             return False
+        target_config = os.environ.get("SFUZZ_SURGEFUZZ_TARGET_CONFIG", "")
+        if target_config:
+            config_path = Path(target_config).expanduser()
+            if not config_path.is_file():
+                return False
+            expected_hash = sha256_file(config_path)
+            if str(surge.get("target_config_sha256", "")) != expected_hash:
+                return False
+            return True
         expected = {
             "module": os.environ.get("SFUZZ_SURGEFUZZ_MODULE", ""),
             "target_instance": os.environ.get("SFUZZ_SURGEFUZZ_TARGET_INSTANCE", ""),
@@ -278,6 +296,16 @@ def generated_firrtl_metadata_matches(build_dir: Path, firrtl_cov: str) -> bool:
         }
         for key, value in expected.items():
             if value and str(surge.get(key, "")) != value:
+                return False
+        expected_ancestors = [
+            item.strip()
+            for item in re.split(r"[,:\s]+", os.environ.get("SFUZZ_SURGEFUZZ_ANCESTORS", ""))
+            if item.strip()
+        ]
+        if expected_ancestors:
+            actual = surge.get("ancestors", [])
+            actual_names = [str(item.get("name", "")) for item in actual if isinstance(item, dict)]
+            if actual_names != expected_ancestors:
                 return False
     return True
 

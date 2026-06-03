@@ -185,6 +185,24 @@ def read_profile_samples(path: Path) -> dict[str, list[int]]:
     return samples
 
 
+def paired_profile_samples(path: Path, lhs: str, rhs: str) -> tuple[list[int], list[int]]:
+    lhs_values: list[int] = []
+    rhs_values: list[int] = []
+    with path.open(newline="", encoding="utf-8") as input_file:
+        reader = csv.DictReader(input_file)
+        for row in reader:
+            lhs_raw = row.get(lhs)
+            rhs_raw = row.get(rhs)
+            if lhs_raw in {None, ""} or rhs_raw in {None, ""}:
+                continue
+            try:
+                lhs_values.append(int(lhs_raw, 0))
+                rhs_values.append(int(rhs_raw, 0))
+            except ValueError:
+                continue
+    return lhs_values, rhs_values
+
+
 def entropy(values: list[int]) -> float:
     if not values:
         return 0.0
@@ -248,6 +266,8 @@ def select_ancestor_names(
                 rejected.append({"name": candidate.name, "reason": "missing_profile_samples"})
                 continue
             if reference_samples:
+                if profile_csv is not None:
+                    candidate_samples, reference_samples = paired_profile_samples(profile_csv, name, reference_name)
                 nmi = normalized_mutual_information(candidate_samples, reference_samples)
                 if nmi > nmi_threshold:
                     rejected.append({"name": candidate.name, "reason": "nmi", "nmi": round(nmi, 6)})
