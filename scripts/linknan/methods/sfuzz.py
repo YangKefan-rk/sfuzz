@@ -42,6 +42,12 @@ SFUZZ_FIELDS = [
     "parent_corpus_id",
     "mutation_index",
     "energy",
+    "mutation_budget",
+    "mutation_operators",
+    "scheduler_policy",
+    "scheduler_corpus_index",
+    "scheduler_weight",
+    "scheduler_total_weight",
     "retained",
     "retention_reason",
     "comparison_tier",
@@ -87,6 +93,16 @@ SFUZZ_FIELDS = [
     "notes",
 ]
 
+DEFAULT_CORE0_PROG = bytes.fromhex("73001000")
+SFUZZ_SCHEDULER_POLICY = "coverage_weighted_energy"
+SFUZZ_MUTATION_OPERATORS = (
+    "bitflip_byte",
+    "overwrite_byte",
+    "bitflip_word",
+    "delete_range",
+    "insert_random_bytes",
+)
+
 
 @dataclass
 class CorpusEntry:
@@ -97,6 +113,31 @@ class CorpusEntry:
     energy: int
     parent_corpus_id: int | str = ""
     mutation_index: int | str = ""
+    mutation_budget: int | str = ""
+    mutation_operators: str = ""
+    scheduler_policy: str = ""
+    scheduler_corpus_index: int | str = ""
+    scheduler_weight: int | str = ""
+    scheduler_total_weight: int | str = ""
+
+
+@dataclass(frozen=True)
+class MutationSummary:
+    budget: int
+    operators: tuple[str, ...]
+
+    @property
+    def operator_trace(self) -> str:
+        return ";".join(self.operators)
+
+
+@dataclass(frozen=True)
+class SchedulerSelection:
+    entry: CorpusEntry
+    corpus_index: int
+    weight: int
+    total_weight: int
+    policy: str = SFUZZ_SCHEDULER_POLICY
 
 
 def run_outcome(result: Any, info: Any, infrastructure_error: str) -> str:
@@ -152,32 +193,108 @@ def bounded_energy(new_bits: int, min_energy: int, max_energy: int) -> int:
     return min(hi, lo + new_bits.bit_length())
 
 
-def mutate_sfuz(parent: Path, output: Path, rng: random.Random, budget: int) -> None:
+def normalized_mutation_budget(budget: int) -> int:
+    return max(1, int(budget))
+
+
+def scheduler_weight(entry: CorpusEntry) -> int:
+    try:
+        return max(1, int(entry.energy))
+    except (TypeError, ValueError):
+        return 1
+
+
+def select_weighted_parent(corpus: list[CorpusEntry], rng: random.Random) -> SchedulerSelection:
+    if not corpus:
+        raise ValueError("SFuzz scheduler requires a non-empty corpus")
+    weights = [scheduler_weight(entry) for entry in corpus]
+    total = sum(weights)
+    ticket = rng.randrange(total)
+    cursor = 0
+    for idx, weight in enumerate(weights):
+        cursor += weight
+        if ticket < cursor:
+            return SchedulerSelection(corpus[idx], idx, weight, total)
+    last_idx = len(corpus) - 1
+    return SchedulerSelection(corpus[last_idx], last_idx, weights[last_idx], total)
+
+
+def ensure_core0_program(core0: bytearray) -> None:
+    if not core0:
+        core0.extend(DEFAULT_CORE0_PROG)
+
+
+def available_mutation_operators(core0: bytearray) -> tuple[str, ...]:
+    operators = ["bitflip_byte", "overwrite_byte"]
+    if len(core0) >= 4:
+        operators.append("bitflip_word")
+    if len(core0) > 4:
+        operators.append("delete_range")
+    operators.append("insert_random_bytes")
+    return tuple(operators)
+
+
+def mutation_operator_selection_pool(core0: bytearray) -> tuple[str, ...]:
+    return (
+        "bitflip_byte",
+        "overwrite_byte",
+        "bitflip_word" if len(core0) >= 4 else "insert_random_bytes",
+        "delete_range" if len(core0) > 4 else "insert_random_bytes",
+        "insert_random_bytes",
+    )
+
+
+def choose_mutation_operator(core0: bytearray, rng: random.Random) -> str:
+    ensure_core0_program(core0)
+    operators = mutation_operator_selection_pool(core0)
+    return operators[rng.randrange(len(operators))]
+
+
+def apply_sfuz_mutation_operator(core0: bytearray, operator: str, rng: random.Random) -> None:
+    if operator not in SFUZZ_MUTATION_OPERATORS:
+        raise ValueError(f"unsupported SFuzz mutation operator: {operator}")
+    ensure_core0_program(core0)
+    if operator == "bitflip_byte":
+        idx = rng.randrange(len(core0))
+        core0[idx] ^= 1 << rng.randrange(8)
+    elif operator == "overwrite_byte":
+        idx = rng.randrange(len(core0))
+        core0[idx] = rng.randrange(256)
+    elif operator == "bitflip_word":
+        if len(core0) < 4:
+            raise ValueError("bitflip_word requires at least 4 bytes")
+        word_count = len(core0) // 4
+        word_idx = rng.randrange(word_count)
+        start = word_idx * 4
+        word = int.from_bytes(core0[start : start + 4], "little")
+        word ^= 1 << rng.randrange(32)
+        core0[start : start + 4] = word.to_bytes(4, "little")
+    elif operator == "delete_range":
+        if len(core0) <= 4:
+            raise ValueError("delete_range requires more than 4 bytes")
+        start = rng.randrange(len(core0))
+        width = rng.randrange(1, min(8, len(core0) - start) + 1)
+        del core0[start : min(len(core0), start + width)]
+    elif operator == "insert_random_bytes":
+        idx = rng.randrange(len(core0) + 1)
+        core0[idx:idx] = rng.randbytes(rng.randrange(1, 9))
+
+
+def mutate_core0_program(core0: bytearray, rng: random.Random, budget: int) -> MutationSummary:
+    mutation_budget = normalized_mutation_budget(budget)
+    operators: list[str] = []
+    ensure_core0_program(core0)
+    for _ in range(mutation_budget):
+        operator = choose_mutation_operator(core0, rng)
+        apply_sfuz_mutation_operator(core0, operator, rng)
+        operators.append(operator)
+    return MutationSummary(mutation_budget, tuple(operators))
+
+
+def mutate_sfuz(parent: Path, output: Path, rng: random.Random, budget: int) -> MutationSummary:
     seed = read_sfuz_seed(parent)
     core0 = bytearray(seed.core0_prog)
-    if not core0:
-        core0.extend(bytes.fromhex("73001000"))
-    for _ in range(max(1, budget)):
-        op = rng.randrange(5)
-        if op == 0:
-            idx = rng.randrange(len(core0))
-            core0[idx] ^= 1 << rng.randrange(8)
-        elif op == 1:
-            idx = rng.randrange(len(core0))
-            core0[idx] = rng.randrange(256)
-        elif op == 2 and len(core0) >= 4:
-            word_count = len(core0) // 4
-            word_idx = rng.randrange(word_count)
-            start = word_idx * 4
-            word = int.from_bytes(core0[start : start + 4], "little")
-            word ^= 1 << rng.randrange(32)
-            core0[start : start + 4] = word.to_bytes(4, "little")
-        elif op == 3 and len(core0) > 4:
-            start = rng.randrange(len(core0))
-            del core0[start : min(len(core0), start + rng.randrange(1, min(8, len(core0) - start) + 1))]
-        else:
-            idx = rng.randrange(len(core0) + 1)
-            core0[idx:idx] = rng.randbytes(rng.randrange(1, 9))
+    summary = mutate_core0_program(core0, rng, budget)
     mutated = SfuzSeed(
         core0_prog=bytes(core0),
         core1_prog=seed.core1_prog,
@@ -188,6 +305,7 @@ def mutate_sfuz(parent: Path, output: Path, rng: random.Random, budget: int) -> 
         tags=[*seed.tags, "sfuzz-online-mutated"],
     )
     write_sfuz_seed(output, mutated)
+    return summary
 
 
 def command_cycle_markers(command_log: str) -> tuple[bool, bool]:
@@ -274,6 +392,12 @@ def row_from_run(
         "parent_corpus_id": entry.parent_corpus_id,
         "mutation_index": entry.mutation_index,
         "energy": entry.energy,
+        "mutation_budget": entry.mutation_budget,
+        "mutation_operators": entry.mutation_operators,
+        "scheduler_policy": entry.scheduler_policy,
+        "scheduler_corpus_index": entry.scheduler_corpus_index,
+        "scheduler_weight": entry.scheduler_weight,
+        "scheduler_total_weight": entry.scheduler_total_weight,
         "retained": retained,
         "retention_reason": retention_reason,
         "comparison_tier": run["comparison_tier"],
@@ -361,20 +485,21 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
     rng = random.Random(getattr(args, "rng_seed", 1))
     campaign_runs = len(corpus) if getattr(args, "batch_replay", False) else max(1, getattr(args, "campaign_runs", 8))
     next_corpus_id = len(corpus)
-    queue_pos = 0
     mutation_counter = 0
 
     for exec_idx in range(1, campaign_runs + 1):
         if getattr(args, "batch_replay", False):
             entry = corpus[exec_idx - 1]
+            entry.scheduler_policy = "batch_replay"
         elif exec_idx <= len(corpus):
             entry = corpus[exec_idx - 1]
+            entry.scheduler_policy = "initial_corpus"
         else:
-            parent = corpus[queue_pos % len(corpus)]
-            queue_pos += 1
+            scheduled = select_weighted_parent(corpus, rng)
+            parent = scheduled.entry
             mutation_counter += 1
             mutated_path = generated_dir / f"sfuzz-mut-{mutation_counter:04d}.sfuz"
-            mutate_sfuz(parent.path, mutated_path, rng, parent.energy)
+            mutation = mutate_sfuz(parent.path, mutated_path, rng, parent.energy)
             seed_name = read_seed_metadata_name(mutated_path)
             entry = CorpusEntry(
                 corpus_id=next_corpus_id,
@@ -384,6 +509,12 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
                 energy=parent.energy,
                 parent_corpus_id=parent.corpus_id,
                 mutation_index=mutation_counter,
+                mutation_budget=mutation.budget,
+                mutation_operators=mutation.operator_trace,
+                scheduler_policy=scheduled.policy,
+                scheduler_corpus_index=scheduled.corpus_index,
+                scheduler_weight=scheduled.weight,
+                scheduler_total_weight=scheduled.total_weight,
             )
             next_corpus_id += 1
 
@@ -398,7 +529,7 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
             if entry not in corpus:
                 corpus.append(entry)
         notes = (
-            "online SFuzz loop; coverage delta drives corpus retention and mutation energy; "
+            "online SFuzz loop; coverage delta drives corpus retention, mutation energy, and weighted parent selection; "
             "use --batch-replay only for legacy fixed manifest replay"
         )
         rows.append(
