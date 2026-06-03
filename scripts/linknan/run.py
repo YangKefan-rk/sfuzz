@@ -225,7 +225,7 @@ def main() -> int:
         ),
     )
     add_common_vcs_args(surge)
-    surge.set_defaults(no_cycle_limit=True)
+    surge.set_defaults(no_cycle_limit=True, firrtl_cov="SurgeFuzz.trace")
     surge.add_argument("--seed", action="append", default=[], help="SurgeFuzz workload .bin/.elf path; repeatable")
     surge.add_argument("--seed-list", type=Path, help="text file with one .bin/.elf path per non-comment line")
     surge.add_argument("--seed-dir", type=Path, help="directory containing .bin/.elf workload inputs")
@@ -259,6 +259,7 @@ def main() -> int:
             "traces, and only vcs-native-abi can be paper-faithful"
         ),
     )
+    surge.set_defaults(trace_source="vcs-native-abi")
     surge.add_argument("--freq-window", type=int, default=256)
     surge.set_defaults(case_prefix="surgefuzz", handler=run_surgefuzz)
 

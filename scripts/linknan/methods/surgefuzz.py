@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import random
 import re
 import struct
@@ -12,6 +13,8 @@ from typing import Any
 from ..common import append_notes, require_dir, require_file, slugify, write_table
 from ..config import VcsContext
 from ..vcs import (
+    SFUZZ_FIRRTL_COV_ENV,
+    SFUZZ_FIRRTL_COV_OUT_ENV,
     assertion_failure,
     build_simv_if_needed,
     classify_infrastructure_error,
@@ -60,6 +63,7 @@ SURGEFUZZ_FIELDS = [
     "score_backend",
     "trace_source",
     "trace_path",
+    "trace_rows",
     "score_column",
     "wall_time_sec",
     "cycles",
@@ -121,6 +125,7 @@ class Feedback:
     score_backend: str
     trace_source: str
     trace_path: str
+    trace_rows: int
     comparison_tier: str
     paper_faithful: bool
     required_native_abi: str
@@ -187,6 +192,34 @@ def load_surge_trace(path: Path, score_column: str) -> tuple[list[int], list[tup
     dep_cols = [name for name in (reader.fieldnames or []) if name.startswith("dependent_")]
     dependents = [tuple(int(row[name], 0) for name in dep_cols) for row in rows]
     return values, dependents
+
+
+def load_trace_meta(trace: Path) -> dict[str, Any]:
+    meta = trace.with_suffix(".meta.json")
+    if not meta.is_file():
+        return {}
+    try:
+        payload = json.loads(meta.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def trace_meta_notes(meta: dict[str, Any]) -> str:
+    if not meta:
+        return ""
+    keys = [
+        "samples",
+        "call_count",
+        "accepted_scope_count",
+        "dropped_scope_count",
+        "target_hit_count",
+        "trace_dropped",
+        "target_instance",
+        "target_signal",
+    ]
+    parts = [f"{key}={meta[key]}" for key in keys if key in meta]
+    return "trace_meta:" + ",".join(parts) if parts else ""
 
 
 def select_struct_format(endianness: int, payload: str) -> str:
@@ -352,13 +385,26 @@ def collect_workloads(args: Any, work_dir: Path) -> list[Path]:
 
 def trace_backend(trace_source: str) -> tuple[str, bool, str]:
     if trace_source == "vcs-native-abi":
-        return "surgefuzz_vcs_native_abi_trace", True, ""
+        return "surgefuzz_vcs_native_abi_trace", True, REQUIRED_SURGE_NATIVE_ABI
     if trace_source == "dev-mock":
         return "dev_mock_score_trace", False, REQUIRED_SURGE_NATIVE_ABI
     return "surgefuzz_offline_trace_csv", False, REQUIRED_SURGE_NATIVE_ABI
 
 
 def find_native_trace(case_dir: Path) -> Path | None:
+    summary = case_dir / "surgefuzz_trace.json"
+    if summary.is_file():
+        try:
+            payload = json.loads(summary.read_text(encoding="utf-8", errors="replace"))
+            trace_raw = str(payload.get("surgefuzz_trace_file") or "")
+        except (OSError, json.JSONDecodeError):
+            trace_raw = ""
+        if trace_raw:
+            trace = Path(trace_raw)
+            if not trace.is_absolute():
+                trace = summary.parent / trace
+            if trace.is_file():
+                return trace
     candidates = [
         case_dir / "surgefuzz_trace.csv",
         case_dir / "surgefuzz_per_cycle.csv",
@@ -406,13 +452,22 @@ def evaluate_feedback(
     trace = find_trace(args, workload, case_dir)
     if trace is not None:
         values, dependents = load_surge_trace(trace, args.score_column)
+        meta = load_trace_meta(trace)
         best_score = max(score_series(*annotation, values, args.freq_window), default=0)
         ancestor_states = set(dependents)
         new_states = ancestor_states - global_ancestor_states
         global_ancestor_states.update(ancestor_states)
         trace_source = "dev-mock" if args.trace_is_dev_mock else args.trace_source
         backend, paper_faithful, required_native_abi = trace_backend(trace_source)
+        if not values:
+            paper_faithful = False
+            required_native_abi = REQUIRED_SURGE_NATIVE_ABI
         notes = f"consumed per-cycle SurgeFuzz trace {trace}"
+        meta_note = trace_meta_notes(meta)
+        if meta_note:
+            notes += f"; {meta_note}"
+        if not values:
+            notes += "; trace has no per-cycle samples, so native SurgeFuzz feedback is not usable yet"
         if not paper_faithful:
             notes += "; trace provenance is not the LinkNan/VCS native ABI"
         return Feedback(
@@ -424,6 +479,7 @@ def evaluate_feedback(
             backend,
             trace_source,
             str(trace),
+            len(values),
             "T2_processor_workload_native_feedback" if paper_faithful else "T0_trace_loop",
             paper_faithful,
             required_native_abi,
@@ -443,6 +499,7 @@ def evaluate_feedback(
             "surgefuzz_adapter_stub_dev_mock",
             "adapter-stub-dev-mock",
             "",
+            len(ancestor_states),
             "T0_adapter_stub_loop",
             False,
             REQUIRED_SURGE_NATIVE_ABI,
@@ -458,6 +515,7 @@ def evaluate_feedback(
         "unavailable",
         "no-trace",
         "",
+        0,
         "T0_adapter_stub_loop",
         False,
         REQUIRED_SURGE_NATIVE_ABI,
@@ -509,6 +567,11 @@ def run_one(
     annotation: tuple[str, bool, str],
     global_ancestor_states: set[tuple[int, ...]],
 ) -> tuple[Any, Path, Path, Path, Any, Any, str, str, Feedback]:
+    case_dir = runs_dir / case_name
+    extra_env = {
+        SFUZZ_FIRRTL_COV_ENV: "SurgeFuzz.trace",
+        SFUZZ_FIRRTL_COV_OUT_ENV: str(case_dir / "surgefuzz_trace"),
+    }
     result, case_dir, run_log, assert_log = run_vcs_seed(
         seed=workload,
         case_name=case_name,
@@ -518,6 +581,7 @@ def run_one(
         timeout_sec=args.timeout_sec,
         cov=args.cov,
         simv_args=args.simv_args,
+        extra_env=extra_env,
     )
     info = scan_vcs_logs(run_log, assert_log, ctx.cycles)
     common_coverage = collect_vcs_coverage(args, case_dir, ctx.sim_dir)
@@ -585,6 +649,7 @@ def append_row(
             "score_backend": feedback.score_backend,
             "trace_source": feedback.trace_source,
             "trace_path": feedback.trace_path,
+            "trace_rows": feedback.trace_rows,
             "score_column": args.score_column,
             "wall_time_sec": round(result.wall_time_sec, 6),
             "cycles": info.cycles if info.cycles is not None else "",
@@ -639,6 +704,8 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
         )
     if args.timeout_sec <= 0:
         raise ValueError("SurgeFuzz LinkNan loop requires --timeout-sec to bound natural-end VCS runs")
+    if not getattr(args, "firrtl_cov", None):
+        args.firrtl_cov = "SurgeFuzz.trace"
 
     work_dir = args.work_dir.expanduser().resolve()
     runs_dir = work_dir / "vcs-runs"

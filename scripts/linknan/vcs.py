@@ -193,6 +193,8 @@ def normalize_firrtl_coverage_name(value: str | None) -> str:
         return text
     if text.lower() == "directfuzz" or text.lower().startswith("directfuzz.") or text.lower().startswith("directfuzz_"):
         return text
+    if text.lower() == "surgefuzz" or text.lower().startswith("surgefuzz.") or text.lower().startswith("surgefuzz_"):
+        return text
     return f"FIRRTL.{text}"
 
 
@@ -222,10 +224,14 @@ def requested_firrtl_groups(firrtl_cov: str) -> set[str]:
         "directfuzz_mux_toggle",
     }:
         return {"directfuzz_mux_toggle"}
+    if normalized in {"surgefuzz", "surgefuzz.trace", "surgefuzz.trace-csv", "surgefuzz.trace_csv", "surgefuzz_trace"}:
+        return {"surgefuzz_trace"}
     if normalized.startswith("firrtl."):
         return {normalized[len("firrtl.") :]}
     if normalized.startswith("rfuzz."):
         return {normalized[len("rfuzz.") :].replace("-", "_")}
+    if normalized.startswith("surgefuzz."):
+        return {normalized[len("surgefuzz.") :].replace("-", "_")}
     return {normalized} if normalized else set()
 
 
@@ -604,6 +610,7 @@ def sfuzz_firrtl_summary_candidates(case_dir: Path) -> list[Path]:
         case_dir / f"{SFUZZ_FIRRTL_COV_PREFIX}.json",
         case_dir / "rfuzz_toggle_bitmap.json",
         case_dir / "directfuzz_coverage.json",
+        case_dir / "surgefuzz_trace.json",
     ]
     out_prefix = os.environ.get(SFUZZ_FIRRTL_COV_OUT_ENV)
     if out_prefix:
