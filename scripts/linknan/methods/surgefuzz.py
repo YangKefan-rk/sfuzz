@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import random
 import re
 import struct
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +14,8 @@ from typing import Any
 
 from ..common import append_notes, require_dir, require_file, slugify, write_table
 from ..config import VcsContext
+from ..surgefuzz_program import Program, ProgramConfig, compile_program
+from ..surgefuzz_targets import DEFAULT_TARGET_MANIFEST, SurgeTarget, manifest_table, select_target, target_env
 from ..vcs import (
     SFUZZ_FIRRTL_COV_ENV,
     SFUZZ_FIRRTL_COV_OUT_ENV,
@@ -46,8 +50,13 @@ SURGEFUZZ_FIELDS = [
     "input_size_bytes",
     "mutation_backend",
     "mutation_kind",
+    "mutation_operations",
+    "surgefuzz_target_id",
+    "surgefuzz_target_category",
     "annotation_type",
     "target_signal_or_group",
+    "ancestor_selector",
+    "ancestor_profile",
     "best_score",
     "energy",
     "ancestor_coverage_bits",
@@ -112,6 +121,7 @@ class CorpusEntry:
     parent_seed_id: int | str
     best_score: int
     energy: float
+    program: Program | None = None
     uses: int = 0
 
 
@@ -220,6 +230,39 @@ def trace_meta_notes(meta: dict[str, Any]) -> str:
     ]
     parts = [f"{key}={meta[key]}" for key in keys if key in meta]
     return "trace_meta:" + ",".join(parts) if parts else ""
+
+
+def resolve_surge_target(args: Any) -> SurgeTarget:
+    manifest = getattr(args, "target_manifest", None) or DEFAULT_TARGET_MANIFEST
+    target = select_target(Path(manifest).expanduser(), getattr(args, "surge_target", None))
+    if getattr(args, "annotation_type", None) is None:
+        args.annotation_type = target.annotation
+    if getattr(args, "target_signal_or_group", None) is None:
+        args.target_signal_or_group = target.signal
+    return target
+
+
+def temporary_env(overrides: dict[str, str]):
+    class _TemporaryEnv:
+        def __init__(self, values: dict[str, str]):
+            self.values = values
+            self.old: dict[str, str | None] = {}
+
+        def __enter__(self):
+            for key, value in self.values.items():
+                self.old[key] = os.environ.get(key)
+                os.environ[key] = value
+            return self
+
+        def __exit__(self, _exc_type, _exc, _trace):
+            for key, value in self.old.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            return False
+
+    return _TemporaryEnv(overrides)
 
 
 def select_struct_format(endianness: int, payload: str) -> str:
@@ -524,10 +567,61 @@ def evaluate_feedback(
 
 
 def select_seed(corpus: list[CorpusEntry], rnd: random.Random) -> CorpusEntry:
-    weights = [max(1.0, entry.energy) / (1 + entry.uses) for entry in corpus]
+    weights = [max(1e-6, entry.energy) for entry in corpus]
     entry = rnd.choices(corpus, weights=weights, k=1)[0]
     entry.uses += 1
     return entry
+
+
+def program_config_from_args(args: Any) -> ProgramConfig:
+    return ProgramConfig(
+        initial_seed_block_count=args.initial_seed_block_count,
+        initial_seed_instructions_per_block=args.initial_seed_instructions_per_block,
+        enable_rv64a=args.enable_rv64a,
+        enable_rv64im=args.enable_rv64im,
+        enable_insert_memory_access_sequence=args.enable_insert_memory_access_sequence,
+        max_operation_count=args.max_operation_count,
+        link_address=int(args.link_address, 0) if isinstance(args.link_address, str) else int(args.link_address),
+        memory_bytes=args.test_memory_bytes,
+        stack_bytes=args.stack_bytes,
+    )
+
+
+def optional_text(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    return path.expanduser().read_text(encoding="utf-8")
+
+
+def compile_artifact_workload(
+    *,
+    program: Program,
+    program_config: ProgramConfig,
+    generated_dir: Path,
+    stem: str,
+    args: Any,
+) -> tuple[Path, Path, Path, bytes, str]:
+    asm_path = generated_dir / f"{stem}.S"
+    elf_path = generated_dir / f"{stem}.elf"
+    bin_path = generated_dir / f"{stem}.bin"
+    try:
+        compile_program(
+            program,
+            output_bin=bin_path,
+            output_asm=asm_path,
+            output_elf=elf_path,
+            config=program_config,
+            gcc=args.surgefuzz_riscv_gcc,
+            objcopy=args.surgefuzz_objcopy,
+            header=optional_text(args.asm_header),
+            footer=optional_text(args.asm_footer),
+        )
+    except subprocess.CalledProcessError as exc:
+        output = "\n".join(part for part in [exc.stdout, exc.stderr] if part)
+        raise RuntimeError(f"failed to compile SurgeFuzz artifact program {asm_path}: {output}") from exc
+    payload = bin_path.read_bytes()
+    notes = f"asm={asm_path};elf={elf_path};link_address={program_config.link_address:#x}"
+    return bin_path, asm_path, elf_path, payload, notes
 
 
 def mutate_payload(payload: bytes, rnd: random.Random, max_bytes: int) -> tuple[bytes, str]:
@@ -605,6 +699,8 @@ def append_row(
     input_format: str,
     input_size_bytes: int,
     mutation_kind: str,
+    mutation_operations: list[str] | str = "",
+    mutation_backend: str = "",
     result: Any,
     case_dir: Path,
     run_log: Path,
@@ -618,6 +714,10 @@ def append_row(
     corpus_size: int,
     extra_notes: str = "",
 ) -> None:
+    target = getattr(args, "_surge_target", None)
+    mutation_ops = ",".join(mutation_operations) if isinstance(mutation_operations, list) else str(mutation_operations)
+    input_is_artifact = getattr(args, "input_mode", "workload") == "artifact-program"
+    paper_faithful = feedback.paper_faithful and input_is_artifact
     rows.append(
         {
             "fuzzer": "surgefuzz",
@@ -630,10 +730,15 @@ def append_row(
             "runner_abi": RUNNER_ABI,
             "input_format": input_format,
             "input_size_bytes": input_size_bytes,
-            "mutation_backend": "linknan_workload_bin_byte_mutator",
+            "mutation_backend": mutation_backend or "linknan_workload_bin_byte_mutator",
             "mutation_kind": mutation_kind,
+            "mutation_operations": mutation_ops,
+            "surgefuzz_target_id": target.id if target is not None else "",
+            "surgefuzz_target_category": target.category if target is not None else "",
             "annotation_type": args.annotation_type,
             "target_signal_or_group": args.target_signal_or_group,
+            "ancestor_selector": getattr(args, "ancestor_selector", ""),
+            "ancestor_profile": str(getattr(args, "ancestor_profile", "") or ""),
             "best_score": feedback.best_score,
             "energy": feedback.energy,
             "ancestor_coverage_bits": len(feedback.ancestor_states),
@@ -672,11 +777,12 @@ def append_row(
             "assertion_failure": assertion_failure(info),
             "design_bug_reasons": design_bug_reasons(info),
             "infrastructure_error": infrastructure_error,
-            "paper_faithful": feedback.paper_faithful,
+            "paper_faithful": paper_faithful,
             "required_native_abi": feedback.required_native_abi,
             "notes": append_notes(
                 feedback.notes,
                 extra_notes,
+                "" if input_is_artifact else "input_generation=legacy_linknan_workload_adapter_not_artifact_program",
                 {
                     "cycle_policy": "natural-end-or-timeout",
                     "xmake_default_max_cycles": "0_when_--cycles_omitted",
@@ -707,6 +813,15 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
     if not getattr(args, "firrtl_cov", None):
         args.firrtl_cov = "SurgeFuzz.trace"
 
+    args.target_manifest = Path(args.target_manifest or DEFAULT_TARGET_MANIFEST).expanduser()
+    target = resolve_surge_target(args)
+    args._surge_target = target
+    args.ancestor_selector = args.ancestor_selector or target.ancestor_selector
+    args.ancestor_profile = args.ancestor_profile or target.ancestor_profile
+    args.max_surgefuzz_ancestor_width = args.max_surgefuzz_ancestor_width or target.max_ancestor_width
+    args.annotation_type = args.annotation_type or target.annotation
+    args.target_signal_or_group = args.target_signal_or_group or target.signal
+
     work_dir = args.work_dir.expanduser().resolve()
     runs_dir = work_dir / "vcs-runs"
     logs_dir = work_dir / "logs"
@@ -715,10 +830,15 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
     logs_dir.mkdir(parents=True, exist_ok=True)
     generated_dir.mkdir(parents=True, exist_ok=True)
 
-    workloads = collect_workloads(args, work_dir)
     if args.trace_is_dev_mock and args.trace_source == "vcs-native-abi":
         raise ValueError("--trace-is-dev-mock conflicts with --trace-source vcs-native-abi")
-    build_simv_if_needed(args, ctx, work_dir)
+    env = target_env(target)
+    env["SFUZZ_SURGEFUZZ_ANCESTOR_SELECTOR"] = args.ancestor_selector
+    env["SFUZZ_SURGEFUZZ_MAX_ANCESTOR_WIDTH"] = str(args.max_surgefuzz_ancestor_width)
+    if args.ancestor_profile:
+        env["SFUZZ_SURGEFUZZ_ANCESTOR_PROFILE"] = str(Path(args.ancestor_profile).expanduser())
+    with temporary_env(env):
+        build_simv_if_needed(args, ctx, work_dir)
 
     annotation = parse_annotation(args.annotation_type)
     global_ancestor_states: set[tuple[int, ...]] = set()
@@ -727,132 +847,292 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
     rnd = random.Random(args.rng_seed)
     _campaign_start = time.monotonic()
     exec_count = 0
-    max_execs = args.max_execs if args.max_execs > 0 else len(workloads) + args.mutations
+    input_mode = getattr(args, "input_mode", "workload")
 
-    for index, workload in enumerate(workloads):
-        if exec_count >= max_execs:
-            break
-        seed = load_workload_seed(workload)
-        case_name = f"{slugify(args.case_prefix)}-bootstrap-{index:03d}-{slugify(workload.stem)}"
-        result, case_dir, run_log, assert_log, info, common_coverage, common_backend, infrastructure_error, feedback = run_one(
-            args=args,
-            ctx=ctx,
-            workload=workload,
-            payload=seed.payload,
-            case_name=case_name,
-            runs_dir=runs_dir,
-            logs_dir=logs_dir,
-            annotation=annotation,
-            global_ancestor_states=global_ancestor_states,
-        )
-        exec_count += 1
-        seed_id = len(corpus)
-        corpus.append(
-            CorpusEntry(
-                seed_id=seed_id,
-                path=workload,
-                payload=seed.payload,
-                input_format=seed.input_format,
-                parent_seed_id="initial",
-                best_score=feedback.best_score,
-                energy=feedback.energy,
+    if input_mode == "artifact-program":
+        program_config = program_config_from_args(args)
+        max_execs = args.max_execs if args.max_execs > 0 else args.initial_seed_count + args.mutations
+
+        for index in range(args.initial_seed_count):
+            if exec_count >= max_execs:
+                break
+            program = Program.random(rnd, program_config)
+            stem = f"surgefuzz-init-{index:04d}"
+            workload, asm_path, elf_path, payload, compile_notes = compile_artifact_workload(
+                program=program,
+                program_config=program_config,
+                generated_dir=generated_dir,
+                stem=stem,
+                args=args,
             )
-        )
-        append_row(
-            rows,
-            args=args,
-            seed=workload,
-            seed_id=seed_id,
-            parent_seed_id="initial",
-            round_name="bootstrap",
-            case_name=case_name,
-            input_format=seed.input_format,
-            input_size_bytes=len(seed.payload),
-            mutation_kind="initial-workload",
-            result=result,
-            case_dir=case_dir,
-            run_log=run_log,
-            assert_log=assert_log,
-            info=info,
-            common_coverage=common_coverage,
-            common_backend=common_backend,
-            infrastructure_error=infrastructure_error,
-            feedback=feedback,
-            global_ancestor_states=global_ancestor_states,
-            corpus_size=len(corpus),
-            extra_notes=seed.source_notes,
-        )
-        print(
-            f"[bootstrap {index + 1}/{len(workloads)}] exit={result.returncode} "
-            f"score={feedback.best_score} new_ancestor={feedback.new_coverage} workload={workload}",
-            flush=True,
-        )
-
-    for round_index in range(args.mutations):
-        if exec_count >= max_execs or not corpus:
-            break
-        parent = select_seed(corpus, rnd)
-        child_payload, mutation_kind = mutate_payload(parent.payload, rnd, args.max_input_bytes)
-        child_path = generated_dir / f"surgefuzz-round-{round_index:04d}-parent-{parent.seed_id:04d}.bin"
-        child_path.write_bytes(child_payload)
-        case_name = f"{slugify(args.case_prefix)}-round-{round_index:04d}-p{parent.seed_id:04d}"
-        result, case_dir, run_log, assert_log, info, common_coverage, common_backend, infrastructure_error, feedback = run_one(
-            args=args,
-            ctx=ctx,
-            workload=child_path,
-            payload=child_payload,
-            case_name=case_name,
-            runs_dir=runs_dir,
-            logs_dir=logs_dir,
-            annotation=annotation,
-            global_ancestor_states=global_ancestor_states,
-        )
-        exec_count += 1
-        keep = feedback.new_coverage > 0 or feedback.best_score > parent.best_score
-        child_seed_id: int | str = ""
-        if keep:
-            child_seed_id = len(corpus)
+            case_name = f"{slugify(args.case_prefix)}-init-{index:04d}"
+            result, case_dir, run_log, assert_log, info, common_coverage, common_backend, infrastructure_error, feedback = run_one(
+                args=args,
+                ctx=ctx,
+                workload=workload,
+                payload=payload,
+                case_name=case_name,
+                runs_dir=runs_dir,
+                logs_dir=logs_dir,
+                annotation=annotation,
+                global_ancestor_states=global_ancestor_states,
+            )
+            exec_count += 1
+            seed_id = len(corpus)
             corpus.append(
                 CorpusEntry(
-                    seed_id=child_seed_id,
-                    path=child_path,
-                    payload=child_payload,
-                    input_format="generated-linknan-workload-bin",
-                    parent_seed_id=parent.seed_id,
+                    seed_id=seed_id,
+                    path=workload,
+                    payload=payload,
+                    input_format="generated-riscv-asm-linknan-bin",
+                    parent_seed_id="initial",
+                    best_score=feedback.best_score,
+                    energy=feedback.energy,
+                    program=program,
+                )
+            )
+            append_row(
+                rows,
+                args=args,
+                seed=workload,
+                seed_id=seed_id,
+                parent_seed_id="initial",
+                round_name="bootstrap",
+                case_name=case_name,
+                input_format="generated-riscv-asm-linknan-bin",
+                input_size_bytes=len(payload),
+                mutation_kind="initial-artifact-program",
+                mutation_backend="surgefuzz_artifact_instruction_sequence_mutator",
+                result=result,
+                case_dir=case_dir,
+                run_log=run_log,
+                assert_log=assert_log,
+                info=info,
+                common_coverage=common_coverage,
+                common_backend=common_backend,
+                infrastructure_error=infrastructure_error,
+                feedback=feedback,
+                global_ancestor_states=global_ancestor_states,
+                corpus_size=len(corpus),
+                extra_notes=append_notes(compile_notes, f"asm={asm_path}", f"elf={elf_path}", "artifact_initial_seed=true"),
+            )
+            print(
+                f"[artifact init {index + 1}/{args.initial_seed_count}] exit={result.returncode} "
+                f"score={feedback.best_score} new_ancestor={feedback.new_coverage} workload={workload}",
+                flush=True,
+            )
+
+        for round_index in range(args.mutations):
+            if exec_count >= max_execs or not corpus:
+                break
+            parent = select_seed(corpus, rnd)
+            if parent.program is None:
+                raise RuntimeError("artifact-program corpus entry is missing Program state")
+            child_program = parent.program.clone()
+            operations = child_program.mutate(rnd, program_config)
+            stem = f"surgefuzz-round-{round_index:04d}-parent-{parent.seed_id:04d}"
+            workload, asm_path, elf_path, payload, compile_notes = compile_artifact_workload(
+                program=child_program,
+                program_config=program_config,
+                generated_dir=generated_dir,
+                stem=stem,
+                args=args,
+            )
+            case_name = f"{slugify(args.case_prefix)}-round-{round_index:04d}-p{parent.seed_id:04d}"
+            result, case_dir, run_log, assert_log, info, common_coverage, common_backend, infrastructure_error, feedback = run_one(
+                args=args,
+                ctx=ctx,
+                workload=workload,
+                payload=payload,
+                case_name=case_name,
+                runs_dir=runs_dir,
+                logs_dir=logs_dir,
+                annotation=annotation,
+                global_ancestor_states=global_ancestor_states,
+            )
+            exec_count += 1
+            keep = feedback.new_coverage > 0
+            child_seed_id: int | str = ""
+            if keep:
+                child_seed_id = len(corpus)
+                corpus.append(
+                    CorpusEntry(
+                        seed_id=child_seed_id,
+                        path=workload,
+                        payload=payload,
+                        input_format="generated-riscv-asm-linknan-bin",
+                        parent_seed_id=parent.seed_id,
+                        best_score=feedback.best_score,
+                        energy=feedback.energy,
+                        program=child_program,
+                    )
+                )
+            append_row(
+                rows,
+                args=args,
+                seed=workload,
+                seed_id=child_seed_id,
+                parent_seed_id=parent.seed_id,
+                round_name=round_index,
+                case_name=case_name,
+                input_format="generated-riscv-asm-linknan-bin",
+                input_size_bytes=len(payload),
+                mutation_kind="artifact-program-mutation",
+                mutation_operations=operations,
+                mutation_backend="surgefuzz_artifact_instruction_sequence_mutator",
+                result=result,
+                case_dir=case_dir,
+                run_log=run_log,
+                assert_log=assert_log,
+                info=info,
+                common_coverage=common_coverage,
+                common_backend=common_backend,
+                infrastructure_error=infrastructure_error,
+                feedback=feedback,
+                global_ancestor_states=global_ancestor_states,
+                corpus_size=len(corpus),
+                extra_notes=append_notes(
+                    compile_notes,
+                    f"asm={asm_path}",
+                    f"elf={elf_path}",
+                    f"selected_parent={parent.seed_id}",
+                    f"kept={keep}",
+                ),
+            )
+            print(
+                f"[artifact round {round_index}] parent={parent.seed_id} keep={keep} exit={result.returncode} "
+                f"score={feedback.best_score} new_ancestor={feedback.new_coverage} "
+                f"global_ancestor={len(global_ancestor_states)} workload={workload}",
+                flush=True,
+            )
+    else:
+        workloads = collect_workloads(args, work_dir)
+        max_execs = args.max_execs if args.max_execs > 0 else len(workloads) + args.mutations
+
+        for index, workload in enumerate(workloads):
+            if exec_count >= max_execs:
+                break
+            seed = load_workload_seed(workload)
+            case_name = f"{slugify(args.case_prefix)}-bootstrap-{index:03d}-{slugify(workload.stem)}"
+            result, case_dir, run_log, assert_log, info, common_coverage, common_backend, infrastructure_error, feedback = run_one(
+                args=args,
+                ctx=ctx,
+                workload=workload,
+                payload=seed.payload,
+                case_name=case_name,
+                runs_dir=runs_dir,
+                logs_dir=logs_dir,
+                annotation=annotation,
+                global_ancestor_states=global_ancestor_states,
+            )
+            exec_count += 1
+            seed_id = len(corpus)
+            corpus.append(
+                CorpusEntry(
+                    seed_id=seed_id,
+                    path=workload,
+                    payload=seed.payload,
+                    input_format=seed.input_format,
+                    parent_seed_id="initial",
                     best_score=feedback.best_score,
                     energy=feedback.energy,
                 )
             )
-        append_row(
-            rows,
-            args=args,
-            seed=child_path,
-            seed_id=child_seed_id,
-            parent_seed_id=parent.seed_id,
-            round_name=round_index,
-            case_name=case_name,
-            input_format="generated-linknan-workload-bin",
-            input_size_bytes=len(child_payload),
-            mutation_kind=mutation_kind,
-            result=result,
-            case_dir=case_dir,
-            run_log=run_log,
-            assert_log=assert_log,
-            info=info,
-            common_coverage=common_coverage,
-            common_backend=common_backend,
-            infrastructure_error=infrastructure_error,
-            feedback=feedback,
-            global_ancestor_states=global_ancestor_states,
-            corpus_size=len(corpus),
-            extra_notes=f"selected_parent={parent.seed_id};kept={keep}",
-        )
-        print(
-            f"[round {round_index}] parent={parent.seed_id} keep={keep} exit={result.returncode} "
-            f"score={feedback.best_score} new_ancestor={feedback.new_coverage} "
-            f"global_ancestor={len(global_ancestor_states)} workload={child_path}",
-            flush=True,
-        )
+            append_row(
+                rows,
+                args=args,
+                seed=workload,
+                seed_id=seed_id,
+                parent_seed_id="initial",
+                round_name="bootstrap",
+                case_name=case_name,
+                input_format=seed.input_format,
+                input_size_bytes=len(seed.payload),
+                mutation_kind="initial-workload",
+                result=result,
+                case_dir=case_dir,
+                run_log=run_log,
+                assert_log=assert_log,
+                info=info,
+                common_coverage=common_coverage,
+                common_backend=common_backend,
+                infrastructure_error=infrastructure_error,
+                feedback=feedback,
+                global_ancestor_states=global_ancestor_states,
+                corpus_size=len(corpus),
+                extra_notes=seed.source_notes,
+            )
+            print(
+                f"[bootstrap {index + 1}/{len(workloads)}] exit={result.returncode} "
+                f"score={feedback.best_score} new_ancestor={feedback.new_coverage} workload={workload}",
+                flush=True,
+            )
+
+        for round_index in range(args.mutations):
+            if exec_count >= max_execs or not corpus:
+                break
+            parent = select_seed(corpus, rnd)
+            child_payload, mutation_kind = mutate_payload(parent.payload, rnd, args.max_input_bytes)
+            child_path = generated_dir / f"surgefuzz-round-{round_index:04d}-parent-{parent.seed_id:04d}.bin"
+            child_path.write_bytes(child_payload)
+            case_name = f"{slugify(args.case_prefix)}-round-{round_index:04d}-p{parent.seed_id:04d}"
+            result, case_dir, run_log, assert_log, info, common_coverage, common_backend, infrastructure_error, feedback = run_one(
+                args=args,
+                ctx=ctx,
+                workload=child_path,
+                payload=child_payload,
+                case_name=case_name,
+                runs_dir=runs_dir,
+                logs_dir=logs_dir,
+                annotation=annotation,
+                global_ancestor_states=global_ancestor_states,
+            )
+            exec_count += 1
+            keep = feedback.new_coverage > 0
+            child_seed_id: int | str = ""
+            if keep:
+                child_seed_id = len(corpus)
+                corpus.append(
+                    CorpusEntry(
+                        seed_id=child_seed_id,
+                        path=child_path,
+                        payload=child_payload,
+                        input_format="generated-linknan-workload-bin",
+                        parent_seed_id=parent.seed_id,
+                        best_score=feedback.best_score,
+                        energy=feedback.energy,
+                    )
+                )
+            append_row(
+                rows,
+                args=args,
+                seed=child_path,
+                seed_id=child_seed_id,
+                parent_seed_id=parent.seed_id,
+                round_name=round_index,
+                case_name=case_name,
+                input_format="generated-linknan-workload-bin",
+                input_size_bytes=len(child_payload),
+                mutation_kind=mutation_kind,
+                result=result,
+                case_dir=case_dir,
+                run_log=run_log,
+                assert_log=assert_log,
+                info=info,
+                common_coverage=common_coverage,
+                common_backend=common_backend,
+                infrastructure_error=infrastructure_error,
+                feedback=feedback,
+                global_ancestor_states=global_ancestor_states,
+                corpus_size=len(corpus),
+                extra_notes=f"selected_parent={parent.seed_id};kept={keep}",
+            )
+            print(
+                f"[round {round_index}] parent={parent.seed_id} keep={keep} exit={result.returncode} "
+                f"score={feedback.best_score} new_ancestor={feedback.new_coverage} "
+                f"global_ancestor={len(global_ancestor_states)} workload={child_path}",
+                flush=True,
+            )
 
     write_table(
         rows,
@@ -864,11 +1144,24 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
             "input_contract": (
                 "Paper/artifact SurgeFuzz generates RISC-V instruction programs, compiles them to a simulator "
                 "workload, and feeds back per-cycle annotated-signal score plus ancestor-register coverage. "
-                "This LinkNan adapter runs normal workload .bin/.elf inputs and rejects .sfuz replay containers; "
-                "generated mutations are emitted as .bin workloads."
+                "The artifact-program mode mutates Program/Block/Instruction objects and emits LinkNan-native "
+                ".bin workloads; workload mode remains a legacy LinkNan .bin/.elf adapter."
             ),
             "cycle_policy": "no --cycles passed by SFuzz; LinkNan xmake simv-run default is +max-cycles=0; external timeout bounds runs",
             "required_native_abi": REQUIRED_SURGE_NATIVE_ABI,
+            "input_mode": input_mode,
+            "target_manifest": str(args.target_manifest),
+            "surgefuzz_targets": manifest_table(args.target_manifest),
+            "selected_target": {
+                "id": target.id,
+                "category": target.category,
+                "module": target.module,
+                "instance": target.instance,
+                "signal": target.signal,
+                "annotation": args.annotation_type,
+                "ancestor_selector": args.ancestor_selector,
+                "ancestor_profile": str(args.ancestor_profile or ""),
+            },
         },
     )
     return 0

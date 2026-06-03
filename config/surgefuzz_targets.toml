@@ -1,0 +1,65 @@
+[[targets]]
+id = "memblock_load_miss"
+category = "miss"
+module = "MemBlock"
+instance = "SimTop.soc.cc_0.tile.core.memBlock"
+signal = "io_monitorInfo_DCacheInfoVec_loadPipe_0_s2_miss_req_fire"
+annotation = "SURGE_FREQ=1"
+ancestor_selector = "distance-nmi"
+max_ancestor_width = 64
+description = "load pipe 0 miss request fire pulse"
+
+[[targets]]
+id = "memblock_load_replay"
+category = "replay"
+module = "MemBlock"
+instance = "SimTop.soc.cc_0.tile.core.memBlock"
+signal = "io_monitorInfo_lqStuckInfo_replayInfo_0_valid"
+annotation = "SURGE_FREQ=1"
+ancestor_selector = "distance-nmi"
+max_ancestor_width = 64
+description = "load queue replay info valid pulse"
+
+[[targets]]
+id = "memblock_load_stall"
+category = "stall"
+module = "MemBlock"
+instance = "SimTop.soc.cc_0.tile.core.memBlock"
+signal = "io_monitorInfo_lqStuckInfo_valid"
+annotation = "SURGE_CONSEC=1"
+ancestor_selector = "distance-nmi"
+max_ancestor_width = 64
+description = "load queue stuck monitor valid signal"
+
+[[targets]]
+id = "memblock_flush_sbuffer"
+category = "flush"
+module = "MemBlock"
+instance = "SimTop.soc.cc_0.tile.core.memBlock"
+signal = "io_ooo_to_mem_flushSb"
+annotation = "SURGE_FREQ=1"
+ancestor_selector = "distance-nmi"
+max_ancestor_width = 64
+description = "backend-to-memory store buffer flush request"
+
+[[targets]]
+id = "memblock_bank_conflict"
+category = "resource_conflict"
+module = "MemBlock"
+instance = "SimTop.soc.cc_0.tile.core.memBlock"
+signal = "io_monitorInfo_ldu_0_s2_bankConflict"
+annotation = "SURGE_FREQ=1"
+ancestor_selector = "distance-nmi"
+max_ancestor_width = 64
+description = "load unit 0 stage-2 data-cache bank conflict"
+
+[[targets]]
+id = "memblock_wbq_block_miss"
+category = "resource_conflict"
+module = "MemBlock"
+instance = "SimTop.soc.cc_0.tile.core.memBlock"
+signal = "io_monitorInfo_DCacheInfoVec_loadPipe_0_wbq_block_miss_req"
+annotation = "SURGE_CONSEC=1"
+ancestor_selector = "distance-nmi"
+max_ancestor_width = 64
+description = "writeback queue blocks load pipe 0 miss request"

@@ -17,7 +17,10 @@ from linknan.methods.sfuzz import run_sfuzz
 
 try:
     from linknan.methods.surgefuzz import run_surgefuzz, write_dev_surge_profile
+    from linknan.surgefuzz_targets import DEFAULT_TARGET_MANIFEST
 except ModuleNotFoundError:
+    DEFAULT_TARGET_MANIFEST = Path("config/surgefuzz_targets.toml")
+
     def run_surgefuzz(args: argparse.Namespace, ctx: object) -> int:
         raise SystemExit("SurgeFuzz LinkNan runner module is unavailable in this worktree")
 
@@ -226,7 +229,13 @@ def main() -> int:
     )
     add_common_vcs_args(surge)
     surge.set_defaults(no_cycle_limit=True, firrtl_cov="SurgeFuzz.trace")
-    surge.add_argument("--seed", action="append", default=[], help="SurgeFuzz workload .bin/.elf path; repeatable")
+    surge.add_argument(
+        "--input-mode",
+        choices=["artifact-program", "workload"],
+        default="artifact-program",
+        help="artifact-program reproduces SurgeFuzz Program/Block/Instruction mutation; workload keeps the legacy .bin/.elf adapter",
+    )
+    surge.add_argument("--seed", action="append", default=[], help="legacy workload .bin/.elf path; repeatable")
     surge.add_argument("--seed-list", type=Path, help="text file with one .bin/.elf path per non-comment line")
     surge.add_argument("--seed-dir", type=Path, help="directory containing .bin/.elf workload inputs")
     surge.add_argument("--limit", type=int, default=0, help="import at most this many initial inputs; 0 means all")
@@ -234,8 +243,30 @@ def main() -> int:
     surge.add_argument("--mutations", type=int, default=8, help="number of score-guided SurgeFuzz mutation attempts")
     surge.add_argument("--rng-seed", type=int, default=0, help="deterministic mutation RNG seed")
     surge.add_argument("--max-input-bytes", type=int, default=0, help="truncate mutated workload inputs; 0 disables")
-    surge.add_argument("--annotation-type", default="SURGE_FREQ=1")
-    surge.add_argument("--target-signal-or-group", default="MSHR")
+    surge.add_argument("--annotation-type", default=None, help="override selected manifest target annotation")
+    surge.add_argument("--target-signal-or-group", default=None, help="override selected manifest target signal/group label")
+    surge.add_argument("--target-manifest", type=Path, default=DEFAULT_TARGET_MANIFEST)
+    surge.add_argument("--surge-target", default="memblock_load_miss", help="target id from --target-manifest")
+    surge.add_argument("--ancestor-selector", choices=["manual", "distance", "distance-nmi"], default="")
+    surge.add_argument("--ancestor-profile", default="", help="optional profile CSV for distance-nmi pruning")
+    surge.add_argument("--max-surgefuzz-ancestor-width", type=int, default=0)
+    surge.add_argument("--initial-seed-count", type=int, default=1)
+    surge.add_argument("--initial-seed-block-count", type=int, default=4)
+    surge.add_argument("--initial-seed-instructions-per-block", type=int, default=5)
+    surge.add_argument("--max-operation-count", type=int, default=3)
+    surge.add_argument("--enable-rv64a", action="store_true", default=False)
+    surge.add_argument("--disable-rv64a", dest="enable_rv64a", action="store_false")
+    surge.add_argument("--enable-rv64im", action="store_true", default=False)
+    surge.add_argument("--disable-rv64im", dest="enable_rv64im", action="store_false")
+    surge.add_argument("--enable-insert-memory-access-sequence", dest="enable_insert_memory_access_sequence", action="store_true", default=True)
+    surge.add_argument("--disable-insert-memory-access-sequence", dest="enable_insert_memory_access_sequence", action="store_false")
+    surge.add_argument("--surgefuzz-riscv-gcc", default="")
+    surge.add_argument("--surgefuzz-objcopy", default="")
+    surge.add_argument("--link-address", default="0x80000000")
+    surge.add_argument("--test-memory-bytes", type=int, default=4096)
+    surge.add_argument("--stack-bytes", type=int, default=4096)
+    surge.add_argument("--asm-header", type=Path)
+    surge.add_argument("--asm-footer", type=Path)
     surge.add_argument(
         "--score-trace-dir",
         type=Path,

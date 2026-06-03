@@ -266,6 +266,38 @@ def generated_firrtl_metadata_matches(build_dir: Path, firrtl_cov: str) -> bool:
             return False
         if group in {"common", "all"} and count < EXPECTED_EXPANDED_COMMON_POINTS:
             return False
+    if "surgefuzz_trace" in requested:
+        surge = metadata.get("surgefuzz")
+        if not isinstance(surge, dict):
+            return False
+        expected = {
+            "module": os.environ.get("SFUZZ_SURGEFUZZ_MODULE", ""),
+            "target_instance": os.environ.get("SFUZZ_SURGEFUZZ_TARGET_INSTANCE", ""),
+            "target_signal": os.environ.get("SFUZZ_SURGEFUZZ_TARGET", ""),
+            "ancestor_selector": os.environ.get("SFUZZ_SURGEFUZZ_ANCESTOR_SELECTOR", ""),
+        }
+        for key, value in expected.items():
+            if value and str(surge.get(key, "")) != value:
+                return False
+    return True
+
+
+def firrtl_artifacts_are_not_newer_than_simv(build_dir: Path, simv: Path) -> bool:
+    try:
+        simv_mtime = simv.stat().st_mtime
+    except OSError:
+        return False
+    artifacts = [
+        build_dir / "generated-src" / "firrtl-cover.h",
+        build_dir / "generated-src" / "firrtl-cover.cpp",
+        build_dir / "rtl" / "verification" / "cover" / "sfuzz_firrtl_cover_bind.sv",
+    ]
+    for artifact in artifacts:
+        try:
+            if artifact.is_file() and artifact.stat().st_mtime > simv_mtime:
+                return False
+        except OSError:
+            return False
     return True
 
 
@@ -298,6 +330,8 @@ def simv_compiled_with_firrtl_coverage(sim_dir: Path, build_dir: Path | None = N
         return False
 
     if firrtl_cov and build_dir is not None:
+        if not firrtl_artifacts_are_not_newer_than_simv(build_dir, comp_dir / "simv"):
+            return False
         return generated_firrtl_metadata_matches(build_dir, firrtl_cov)
     return True
 
