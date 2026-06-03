@@ -21,6 +21,8 @@ from linknan.methods.surgefuzz import (  # noqa: E402
     score_series,
     write_instrumentation_target_config,
 )
+from linknan.surgefuzz_ancestors import AncestorCandidate  # noqa: E402
+from linknan.surgefuzz_profile import write_nmi_report  # noqa: E402
 
 
 class SurgeFuzzTraceTests(unittest.TestCase):
@@ -42,6 +44,29 @@ class SurgeFuzzTraceTests(unittest.TestCase):
 
     def test_score_series_keeps_surge_freq_semantics(self) -> None:
         self.assertEqual(score_series(*parse_annotation("SURGE_FREQ=1"), [0, 1, 1, 0], window=3), [0, 1, 2, 2])
+
+    def test_nmi_report_uses_paired_profile_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "profile.csv"
+            report = Path(tmp) / "nmi.csv"
+            profile.write_text(
+                "cycle,coverage_target,a,b\n"
+                "0,0,0,\n"
+                "1,1,,1\n"
+                "2,1,1,1\n"
+                "3,,1,0\n",
+                encoding="utf-8",
+            )
+            candidates = [
+                AncestorCandidate("a", 1, "wire", 1, 0, True, "test"),
+                AncestorCandidate("b", 1, "wire", 1, 0, True, "test"),
+            ]
+
+            write_nmi_report(report, candidates, profile, ["a"])
+            rows = report.read_text(encoding="utf-8").splitlines()
+
+        self.assertIn("a,1,1,0,1,1,2,", rows[1])
+        self.assertIn("b,1,1,0,1,0,2,", rows[2])
 
 
 class SurgeFuzzRotationTests(unittest.TestCase):

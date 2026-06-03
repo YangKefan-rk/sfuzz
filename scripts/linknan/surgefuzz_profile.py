@@ -13,7 +13,6 @@ from .config import VcsContext
 from .surgefuzz_ancestors import (
     AncestorCandidate,
     normalized_mutual_information,
-    paired_profile_samples,
     select_ancestor_names,
     target_distance_candidates,
 )
@@ -185,8 +184,34 @@ def read_profile_samples(path: Path) -> dict[str, list[int]]:
     return samples
 
 
+def read_profile_pairs(path: Path, rhs: str) -> dict[str, tuple[list[int], list[int]]]:
+    pairs: dict[str, tuple[list[int], list[int]]] = {}
+    with path.open(newline="", encoding="utf-8") as input_file:
+        reader = csv.DictReader(input_file)
+        for row in reader:
+            rhs_raw = row.get(rhs)
+            if rhs_raw in {None, ""}:
+                continue
+            try:
+                rhs_value = int(rhs_raw, 0)
+            except ValueError:
+                continue
+            for key, value in row.items():
+                if key in {"cycle", "workload", "chunk", rhs} or value in {None, ""}:
+                    continue
+                try:
+                    lhs_value = int(value, 0)
+                except ValueError:
+                    continue
+                lhs_values, rhs_values = pairs.setdefault(key, ([], []))
+                lhs_values.append(lhs_value)
+                rhs_values.append(rhs_value)
+    return pairs
+
+
 def write_nmi_report(path: Path, candidates: list[AncestorCandidate], profile_csv: Path, selected: list[str]) -> None:
     selected_bases = {item.split("[", 1)[0] for item in selected}
+    pairs = read_profile_pairs(profile_csv, "coverage_target")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as output_file:
         writer = csv.DictWriter(
@@ -204,7 +229,7 @@ def write_nmi_report(path: Path, candidates: list[AncestorCandidate], profile_cs
         )
         writer.writeheader()
         for candidate in candidates:
-            candidate_samples, target_samples = paired_profile_samples(profile_csv, candidate.name, "coverage_target")
+            candidate_samples, target_samples = pairs.get(candidate.name, ([], []))
             nmi = normalized_mutual_information(candidate_samples, target_samples) if candidate_samples and target_samples else 0.0
             writer.writerow(
                 {
