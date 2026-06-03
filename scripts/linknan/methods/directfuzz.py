@@ -81,7 +81,6 @@ MISSING_PER_INSTANCE_ABI = "directfuzz_per_instance_mux_toggle"
 MISSING_NATIVE_EXPORT = "directfuzz_vcs_native_coverage_export"
 MISSING_STATIC_METADATA = "directfuzz_static_analysis_instance_distance_metadata"
 MISSING_DYNAMIC_COVERAGE = "directfuzz_dynamic_per_testcase_coverage_export"
-MISSING_PER_INSTANCE_HIERARCHY_CSV = "directfuzz_per_instance_hierarchy_csv"
 PAPER_FAITHFUL_SCOPE = "linknan-processor-workload"
 
 
@@ -589,7 +588,7 @@ def mutation_budget(feedback: dict[str, Any], default_energy: bool) -> int:
     return max(1, min(64, int(round(float(value))) + 1))
 
 
-def required_native_abi(args: Any, dynamic_native_coverage: bool) -> str:
+def required_native_abi(args: Any, dynamic_native_coverage: bool, backend: str = "") -> str:
     missing: list[str] = []
     if args.coverage_backend != "native-file":
         missing.append(MISSING_PER_INSTANCE_ABI)
@@ -599,12 +598,19 @@ def required_native_abi(args: Any, dynamic_native_coverage: bool) -> str:
         missing.append(MISSING_STATIC_METADATA)
     if args.coverage_backend == "native-file" and args.native_coverage and not dynamic_native_coverage:
         missing.append(MISSING_DYNAMIC_COVERAGE)
-    missing.append(MISSING_PER_INSTANCE_HIERARCHY_CSV)
+    if args.coverage_backend == "native-file" and backend != "directfuzz_per_instance_mux_toggle_file":
+        missing.append(MISSING_PER_INSTANCE_ABI)
     return ";".join(missing)
 
 
-def paper_faithful_native_file(args: Any) -> bool:
-    return False
+def paper_faithful_native_file(args: Any, dynamic_native_coverage: bool, backend: str) -> bool:
+    return (
+        args.coverage_backend == "native-file"
+        and args.metadata_source == "static-analysis"
+        and args.native_coverage_source == "vcs-native-abi"
+        and dynamic_native_coverage
+        and backend == "directfuzz_per_instance_mux_toggle_file"
+    )
 
 
 def direct_notes(args: Any, backend: str, common_backend: str, dynamic_native_coverage: bool) -> list[str]:
@@ -689,8 +695,6 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
             infrastructure_error = "run.log missing"
 
         dynamic_native_coverage = not args.native_coverage
-        paper_faithful = paper_faithful_native_file(args)
-        missing_native_abi = required_native_abi(args, dynamic_native_coverage)
         native_coverage_source = ""
         native_coverage_path = ""
         coverage_notes: list[str] = []
@@ -728,6 +732,9 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
         else:
             feedback = state.feedback(None)
             backend = "vcs_log_no_directfuzz_coverage"
+
+        paper_faithful = paper_faithful_native_file(args, dynamic_native_coverage, backend)
+        missing_native_abi = required_native_abi(args, dynamic_native_coverage, backend)
 
         has_direct_feedback = args.coverage_backend in {"native-file", "dev-mock"}
         retained = has_direct_feedback and (initial_seed or bool(feedback.get("new_coverage")))

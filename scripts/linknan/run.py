@@ -286,6 +286,17 @@ def main() -> int:
     gen_direct_static.add_argument("--output", type=Path, required=True)
     gen_direct_static.add_argument("--target-instance", required=True)
     gen_direct_static.add_argument("--top-module", default="SimTop")
+    gen_direct_static.add_argument(
+        "--max-directfuzz-mux",
+        type=int,
+        default=0,
+        help="DirectFuzz mux metadata budget; 0 means all muxes and matches LinkNan default",
+    )
+    gen_direct_static.add_argument(
+        "--graph-output-dir",
+        type=Path,
+        help="optional directory for DirectFuzz signal-direction graph audit CSVs",
+    )
 
     gen_surge = subparsers.add_parser(
         "gen-surgefuzz-dev-profile",
@@ -303,6 +314,8 @@ def main() -> int:
             args.output.expanduser().resolve(),
             args.target_instance,
             args.top_module,
+            args.max_directfuzz_mux,
+            args.graph_output_dir.expanduser().resolve() if args.graph_output_dir else None,
         )
         return 0
     if args.command == "gen-surgefuzz-dev-profile":

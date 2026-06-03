@@ -4,11 +4,12 @@ This note describes the DirectFuzz method-level building blocks in SFuzz.
 DirectFuzz is a directed RTL fuzzer: it targets one module instance and biases
 seed selection plus mutation energy toward coverage closer to that target.
 
-Important integration boundary: the current runnable `--directed` path in
+Important integration boundary: the Rust `--directed` path in
 `src/directed.rs` is not the DirectFuzz paper algorithm. It is a SanCov/guard
-directed heuristic for the current LinkNan C++ ABI. The files below are tested
-DirectFuzz components that future runner integration can use; they are not a
-complete DirectFuzz runtime by themselves.
+directed heuristic for the current LinkNan C++ ABI. The paper-faithful
+processor-workload reproduction lives in `scripts/linknan/run.py directfuzz`,
+which drives LinkNan VCS, consumes native per-instance mux-toggle coverage, and
+uses static instance-distance metadata.
 
 The implementation lives under:
 
@@ -32,7 +33,7 @@ instance:
 instance_name,coverage_signal_name,width,distance
 ```
 
-`metadata.rs` can parse the SurgeFuzz CSV format directly.  A distance of `0`
+The DirectFuzz runner parses this CSV format directly.  A distance of `0`
 marks the target instance.  The SurgeFuzz placeholder distance `256` is treated
 as unreachable and stored as `None`; textual `undefined`, `unreachable`, and
 `none` distances are accepted for the same state.
@@ -119,22 +120,41 @@ per-input coverage for distance and target progress.
 
 ## Current Integration Status
 
-The method logic is unit-tested and ready to be used by future runners, but a
-faithful paper DirectFuzz run is still incomplete. In particular, SFuzz still
-needs:
+The LinkNan VCS runner now implements the DirectFuzz paper feedback path for
+the processor-workload adaptation:
 
-- a per-instance mux-toggle simulator ABI, not just SanCov/guard coverage
-- a static analysis/pass pipeline that emits DirectFuzz instance distance
-  metadata for the chosen target instance
-- runner logic that feeds one testcase's local mux-toggle coverage into
-  `src/methods/directfuzz/metadata.rs`
-- mapping from DirectFuzz energy values to mutation budgets
-- LibAFL scheduler/state integration for the two-queue policy and target
-  progress accounting
+- `scripts/linknan/sfuzz_firrtl_cov.py` emits module-wide legal SystemVerilog
+  binds for mux-select toggle probes and records the concrete instance at
+  runtime via `%m`.
+- The generated C++ normalizes the VCS scope to `SimTop...`, maps it to the
+  static instance table, and exports one local bitmap row per concrete instance
+  in `directfuzz_coverage.csv`.
+- `scripts/linknan/directfuzz_static.py` builds a static instance graph from
+  generated RTL and emits metadata rows containing instance name, mux width,
+  and distance to the chosen target instance.
+- `scripts/linknan/run.py directfuzz` computes local per-testcase target
+  coverage, input distance, distance-based energy, target-priority scheduling,
+  mutation, and new-coverage retention from that native CSV.
 
-Until those pieces exist, invoking `--directed` should be documented as the
-current guard-based directed heuristic, not as a reproduction of the DirectFuzz
-paper algorithm.
+For auditability, `gen-directfuzz-static-metadata` also accepts
+`--graph-output-dir`. When provided, it writes:
+
+```text
+directfuzz_instance_edges.csv       # structural_child and signal_direction edges
+directfuzz_instance_distances.csv   # distance, next hop, in/out degree
+directfuzz_instance_graph_summary.csv
+```
+
+The distance graph is still a static RTL approximation. It uses parent-child
+structural edges, named port directions, and simple assign reachability inside
+each module. It does not yet perform a full SystemVerilog dataflow analysis
+across every expression form, generate block variant, or sequential timing
+condition. This limitation should be reported with T2 results, but it is a real
+signal-direction graph, not a hand-written target distance table or runtime
+mock.
+
+The Rust `--directed` mode remains a guard-based directed heuristic and should
+not be reported as DirectFuzz paper reproduction data.
 
 ## LinkNan VCS Runner Boundary
 
@@ -157,10 +177,10 @@ The DirectFuzz feedback source is selected separately:
 ```text
 --coverage-backend vcs-log      real VCS run only; no DirectFuzz mux-toggle feedback
 --coverage-backend dev-mock     real VCS run plus deterministic mock coverage
---coverage-backend native-file  real VCS run plus an external per-instance coverage CSV
+--coverage-backend native-file  real VCS run plus case-local per-instance coverage CSV
 ```
 
-The `native-file` ABI currently consumes one CSV row per metadata instance:
+The `native-file` ABI consumes one CSV row per metadata instance:
 
 ```text
 instance_name,coverage_hex
@@ -196,6 +216,11 @@ The runner is now a campaign loop, not manifest replay.  It:
 - mutates scheduled workload bytes with an energy-derived budget
 - reruns VCS and keeps only inputs with new DirectFuzz coverage
 
+For this project, DirectFuzz inputs intentionally use normal LinkNan `.bin` or
+ELF processor workloads rather than raw RFuzz-style top-level pin streams. This
+was chosen so the reproduction compares processor-verification fuzzers on the
+same LinkNan workload ABI.
+
 `paper_faithful` is `true` only when all DirectFuzz paper feedback inputs are
 declared as real method inputs:
 
@@ -217,10 +242,7 @@ backed by hand-written or generated CSV coverage, use
 `--native-coverage-source manual` or `dev-generated`; those runs are valid
 pipeline checks, but their output must still show `paper_faithful=false`.
 
-Current LinkNan limitation: there is no confirmed native per-instance
-mux-toggle coverage ABI for DirectFuzz in the checked-out VCS flow.  The
-`vcs-log` backend records this as
-`required_native_abi=directfuzz_per_instance_mux_toggle;...` and does not
-invent distance/coverage feedback.  `dev-mock` can be used to validate that the
+`vcs-log` records a real VCS run without DirectFuzz feedback and does not
+invent distance or coverage values. `dev-mock` can still validate that the
 campaign loop mutates and retains inputs based on feedback, but the result is
 explicitly diagnostic and not paper-faithful.
