@@ -13,6 +13,7 @@ from .config import VcsContext
 from .surgefuzz_ancestors import (
     AncestorCandidate,
     normalized_mutual_information,
+    paired_profile_samples,
     select_ancestor_names,
     target_distance_candidates,
 )
@@ -185,9 +186,7 @@ def read_profile_samples(path: Path) -> dict[str, list[int]]:
 
 
 def write_nmi_report(path: Path, candidates: list[AncestorCandidate], profile_csv: Path, selected: list[str]) -> None:
-    samples = read_profile_samples(profile_csv)
     selected_bases = {item.split("[", 1)[0] for item in selected}
-    target_samples = samples.get("coverage_target", [])
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as output_file:
         writer = csv.DictWriter(
@@ -205,12 +204,8 @@ def write_nmi_report(path: Path, candidates: list[AncestorCandidate], profile_cs
         )
         writer.writeheader()
         for candidate in candidates:
-            candidate_samples = samples.get(candidate.name, [])
-            nmi = (
-                normalized_mutual_information(candidate_samples, target_samples)
-                if candidate_samples and target_samples
-                else 0.0
-            )
+            candidate_samples, target_samples = paired_profile_samples(profile_csv, candidate.name, "coverage_target")
+            nmi = normalized_mutual_information(candidate_samples, target_samples) if candidate_samples and target_samples else 0.0
             writer.writerow(
                 {
                     "name": candidate.name,

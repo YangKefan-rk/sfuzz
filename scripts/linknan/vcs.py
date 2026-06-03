@@ -405,6 +405,11 @@ def ensure_firrtl_coverage_artifacts(firrtl_cov: str, ctx: VcsContext, work_dir:
         require_file(path)
 
 
+def build_timeout_sec(args: Any) -> int:
+    explicit = int(getattr(args, "build_timeout_sec", 0) or 0)
+    return explicit if explicit > 0 else int(getattr(args, "timeout_sec", 0) or 0)
+
+
 def run_command(
     command: list[str],
     cwd: Path,
@@ -513,7 +518,7 @@ def build_simv_if_needed(args: Any, ctx: VcsContext, work_dir: Path) -> None:
     if shutil.which("vcs") is None:
         raise FileNotFoundError("missing required tool: vcs")
     if firrtl_cov:
-        ensure_firrtl_coverage_artifacts(firrtl_cov, ctx, work_dir, getattr(args, "timeout_sec", 0))
+        ensure_firrtl_coverage_artifacts(firrtl_cov, ctx, work_dir, build_timeout_sec(args))
 
     command = [
         "xmake",
@@ -540,7 +545,7 @@ def build_simv_if_needed(args: Any, ctx: VcsContext, work_dir: Path) -> None:
     if getattr(args, "rebuild_comp", False):
         command.append("--rebuild_comp")
 
-    result = run_command(command, ctx.linknan_root, work_dir / "logs" / "build_simv.log", getattr(args, "timeout_sec", 0))
+    result = run_command(command, ctx.linknan_root, work_dir / "logs" / "build_simv.log", build_timeout_sec(args))
     if result.returncode != 0:
         raise RuntimeError(f"xmake simv failed with code {result.returncode}; see {result.command_log_path}")
     require_file(simv)

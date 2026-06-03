@@ -45,6 +45,12 @@ def add_common_vcs_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--case-prefix", default=None)
     parser.add_argument("--timeout-sec", type=int, default=0, help="per-command timeout; 0 disables")
+    parser.add_argument(
+        "--build-timeout-sec",
+        type=int,
+        default=0,
+        help="VCS build timeout; 0 reuses --timeout-sec, so run-time wall timeout semantics stay compatible",
+    )
     parser.add_argument("--build", action="store_true", help="run xmake simv before executing seeds")
     parser.add_argument("--skip-build", action="store_true", help="require an existing simv")
     parser.add_argument("--rebuild-comp", action="store_true", help="force VCS recompilation when building")
