@@ -32,6 +32,15 @@ from linknan.methods.sfuzz import (  # noqa: E402
     scheduler_weight,
 )
 from linknan.seeds import SfuzSeed, infer_seed_micro_ir, read_sfuz_seed, write_sfuz_seed  # noqa: E402
+from linknan.sfuzz_scenarios import (  # noqa: E402
+    SCENARIO_FAMILIES,
+    choose_semantic_operator,
+    generate_scenario,
+    generate_scenario_corpus,
+    scenario_from_operator,
+    seed_from_scenario,
+    write_scenario_artifacts,
+)
 from linknan.vcs import CoverageResult  # noqa: E402
 from linknan.vcs import normalize_firrtl_coverage_name, requested_firrtl_groups  # noqa: E402
 
@@ -209,6 +218,66 @@ class SfuzzMutationTests(unittest.TestCase):
             plan_sections_for_focus("core0,shared", "", "memory_event:5;branch_event:3"),
             ("shared", "core0"),
         )
+
+
+class SfuzzScenarioTests(unittest.TestCase):
+    def test_generate_all_p0_scenario_families_as_sfuz(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for index, family in enumerate(SCENARIO_FAMILIES):
+                scenario = generate_scenario(family, variant=index, rng=random.Random(index))
+                output = root / f"{family}.sfuz"
+
+                write_scenario_artifacts(output, scenario)
+                seed = read_sfuz_seed(output)
+
+                self.assertGreaterEqual(len(seed.core0_prog), 8)
+                self.assertIn("sfuzz-scenario", seed.tags)
+                self.assertIn(f"scenario:{family}", seed.tags)
+                self.assertTrue(scenario.expected_micro_events)
+                self.assertTrue(scenario.target_groups)
+                self.assertTrue(output.with_suffix(".S").is_file())
+                self.assertTrue(output.with_suffix(".scenario.json").is_file())
+
+    def test_atomic_and_fence_scenarios_are_instruction_level_not_byte_flips(self) -> None:
+        amo = scenario_from_operator("insert_amo_sequence", variant=3, rng=random.Random(3))
+        fence = scenario_from_operator("insert_fence_before_after_amo", variant=4, rng=random.Random(4))
+        amo_seed = seed_from_scenario(amo)
+        fence_seed = seed_from_scenario(fence)
+
+        self.assertIn("target:sfuzz_atomic", amo_seed.tags)
+        self.assertIn("target:sfuzz_fence", fence_seed.tags)
+        self.assertTrue(any(word & 0x7F == 0x2F for word in (int.from_bytes(amo_seed.core0_prog[i:i+4], "little") for i in range(0, len(amo_seed.core0_prog), 4))))
+        self.assertTrue(any(word & 0x7F == 0x0F for word in (int.from_bytes(fence_seed.core0_prog[i:i+4], "little") for i in range(0, len(fence_seed.core0_prog), 4))))
+        self.assertIn("amo_fire", amo.expected_micro_events)
+        self.assertIn("fence_fire", fence.expected_micro_events)
+
+    def test_multicore_scenarios_are_marked_fallback_without_core1_handoff(self) -> None:
+        scenario = scenario_from_operator("insert_multicore_pingpong", variant=1, rng=random.Random(1))
+        seed = seed_from_scenario(scenario)
+
+        self.assertTrue(scenario.requires_core1_handoff)
+        self.assertFalse(scenario.core1_handoff_enabled)
+        self.assertFalse(scenario.formal_multicore_result)
+        self.assertGreater(len(seed.core1_prog), 0)
+        self.assertIn("single-core-fallback", seed.tags)
+
+    def test_semantic_operator_selection_uses_native_group_deficit(self) -> None:
+        atomic_operator = choose_semantic_operator("sfuzz_atomic", rng=random.Random(0))
+        fence_operator = choose_semantic_operator("sfuzz_fence", rng=random.Random(0))
+        fallback_operator = choose_semantic_operator("", "sfuzz_lsq:5", rng=random.Random(0))
+
+        self.assertIn(atomic_operator, {"insert_amo_sequence", "insert_lrsc_pair", "insert_fence_before_after_amo"})
+        self.assertIn(fence_operator, {"insert_fence_rw_rw", "insert_fence_before_after_amo"})
+        self.assertIn(fallback_operator, {"create_store_load_dependency", "create_load_use_dependency", "increase_replay_pressure"})
+
+    def test_generate_scenario_corpus_writes_multiple_families(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = generate_scenario_corpus(Path(tmp), count=5, rng_seed=9)
+
+            self.assertEqual(len(paths), 5)
+            self.assertEqual(len({read_sfuz_seed(path).name for path in paths}), 5)
+            self.assertTrue(all(path.with_suffix(".scenario.json").is_file() for path in paths))
 
 
 class SfuzzCoverageTests(unittest.TestCase):
