@@ -82,6 +82,30 @@ class SfuzzMutationTests(unittest.TestCase):
         self.assertGreater(ir.group_affinity["memory_event"], ir.group_affinity["ready_valid"])
         self.assertIn("exception_event", ir.group_affinity)
 
+    def test_seed_micro_ir_uses_native_scenario_target_tags(self) -> None:
+        seed = SfuzSeed(
+            core0_prog=bytes.fromhex("2f2000000f000000"),
+            core1_prog=b"",
+            shared_mem_init=[],
+            interrupt_plan_raw=[],
+            name="scenario",
+            description="generated",
+            tags=[
+                "target:sfuzz_atomic",
+                "target:sfuzz_fence",
+                "event:amo_fire",
+                "event:fence_drain",
+                "event:load_replay",
+            ],
+        )
+
+        ir = infer_seed_micro_ir(seed)
+
+        self.assertGreaterEqual(ir.group_affinity["sfuzz_atomic"], 8)
+        self.assertGreaterEqual(ir.group_affinity["sfuzz_fence"], 8)
+        self.assertGreaterEqual(ir.group_affinity["sfuzz_lsq"], 3)
+        self.assertIn("sfuzz_atomic", ir.target_trace)
+
     def test_available_mutation_operators_reflect_current_program_shape(self) -> None:
         empty = bytearray()
         self.assertEqual(

@@ -126,6 +126,31 @@ def infer_seed_micro_ir(seed: SfuzSeed) -> SeedMicroIR:
         affinity["control_event"] += 2
 
     tag_text = " ".join([seed.name, seed.description, *seed.tags]).lower()
+    for tag in seed.tags:
+        key, sep, value = tag.partition(":")
+        if not sep:
+            continue
+        if key.strip().lower() == "target":
+            group = value.strip().lower().replace("-", "_").replace(".", "_")
+            if group.startswith("sfuzz_"):
+                affinity[group] += 8
+        elif key.strip().lower() == "event":
+            event = value.strip().lower().replace("-", "_")
+            if any(word in event for word in ("amo", "lr_", "sc_")):
+                affinity["sfuzz_atomic"] += 3
+            if "fence" in event:
+                affinity["sfuzz_fence"] += 3
+            if any(word in event for word in ("replay", "violation", "forward")):
+                affinity["sfuzz_lsq"] += 3
+            if any(word in event for word in ("mshr", "miss", "bank_conflict")):
+                affinity["sfuzz_dcache"] += 2
+                affinity["sfuzz_resource"] += 2
+            if any(word in event for word in ("probe", "release")):
+                affinity["sfuzz_coherence"] += 3
+            if any(word in event for word in ("trap", "exception")):
+                affinity["sfuzz_exception"] += 2
+            if "branch" in event or "redirect" in event:
+                affinity["sfuzz_branch"] += 2
     keyword_groups = {
         "mmu": "memory_event",
         "tlb": "memory_event",
