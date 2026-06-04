@@ -33,6 +33,7 @@ from linknan.methods.sfuzz import (  # noqa: E402
 )
 from linknan.seeds import SfuzSeed, infer_seed_micro_ir, read_sfuz_seed, write_sfuz_seed  # noqa: E402
 from linknan.vcs import CoverageResult  # noqa: E402
+from linknan.vcs import normalize_firrtl_coverage_name, requested_firrtl_groups  # noqa: E402
 
 
 class FixedTicketRng:
@@ -252,6 +253,39 @@ class SfuzzCoverageTests(unittest.TestCase):
         self.assertEqual(snapshot.total["memory_event"], 10)
         self.assertEqual(snapshot.covered["memory_event"], 4)
         self.assertEqual(coverage_group_deficits(snapshot), {"memory_event": 6, "branch_event": 0})
+
+    def test_sfuzz_native_request_is_not_wrapped_as_firrtl_common(self) -> None:
+        self.assertEqual(normalize_firrtl_coverage_name("SFUZZ.native"), "SFUZZ.native")
+        self.assertEqual(requested_firrtl_groups("SFUZZ.native"), {"sfuzz_native"})
+        self.assertEqual(requested_firrtl_groups("FIRRTL.SFUZZ.native"), {"sfuzz_native"})
+        self.assertEqual(requested_firrtl_groups("sfuzz_atomic"), {"sfuzz_atomic"})
+
+    def test_parse_coverage_group_snapshot_reads_sfuzz_native_groups(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = Path(tmp) / "sfuzz_native_coverage.json"
+            summary.write_text(
+                """
+                {
+                  "backend": "sfuzz_firrtl",
+                  "native_backend": "sfuzz_semantic_native_coverage",
+                  "coverage_name": "SFUZZ.native",
+                  "group": "sfuzz_native",
+                  "groups": [
+                    {"name": "sfuzz_native", "total": 32, "covered": 7},
+                    {"name": "sfuzz_atomic", "total": 5, "covered": 1},
+                    {"name": "sfuzz_fence", "total": 4, "covered": 0},
+                    {"name": "sfuzz_lsq", "total": 8, "covered": 3}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+
+            snapshot = parse_coverage_group_snapshot(CoverageResult(coverage_source=str(summary)))
+
+        self.assertEqual(snapshot.total["sfuzz_atomic"], 5)
+        self.assertEqual(snapshot.covered["sfuzz_lsq"], 3)
+        self.assertEqual(coverage_group_deficits(snapshot)["sfuzz_fence"], 4)
 
 
 class SfuzzSchedulerTests(unittest.TestCase):

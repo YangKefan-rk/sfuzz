@@ -190,6 +190,8 @@ def normalize_firrtl_coverage_name(value: str | None) -> str:
         return ""
     if text.lower() == "firrtl" or text.lower().startswith("firrtl."):
         return text
+    if text.lower() == "sfuzz" or text.lower().startswith("sfuzz.") or text.lower().startswith("sfuzz_"):
+        return text
     if text.lower() == "rfuzz" or text.lower().startswith("rfuzz.") or text.lower().startswith("rfuzz_"):
         return text
     if text.lower() == "directfuzz" or text.lower().startswith("directfuzz.") or text.lower().startswith("directfuzz_"):
@@ -215,6 +217,8 @@ def requested_firrtl_groups(firrtl_cov: str) -> set[str]:
     normalized = normalize_firrtl_coverage_name(firrtl_cov).lower()
     if normalized in {"firrtl", "firrtl.all", "firrtl.common", "firrtl.sfuzz.firrtl.common.v0"}:
         return {"common"}
+    if normalized in {"sfuzz", "sfuzz.native", "sfuzz_native"}:
+        return {"sfuzz_native"}
     if normalized in {"rfuzz", "rfuzz.mux", "rfuzz.mux-toggle", "rfuzz.mux_toggle", "rfuzz_mux_toggle"}:
         return {"rfuzz_mux_toggle"}
     if normalized in {
@@ -228,7 +232,16 @@ def requested_firrtl_groups(firrtl_cov: str) -> set[str]:
     if normalized in {"surgefuzz", "surgefuzz.trace", "surgefuzz.trace-csv", "surgefuzz.trace_csv", "surgefuzz_trace"}:
         return {"surgefuzz_trace"}
     if normalized.startswith("firrtl."):
-        return {normalized[len("firrtl.") :]}
+        suffix = normalized[len("firrtl.") :].replace("-", "_")
+        if suffix in {"sfuzz", "sfuzz.native", "sfuzz_native"}:
+            return {"sfuzz_native"}
+        if suffix.startswith("sfuzz."):
+            suffix = suffix[len("sfuzz.") :]
+            return {"sfuzz_native"} if suffix == "native" else {f"sfuzz_{suffix}"}
+        return {suffix}
+    if normalized.startswith("sfuzz."):
+        suffix = normalized[len("sfuzz.") :].replace("-", "_")
+        return {"sfuzz_native"} if suffix == "native" else {f"sfuzz_{suffix}"}
     if normalized.startswith("rfuzz."):
         return {normalized[len("rfuzz.") :].replace("-", "_")}
     if normalized.startswith("surgefuzz."):
@@ -675,6 +688,7 @@ def parse_coverage_from_text(path: Path) -> CoverageResult | None:
 def sfuzz_firrtl_summary_candidates(case_dir: Path) -> list[Path]:
     candidates = [
         case_dir / f"{SFUZZ_FIRRTL_COV_PREFIX}.json",
+        case_dir / "sfuzz_native_coverage.json",
         case_dir / "rfuzz_toggle_bitmap.json",
         case_dir / "directfuzz_coverage.json",
         case_dir / "surgefuzz_trace.json",

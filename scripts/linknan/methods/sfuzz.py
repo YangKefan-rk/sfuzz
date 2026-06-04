@@ -108,6 +108,8 @@ BASELINE_SCHEDULER_POLICY = "baseline_fifo"
 WEIGHTED_SCHEDULER_POLICY = "weighted_innovation"
 SFUZZ_SCHEDULER_POLICY = WEIGHTED_SCHEDULER_POLICY
 SFUZZ_COVERAGE_BITMAP_SEMANTICS = "byte_per_point_nonzero_hit"
+SFUZZ_NATIVE_COVERAGE_NAME = "SFUZZ.native"
+SFUZZ_NATIVE_GROUP = "sfuzz_native"
 SFUZZ_MUTATION_OPERATORS = (
     "bitflip_byte",
     "overwrite_byte",
@@ -132,6 +134,18 @@ SFUZZ_INTERRUPT_MUTATION_OPERATORS = (
 )
 SFUZZ_MUTATION_SECTIONS = ("core0", "core1", "shared", "interrupt")
 MICRO_GROUP_SECTION_HINTS = {
+    "sfuzz_frontend": ("core0", "core1", "interrupt"),
+    "sfuzz_branch": ("core0", "core1"),
+    "sfuzz_mmu": ("shared", "core0", "core1", "interrupt"),
+    "sfuzz_rob": ("core0", "core1"),
+    "sfuzz_exception": ("interrupt", "core0", "core1"),
+    "sfuzz_lsq": ("shared", "core0", "core1"),
+    "sfuzz_dcache": ("shared", "core0", "core1"),
+    "sfuzz_atomic": ("shared", "core0", "core1"),
+    "sfuzz_fence": ("shared", "core0", "core1"),
+    "sfuzz_coherence": ("shared", "core0", "core1"),
+    "sfuzz_resource": ("shared", "core0", "core1", "interrupt"),
+    "sfuzz_native": ("shared", "core0", "core1", "interrupt"),
     "ready_valid": ("core0", "core1"),
     "mux": ("core0", "core1"),
     "toggle": ("core0", "core1", "shared"),
@@ -144,6 +158,18 @@ MICRO_GROUP_SECTION_HINTS = {
     "surgefuzz_trace": ("shared", "core0", "core1"),
 }
 MICRO_GROUP_PRIORITY = {
+    "sfuzz_atomic": 8,
+    "sfuzz_fence": 8,
+    "sfuzz_lsq": 7,
+    "sfuzz_coherence": 7,
+    "sfuzz_mmu": 6,
+    "sfuzz_dcache": 6,
+    "sfuzz_exception": 6,
+    "sfuzz_branch": 5,
+    "sfuzz_resource": 5,
+    "sfuzz_frontend": 4,
+    "sfuzz_rob": 4,
+    "sfuzz_native": 4,
     "memory_event": 4,
     "branch_event": 4,
     "exception_event": 4,
@@ -734,7 +760,8 @@ def run_one(args: Any, ctx: VcsContext, runs_dir: Path, logs_dir: Path, seed: Pa
     coverage = collect_vcs_coverage(args, case_dir, ctx.sim_dir)
     has_cycles_arg, has_max_cycles_plusarg = command_cycle_markers(result.command_log_path)
     coverage_backend = common_coverage_backend(coverage)
-    comparison_tier = "T1_common_backend_online" if coverage_backend == "sfuzz_firrtl" else "T0_smoke"
+    native_feedback = coverage.coverage_name == f"sfuzz_firrtl.{SFUZZ_NATIVE_GROUP}"
+    comparison_tier = "T2_sfuzz_native_online" if native_feedback else "T0_smoke"
     t0_smoke_pass = (
         result.returncode == 0
         and info.sfuz_expansion_seen
@@ -748,6 +775,7 @@ def run_one(args: Any, ctx: VcsContext, runs_dir: Path, logs_dir: Path, seed: Pa
         "coverage": coverage,
         "coverage_backend": coverage_backend,
         "comparison_tier": comparison_tier,
+        "native_feedback": native_feedback,
         "t0_smoke_pass": t0_smoke_pass,
         "infrastructure_error": infrastructure_error,
         "run_outcome": run_outcome(result, info, infrastructure_error),
@@ -803,9 +831,9 @@ def row_from_run(
         "retained": retained,
         "retention_reason": retention_reason,
         "comparison_tier": run["comparison_tier"],
-        "paper_faithful": run["coverage_backend"] == "sfuzz_firrtl",
-        "coverage_backend": run["coverage_backend"],
-        "coverage_bitmap_semantics": SFUZZ_COVERAGE_BITMAP_SEMANTICS if run["coverage_backend"] == "sfuzz_firrtl" else "",
+        "paper_faithful": run["native_feedback"],
+        "coverage_backend": "sfuzz_native" if run["native_feedback"] else run["coverage_backend"],
+        "coverage_bitmap_semantics": SFUZZ_COVERAGE_BITMAP_SEMANTICS if run["native_feedback"] else "",
         "common_coverage_backend": run["coverage_backend"],
         "common_coverage_name": coverage.coverage_name,
         "common_coverage_value": coverage.coverage_value,
@@ -815,7 +843,7 @@ def row_from_run(
         "common_coverage_total": coverage.total if coverage.total is not None else "",
         "new_coverage_bits": new_bits,
         "accumulated_covered_bits": accumulated_covered(accumulated),
-        "required_native_abi": "" if run["coverage_backend"] == "sfuzz_firrtl" else "sfuzz_linknan_native_bitmap",
+        "required_native_abi": "" if run["native_feedback"] else "SFUZZ.native",
         "wall_time_sec": round(run["result"].wall_time_sec, 3),
         "vcs_cycles": run["info"].cycles if run["info"].cycles is not None else "",
         "vcs_cpu_time_sec": run["info"].vcs_cpu_time_sec,
@@ -876,7 +904,7 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
         if not getattr(args, "timeout_sec", 0):
             raise SystemExit("SFuzz online mode requires --timeout-sec so unbounded VCS runs have an external guard")
         if not getattr(args, "firrtl_cov", None):
-            args.firrtl_cov = "FIRRTL.common"
+            args.firrtl_cov = SFUZZ_NATIVE_COVERAGE_NAME
 
     work_dir = args.work_dir.expanduser().resolve()
     runs_dir = work_dir / "runs"
