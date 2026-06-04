@@ -433,6 +433,18 @@ def _base_for_variant(variant: int) -> int:
     return DEFAULT_SHARED_BASE + (variant % 16) * 0x1000
 
 
+def _variant_depth(variant: int, *, base: int = 2, span: int = 6) -> int:
+    return base + (variant % max(1, span))
+
+
+def _variant_stride(variant: int) -> int:
+    return (1, 2, 4, 8)[variant % 4] * 8
+
+
+def _memory_pressure_lines(variant: int) -> int:
+    return 8 + (variant % 5) * 4
+
+
 def generate_scenario(
     family: str,
     *,
@@ -448,6 +460,8 @@ def generate_scenario(
     base = _base_for_variant(variant + rnd.randrange(16))
     alias_offset = 8 if op != "create_cross_cacheline_alias" else DEFAULT_CACHELINE_BYTES
     shared_size = 0x6000 if family == "tlb_refill_memory" else 512
+    depth = _variant_depth(variant)
+    stride = _variant_stride(variant)
     shared = (_shared_region("shared0", base, shared_size),)
 
     core0: list[EncodedInstruction] = []
@@ -461,11 +475,16 @@ def generate_scenario(
     needs_exception_handler = False
 
     if family == "memory_alias":
-        core0.extend([sd(6, 5, 0), ld(8, 5, 0), sd(8, 5, alias_offset), ld(9, 5, alias_offset)])
+        for index in range(depth):
+            offset = (index * stride) % 96
+            core0.extend([sd(6 + index % 2, 5, offset), ld(8 + index % 8, 5, offset)])
+        core0.extend([sd(8, 5, alias_offset), ld(9, 5, alias_offset)])
         target_groups = ("sfuzz_lsq", "sfuzz_dcache")
         expected = ("load_store_forward", "load_miss", "store_miss")
     elif family == "cacheline_conflict":
-        offsets = (0, alias_offset, alias_offset + 8, DEFAULT_CACHELINE_BYTES - 8)
+        offsets = tuple(((index * stride) % DEFAULT_CACHELINE_BYTES) for index in range(max(4, depth + 2)))
+        if op == "create_cross_cacheline_alias":
+            offsets = tuple(offset + (index % 2) * DEFAULT_CACHELINE_BYTES for index, offset in enumerate(offsets))
         for idx, offset in enumerate(offsets):
             core0.extend([sd(6 + idx % 2, 5, offset), ld(10 + idx, 5, offset)])
         target_groups = ("sfuzz_dcache", "sfuzz_lsq")
@@ -482,15 +501,28 @@ def generate_scenario(
     elif family == "load_store_dependency":
         core0.extend([sd(6, 5, 0), ld(8, 5, 0), add(9, 8, 6), sd(9, 5, 8), ld(10, 5, 8)])
         if op in {"increase_replay_pressure", "create_load_use_dependency"}:
-            core0.extend([ld(11, 5, 16), add(12, 11, 9), sd(12, 5, 24)])
+            for index in range(depth):
+                load_rd = 11 + (index % 6)
+                add_rd = 17 + (index % 6)
+                offset = 16 + index * 8
+                core0.extend([ld(load_rd, 5, offset), add(add_rd, load_rd, 9), sd(add_rd, 5, offset + 8)])
         target_groups = ("sfuzz_lsq", "sfuzz_resource")
         expected = ("load_store_forward", "load_replay", "store_replay")
     elif family == "store_load_reordering":
-        core0.extend([sd(6, 5, 0), ld(8, 5, 8), sd(7, 5, 8), ld(9, 5, 0), fence_rw_rw(), ld(10, 5, 8)])
+        for index in range(depth):
+            offset = index * 8
+            core0.extend([sd(6 + index % 2, 5, offset), ld(8 + index % 8, 5, offset ^ 8)])
+        core0.extend([sd(7, 5, 8), ld(9, 5, 0), fence_rw_rw(), ld(10, 5, 8)])
         target_groups = ("sfuzz_lsq", "sfuzz_fence")
         expected = ("load_store_violation", "fence_fire", "fence_drain")
     elif family == "amo_contention":
-        core0.extend([sd(6, 5, 0), amoadd_d(8, 5, 7), amoswap_d(9, 5, 6), ld(10, 5, 0)])
+        core0.append(sd(6, 5, 0))
+        for index in range(depth):
+            if index % 2:
+                core0.append(amoswap_d(9 + index % 4, 5, 6))
+            else:
+                core0.append(amoadd_d(8 + index % 4, 5, 7))
+        core0.append(ld(10, 5, 0))
         requires_core1 = True
         sync = ("same_word_amo_contention",)
         core1.extend(li_pmem_addr(5, base))
@@ -500,7 +532,8 @@ def generate_scenario(
         target_groups = ("sfuzz_atomic", "sfuzz_fence", "sfuzz_lsq")
         expected = ("amo_fire", "amo_conflict", "fence_fire")
     elif family == "lrsc_success_fail":
-        core0.extend([lr_d(8, 5), addi(8, 8, 1), sc_d(9, 5, 8), ld(10, 5, 0)])
+        for index in range(depth):
+            core0.extend([lr_d(8, 5), addi(8, 8, 1 + (index & 1)), sc_d(9, 5, 8), ld(10, 5, 0)])
         if op == "force_sc_fail_window":
             requires_core1 = True
             sync = ("same_word_sc_fail_window",)
@@ -511,9 +544,13 @@ def generate_scenario(
         target_groups = ("sfuzz_atomic", "sfuzz_lsq")
         expected = ("lr_seen", "sc_success", "sc_fail" if requires_core1 else "local_sc_result")
     elif family == "fence_ordering":
-        core0.extend([sd(6, 5, 0), fence_rw_rw(), ld(8, 5, 0), sd(7, 5, 8), fence_rw_rw(), ld(9, 5, 8)])
+        for index in range(depth):
+            offset = (index % 4) * 8
+            core0.extend([sd(6 + index % 2, 5, offset), fence_rw_rw(), ld(8 + index % 8, 5, offset)])
+        core0.extend([sd(7, 5, 8), fence_rw_rw(), ld(9, 5, 8)])
         if op == "insert_fence_before_after_amo":
-            core0.extend([fence_rw_rw(), amoadd_d(10, 5, 6), fence_rw_rw()])
+            for index in range(max(1, depth // 2)):
+                core0.extend([fence_rw_rw(), amoadd_d(10 + index % 4, 5, 6), fence_rw_rw()])
         requires_core1 = op == "insert_fence_before_after_amo"
         if requires_core1:
             sync = ("competing_fence_amo_window",)
@@ -524,7 +561,9 @@ def generate_scenario(
         target_groups = ("sfuzz_fence", "sfuzz_lsq", "sfuzz_atomic")
         expected = ("fence_fire", "fence_wait", "fence_drain", "amo_fire" if op == "insert_fence_before_after_amo" else "load_store_forward")
     elif family == "branch_flush_memory":
-        core0.extend([sd(6, 5, 0), bne(6, 7, 8), ld(8, 5, 0), sd(7, 5, 8), ld(9, 5, 8)])
+        for index in range(depth):
+            core0.extend([sd(6 + index % 2, 5, (index % 4) * 8), bne(6, 7, 8), ld(8 + index % 8, 5, 0)])
+        core0.extend([sd(7, 5, 8), ld(9, 5, 8)])
         target_groups = ("sfuzz_branch", "sfuzz_lsq", "sfuzz_frontend")
         expected = ("branch_redirect", "redirect_from_branch", "ibuffer_flush", "load_replay")
     elif family == "exception_during_memory":
@@ -537,19 +576,19 @@ def generate_scenario(
         expected = ("trap_enter", "redirect_from_exception", "rob_commit_valid")
     elif family == "tlb_refill_memory":
         core0.extend([sfence_vma(), ld(8, 5, 0)])
-        for page in range(1, 5):
+        for page in range(1, 5 + (variant % 4)):
             core0.extend(li_pmem_addr(5, base + page * 0x1000))
             core0.append(ld(8 + page, 5, 0))
         target_groups = ("sfuzz_mmu", "sfuzz_lsq", "sfuzz_dcache")
         expected = ("dtlb_miss", "ptw_req_fire", "ptw_resp_fire")
     elif family == "mshr_pressure":
-        for line in range(8):
+        for line in range(_memory_pressure_lines(variant)):
             core0.extend(li_pmem_addr(5, base + line * DEFAULT_CACHELINE_BYTES))
             core0.append(ld(8 + (line % 8), 5, 0))
         target_groups = ("sfuzz_dcache", "sfuzz_resource", "sfuzz_lsq")
         expected = ("mshr_alloc", "mshr_retry", "mshr_full", "load_miss")
     elif family == "queue_backpressure":
-        for offset in range(0, 96, 8):
+        for offset in range(0, 64 + depth * 16, 8):
             core0.extend([sd(6, 5, offset), ld(8, 5, offset)])
         core0.extend([fence_rw_rw(), addi(6, 6, 1, "bounded_loop"), bne(6, 7, -4)])
         target_groups = ("sfuzz_resource", "sfuzz_rob", "sfuzz_lsq")
@@ -588,6 +627,7 @@ def choose_semantic_operator(
     *,
     rng: random.Random | None = None,
     core1_handoff_enabled: bool = False,
+    stalled_operators: Iterable[str] = (),
 ) -> str:
     rnd = rng or random.Random()
     candidates = list(GROUP_OPERATOR_HINTS.get(focus_group, ()))
@@ -616,6 +656,11 @@ def choose_semantic_operator(
                 "insert_multicore_pingpong",
             }
         ] or ["insert_load_store_pair"]
+    stalled = set(stalled_operators)
+    if stalled and len(set(candidates)) > 1:
+        filtered = [op for op in candidates if op not in stalled]
+        if filtered:
+            candidates = filtered
     return candidates[rnd.randrange(len(candidates))]
 
 

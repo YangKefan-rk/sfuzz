@@ -19,6 +19,7 @@ from ..seeds import (
 )
 from ..sfuzz_scenarios import (
     choose_semantic_operator,
+    family_default_operator,
     scenario_from_operator,
     write_scenario_artifacts,
 )
@@ -273,6 +274,7 @@ class SchedulerSelection:
     focus_group: str = ""
     focus_deficit: int = 0
     bucket: str = ""
+    operator_hint: str = ""
 
 
 @dataclass(frozen=True)
@@ -290,6 +292,9 @@ class SchedulerRuntime:
     family_credit: dict[str, int] = field(default_factory=dict)
     family_attempts: dict[str, int] = field(default_factory=dict)
     family_stall: dict[str, int] = field(default_factory=dict)
+    group_credit: dict[str, int] = field(default_factory=dict)
+    group_attempts: dict[str, int] = field(default_factory=dict)
+    group_stall: dict[str, int] = field(default_factory=dict)
     hard_target_first_hit: dict[str, int] = field(default_factory=dict)
 
 
@@ -523,6 +528,20 @@ def update_runtime_feedback(
     if first_hits:
         entry.hard_target_first_hits = ";".join(first_hits)
 
+    for group, points in group_new_bits.items():
+        if points > 0:
+            runtime.group_credit[group] = runtime.group_credit.get(group, 0) + points
+            runtime.group_stall[group] = 0
+
+    focus_group = str(entry.coverage_group_focus or "")
+    if focus_group:
+        runtime.group_attempts[focus_group] = runtime.group_attempts.get(focus_group, 0) + 1
+        if group_new_bits.get(focus_group, 0) > 0:
+            runtime.group_credit[focus_group] = runtime.group_credit.get(focus_group, 0) + group_new_bits[focus_group]
+            runtime.group_stall[focus_group] = 0
+        else:
+            runtime.group_stall[focus_group] = runtime.group_stall.get(focus_group, 0) + 1
+
 
 def entry_focus_from_deficits(entry: CorpusEntry, deficits: dict[str, int]) -> tuple[str, int]:
     affinity = entry_group_affinity(entry)
@@ -651,7 +670,10 @@ def hard_target_focus_group(
             continue
         priority = MICRO_GROUP_PRIORITY.get(group, 1)
         first_hit_bonus = 3 if group not in runtime.hard_target_first_hit else 1
-        score = priority * deficit * first_hit_bonus
+        stall_penalty = 1 + min(8, runtime.group_stall.get(group, 0))
+        attempts = runtime.group_attempts.get(group, 0)
+        exploration_bonus = 2 if attempts == 0 else 1
+        score = (priority * deficit * first_hit_bonus * exploration_bonus) // stall_penalty
         if score > best_score:
             best_group = group
             best_score = score
@@ -678,6 +700,8 @@ def semantic_bandit_weight(
         weight *= 2
         if focus_group not in runtime.hard_target_first_hit:
             weight *= 2
+    if focus_group:
+        weight = max(1, weight // (1 + min(8, runtime.group_stall.get(focus_group, 0))))
 
     operator = semantic_operator_name(entry)
     if operator:
@@ -697,7 +721,7 @@ def semantic_bandit_weight(
         weight += min(64, credit.bit_length() * 3)
         if attempts <= 1:
             weight += 8
-        weight = max(1, weight // (1 + min(4, stall)))
+        weight = max(1, weight // (1 + min(8, stall)))
 
     if entry.no_new_coverage_streak:
         weight = max(1, weight // (1 + min(4, entry.no_new_coverage_streak)))
@@ -719,6 +743,7 @@ def select_semantic_bandit_parent(
     roll = rng.randrange(100)
     indices = list(range(len(corpus)))
     forced_focus = ""
+    operator_hint = ""
     bucket = "credit"
 
     if active_deficits and roll < 25:
@@ -746,6 +771,10 @@ def select_semantic_bandit_parent(
             family = families[rng.randrange(len(families))]
             indices = family_to_indices[family]
             bucket = f"family-explore:{family}"
+            try:
+                operator_hint = family_default_operator(family)
+            except ValueError:
+                operator_hint = ""
 
     weights = [semantic_bandit_weight(corpus[idx], active_deficits, runtime, forced_focus) for idx in indices]
     selected_idx, selected_weight, total = choose_weighted_index(indices, weights, rng)
@@ -762,6 +791,7 @@ def select_semantic_bandit_parent(
         focus_group,
         focus_deficit,
         bucket,
+        operator_hint,
     )
 
 
@@ -1092,17 +1122,23 @@ def mutate_sfuz(
     semantic: bool = True,
     core1_handoff_enabled: bool = False,
     mutation_index: int = 0,
+    stalled_operators: tuple[str, ...] = (),
+    operator_hint: str = "",
 ) -> MutationSummary:
     if not semantic:
         return mutate_sfuz_legacy(parent, output, rng, budget, sections)
 
     mutation_budget = normalized_mutation_budget(budget)
-    operator = choose_semantic_operator(
-        focus_group,
-        seed_ir_targets,
-        rng=rng,
-        core1_handoff_enabled=core1_handoff_enabled,
-    )
+    if operator_hint and operator_hint not in set(stalled_operators):
+        operator = operator_hint
+    else:
+        operator = choose_semantic_operator(
+            focus_group,
+            seed_ir_targets,
+            rng=rng,
+            core1_handoff_enabled=core1_handoff_enabled,
+            stalled_operators=stalled_operators,
+        )
     scenario = scenario_from_operator(
         operator,
         variant=(mutation_index * 17) + rng.randrange(997),
@@ -1376,6 +1412,12 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
                 semantic=not getattr(args, "disable_semantic_mutation", False),
                 core1_handoff_enabled=getattr(args, "enable_core1_handoff", False),
                 mutation_index=mutation_counter,
+                stalled_operators=tuple(
+                    operator
+                    for operator, stall in scheduler_runtime.operator_stall.items()
+                    if stall >= 3
+                ),
+                operator_hint=scheduled.operator_hint,
             )
             seed_name = read_seed_metadata_name(mutated_path)
             ir_targets, event_plan = infer_entry_ir_fields(mutated_path)
@@ -1487,6 +1529,8 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
             "semantic_operator_stall": group_trace(scheduler_runtime.operator_stall),
             "scenario_family_credit": group_trace(scheduler_runtime.family_credit),
             "scenario_family_stall": group_trace(scheduler_runtime.family_stall),
+            "coverage_group_credit": group_trace(scheduler_runtime.group_credit),
+            "coverage_group_stall": group_trace(scheduler_runtime.group_stall),
             "baseline_policy": BASELINE_SCHEDULER_POLICY,
             "innovation_policy": WEIGHTED_SCHEDULER_POLICY,
             "semantic_bandit_policy": SEMANTIC_BANDIT_SCHEDULER_POLICY,

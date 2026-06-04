@@ -271,6 +271,35 @@ class SfuzzMutationTests(unittest.TestCase):
         self.assertTrue(sidecar_seen)
         self.assertTrue(any(tag.startswith("target:sfuzz_") for tag in mutated.tags))
 
+    def test_mutate_sfuz_can_avoid_stalled_semantic_operator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent = root / "parent.sfuz"
+            output = root / "mutated.sfuz"
+            write_sfuz_seed(
+                parent,
+                SfuzSeed(
+                    core0_prog=DEFAULT_CORE0_PROG,
+                    core1_prog=b"",
+                    shared_mem_init=[],
+                    interrupt_plan_raw=[],
+                    name="seed-semantic",
+                    description="fixture",
+                    tags=["fixture"],
+                ),
+            )
+
+            summary = mutate_sfuz(
+                parent,
+                output,
+                random.Random(0),
+                1,
+                focus_group="sfuzz_fence",
+                stalled_operators=("insert_fence_before_after_amo",),
+            )
+
+        self.assertEqual(summary.operators, ("semantic.insert_fence_rw_rw",))
+
     def test_infer_seed_semantic_fields_reads_scenario_tags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "scenario.sfuz"
@@ -386,6 +415,21 @@ class SfuzzScenarioTests(unittest.TestCase):
         self.assertIn(atomic_operator, {"insert_amo_sequence", "insert_lrsc_pair", "insert_fence_before_after_amo"})
         self.assertIn(fence_operator, {"insert_fence_rw_rw", "insert_fence_before_after_amo"})
         self.assertIn(fallback_operator, {"create_store_load_dependency", "create_load_use_dependency", "increase_replay_pressure"})
+
+    def test_semantic_operator_selection_avoids_stalled_candidates_when_possible(self) -> None:
+        operator = choose_semantic_operator(
+            "sfuzz_fence",
+            rng=random.Random(0),
+            stalled_operators=("insert_fence_before_after_amo",),
+        )
+
+        self.assertEqual(operator, "insert_fence_rw_rw")
+
+    def test_semantic_variants_change_instruction_pressure_depth(self) -> None:
+        shallow = scenario_from_operator("increase_mshr_pressure", variant=0, rng=random.Random(0))
+        deep = scenario_from_operator("increase_mshr_pressure", variant=4, rng=random.Random(0))
+
+        self.assertGreater(len(deep.core_payload(0)), len(shallow.core_payload(0)))
 
     def test_generate_scenario_corpus_writes_multiple_families(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
