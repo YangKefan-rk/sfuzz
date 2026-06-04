@@ -23,7 +23,13 @@ from linknan.methods.surgefuzz import (  # noqa: E402
 )
 from linknan.surgefuzz_ancestors import AncestorCandidate  # noqa: E402
 from linknan.surgefuzz_ancestors import target_distance_candidates  # noqa: E402
-from linknan.surgefuzz_profile import RtlModule, RtlSignal, profile_candidate_quality, write_nmi_report  # noqa: E402
+from linknan.surgefuzz_profile import (  # noqa: E402
+    RtlModule,
+    RtlSignal,
+    profile_candidate_quality,
+    profile_candidate_subset,
+    write_nmi_report,
+)
 
 
 class SurgeFuzzTraceTests(unittest.TestCase):
@@ -93,6 +99,48 @@ class SurgeFuzzTraceTests(unittest.TestCase):
         self.assertEqual(quality["constant_candidate_count"], 1)
         self.assertEqual(quality["missing_profile_candidate_count"], 1)
         self.assertEqual(quality["target_distinct_values"], 2)
+
+    def test_profile_candidate_subset_prefers_narrow_control_signals(self) -> None:
+        candidates = [
+            AncestorCandidate("io_monitorInfo_DCacheInfoVec_loadPipe_0_s2_miss_req_bits_addr", 48, "wire", 1, 0, False, "distance:t:1"),
+            AncestorCandidate("loadPipe_0_s2_miss_req_fire", 1, "wire", 1, 0, True, "distance:t:1"),
+            AncestorCandidate("loadPipe_0_s2_replay", 1, "reg", 2, 1, True, "distance:t:2"),
+            AncestorCandidate("dataBus", 64, "wire", 3, 0, False, "target-scope:t:score=1"),
+            AncestorCandidate("stallCounter", 8, "reg", 2, 1, True, "target-scope:t:score=2"),
+        ]
+
+        sampled, meta = profile_candidate_subset(
+            candidates,
+            max_bits=64,
+            max_candidates=64,
+            max_candidate_width=8,
+        )
+
+        sampled_names = [candidate.name for candidate in sampled]
+        self.assertIn("loadPipe_0_s2_miss_req_fire", sampled_names)
+        self.assertIn("loadPipe_0_s2_replay", sampled_names)
+        self.assertIn("stallCounter", sampled_names)
+        self.assertNotIn("io_monitorInfo_DCacheInfoVec_loadPipe_0_s2_miss_req_bits_addr", sampled_names)
+        self.assertNotIn("dataBus", sampled_names)
+        self.assertLessEqual(sum(candidate.width for candidate in sampled), 64)
+        self.assertEqual(meta["skipped_by_reason"]["exceeds_profile_candidate_width"], 2)
+
+    def test_profile_candidate_subset_can_include_wide_candidates_explicitly(self) -> None:
+        candidates = [
+            AncestorCandidate("addr", 48, "wire", 1, 0, False, "distance:t:1"),
+            AncestorCandidate("fire", 1, "wire", 1, 0, True, "distance:t:1"),
+        ]
+
+        sampled, meta = profile_candidate_subset(
+            candidates,
+            max_bits=64,
+            max_candidates=64,
+            max_candidate_width=8,
+            include_wide_candidates=True,
+        )
+
+        self.assertEqual([candidate.name for candidate in sampled], ["fire", "addr"])
+        self.assertEqual(meta["sampled_width"], 49)
 
     def test_target_scope_extends_weak_distance_candidates(self) -> None:
         module = RtlModule(

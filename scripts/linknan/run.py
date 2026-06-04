@@ -438,6 +438,17 @@ def main() -> int:
         help="maximum packed ancestor width per profile VCS build/run chunk",
     )
     surge_profile.add_argument(
+        "--profile-max-candidate-width",
+        type=int,
+        default=8,
+        help="maximum width of a single signal sampled during profile collection; 0 disables this filter",
+    )
+    surge_profile.add_argument(
+        "--profile-include-wide-candidates",
+        action="store_true",
+        help="allow addr/pc/data-style wide bus signals in profile collection",
+    )
+    surge_profile.add_argument(
         "--profile-nmi-threshold",
         type=float,
         default=0.85,

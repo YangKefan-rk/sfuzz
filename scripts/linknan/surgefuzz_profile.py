@@ -33,6 +33,18 @@ DECL_RE = re.compile(
     r"([A-Za-z_][A-Za-z0-9_$]*)\b"
 )
 MODULE_RE = re.compile(r"\bmodule\s+([A-Za-z_][A-Za-z0-9_$]*)\b")
+PROFILE_WIDE_BUS_TOKENS = (
+    "addr",
+    "address",
+    "vaddr",
+    "paddr",
+    "pc",
+    "data",
+    "bits",
+    "mask",
+    "wdata",
+    "rdata",
+)
 
 
 @dataclass(frozen=True)
@@ -356,6 +368,82 @@ def chunk_candidates(candidates: list[AncestorCandidate], *, max_bits: int, max_
     return chunks
 
 
+def profile_candidate_subset(
+    candidates: list[AncestorCandidate],
+    *,
+    max_bits: int,
+    max_candidates: int,
+    max_candidate_width: int,
+    include_wide_candidates: bool = False,
+) -> tuple[list[AncestorCandidate], dict[str, object]]:
+    bit_budget = max(1, max_bits)
+    candidate_budget = max_candidates if max_candidates > 0 else len(candidates)
+    width_limit = max_candidate_width if max_candidate_width > 0 else bit_budget
+    skipped: list[dict[str, object]] = []
+    accepted: list[AncestorCandidate] = []
+    used_bits = 0
+    seen: set[str] = set()
+
+    def skip(candidate: AncestorCandidate, reason: str) -> None:
+        if len(skipped) < 128:
+            skipped.append({"name": candidate.name, "width": candidate.width, "reason": reason})
+
+    def score(candidate: AncestorCandidate) -> tuple[int, int, int, int, int, str]:
+        lower = candidate.name.lower()
+        wide_bus_penalty = int(any(token in lower for token in PROFILE_WIDE_BUS_TOKENS))
+        source_penalty = 0 if candidate.source.startswith("distance:") else 1
+        return (
+            wide_bus_penalty,
+            0 if candidate.is_control else 1,
+            candidate.register_depth,
+            candidate.depth,
+            source_penalty,
+            candidate.name,
+        )
+
+    for candidate in sorted(candidates, key=score):
+        if len(accepted) >= candidate_budget or used_bits >= bit_budget:
+            break
+        if candidate.name in seen:
+            continue
+        seen.add(candidate.name)
+        candidate_width = max(1, candidate.width)
+        lower = candidate.name.lower()
+        looks_like_wide_bus = any(token in lower for token in PROFILE_WIDE_BUS_TOKENS)
+        if candidate_width > bit_budget:
+            skip(candidate, "exceeds_profile_bit_budget")
+            continue
+        if not include_wide_candidates and max_candidate_width > 0 and candidate_width > width_limit:
+            skip(candidate, "exceeds_profile_candidate_width")
+            continue
+        if not include_wide_candidates and looks_like_wide_bus and candidate_width > 1:
+            skip(candidate, "wide_bus_name")
+            continue
+        if used_bits + candidate_width > bit_budget:
+            skip(candidate, "exceeds_remaining_profile_bits")
+            continue
+        accepted.append(candidate)
+        used_bits += candidate_width
+
+    skipped_by_reason: dict[str, int] = {}
+    for item in skipped:
+        reason = str(item["reason"])
+        skipped_by_reason[reason] = skipped_by_reason.get(reason, 0) + 1
+    meta = {
+        "input_candidate_count": len(candidates),
+        "sampled_candidate_count": len(accepted),
+        "sampled_width": used_bits,
+        "max_bits": bit_budget,
+        "max_candidates": candidate_budget,
+        "max_candidate_width": max_candidate_width,
+        "include_wide_candidates": include_wide_candidates,
+        "skipped_count": len(candidates) - len(accepted),
+        "skipped_by_reason": skipped_by_reason,
+        "skipped": skipped,
+    }
+    return accepted, meta
+
+
 def trace_to_named_profile_rows(
     trace_csv: Path,
     workload: ProfileWorkload,
@@ -461,10 +549,25 @@ def run_profile_for_target(args: Any, ctx: VcsContext, target: SurgeTarget) -> T
     candidates_csv = target_dir / "candidates.csv"
     write_candidate_csv(candidates_csv, candidates)
 
-    chunks = chunk_candidates(
+    profile_candidates, profile_subset_meta = profile_candidate_subset(
         candidates,
         max_bits=int(getattr(args, "profile_chunk_bits", 64) or 64),
         max_candidates=int(getattr(args, "profile_max_candidates", 256) or 256),
+        max_candidate_width=int(getattr(args, "profile_max_candidate_width", 8) or 0),
+        include_wide_candidates=bool(getattr(args, "profile_include_wide_candidates", False)),
+    )
+    if not profile_candidates:
+        raise ValueError(
+            f"target {target.id!r} has no profile candidates after filtering; "
+            "raise --profile-max-candidate-width or pass --profile-include-wide-candidates"
+        )
+    profile_candidates_csv = target_dir / "profile_candidates.csv"
+    write_candidate_csv(profile_candidates_csv, profile_candidates)
+
+    chunks = chunk_candidates(
+        profile_candidates,
+        max_bits=int(getattr(args, "profile_chunk_bits", 64) or 64),
+        max_candidates=0,
     )
     workloads = collect_profile_workloads(args)
     profile_rows: list[dict[str, str]] = []
@@ -519,7 +622,7 @@ def run_profile_for_target(args: Any, ctx: VcsContext, target: SurgeTarget) -> T
 
     profile_csv = target_dir / "dependents.csv"
     merge_profile_rows(profile_csv, profile_rows)
-    quality = profile_candidate_quality(candidates, profile_csv)
+    quality = profile_candidate_quality(profile_candidates, profile_csv)
     distance_selected, distance_selection_meta = select_ancestor_names(
         candidates,
         max_bits=int(getattr(args, "max_surgefuzz_ancestor_width", 64) or 64),
@@ -541,6 +644,7 @@ def run_profile_for_target(args: Any, ctx: VcsContext, target: SurgeTarget) -> T
     selection_meta = mi_selection_meta if use_mi else distance_selection_meta
     for meta_item in (selection_meta, distance_selection_meta, mi_selection_meta):
         meta_item["profile_quality"] = quality
+        meta_item["profile_candidate_subset"] = profile_subset_meta
         meta_item["profile_min_scope_candidates"] = min_scope_candidates
     selected_csv = target_dir / "selected_ancestors.csv"
     nmi_report_csv = target_dir / "nmi_report.csv"
@@ -554,8 +658,10 @@ def run_profile_for_target(args: Any, ctx: VcsContext, target: SurgeTarget) -> T
         "profile_min_scope_candidates": min_scope_candidates,
         "profile_rows": len(profile_rows),
         "profile_quality": quality,
+        "profile_candidate_subset": profile_subset_meta,
         "profile_csv": str(profile_csv),
         "candidates_csv": str(candidates_csv),
+        "profile_candidates_csv": str(profile_candidates_csv),
         "selected_csv": str(selected_csv),
         "nmi_report_csv": str(nmi_report_csv),
         "selection": selection_meta,
