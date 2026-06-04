@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -56,12 +56,20 @@ SFUZZ_FIELDS = [
     "seed_event_plan",
     "coverage_group_focus",
     "coverage_group_deficit",
+    "coverage_group_new_bits",
+    "coverage_group_accumulated_bits",
+    "hard_target_first_hits",
     "scheduler_policy",
     "scheduler_family",
+    "scheduler_bucket",
     "innovation_enabled",
     "scheduler_corpus_index",
     "scheduler_weight",
     "scheduler_total_weight",
+    "semantic_operator_credit",
+    "semantic_operator_stall",
+    "scenario_family_credit",
+    "scenario_family_stall",
     "retained",
     "retention_reason",
     "comparison_tier",
@@ -111,10 +119,19 @@ SFUZZ_FIELDS = [
 DEFAULT_CORE0_PROG = bytes.fromhex("73001000")
 BASELINE_SCHEDULER_POLICY = "baseline_fifo"
 WEIGHTED_SCHEDULER_POLICY = "weighted_innovation"
+SEMANTIC_BANDIT_SCHEDULER_POLICY = "semantic_bandit"
 SFUZZ_SCHEDULER_POLICY = WEIGHTED_SCHEDULER_POLICY
 SFUZZ_COVERAGE_BITMAP_SEMANTICS = "byte_per_point_nonzero_hit"
 SFUZZ_NATIVE_COVERAGE_NAME = "SFUZZ.native"
 SFUZZ_NATIVE_GROUP = "sfuzz_native"
+SFUZZ_HARD_TARGET_GROUPS = (
+    "sfuzz_atomic",
+    "sfuzz_fence",
+    "sfuzz_lsq",
+    "sfuzz_coherence",
+    "sfuzz_mmu",
+    "sfuzz_resource",
+)
 SFUZZ_MUTATION_OPERATORS = (
     "bitflip_byte",
     "overwrite_byte",
@@ -204,12 +221,23 @@ class CorpusEntry:
     seed_event_plan: str = ""
     coverage_group_focus: str = ""
     coverage_group_deficit: int | str = ""
+    coverage_group_new_bits: str = ""
+    coverage_group_accumulated_bits: str = ""
+    hard_target_first_hits: str = ""
     scheduler_policy: str = ""
     scheduler_family: str = ""
+    scheduler_bucket: str = ""
     innovation_enabled: bool | str = ""
     scheduler_corpus_index: int | str = ""
     scheduler_weight: int | str = ""
     scheduler_total_weight: int | str = ""
+    semantic_operator_credit: int | str = ""
+    semantic_operator_stall: int | str = ""
+    scenario_family_credit: int | str = ""
+    scenario_family_stall: int | str = ""
+    total_new_coverage_bits: int = 0
+    no_new_coverage_streak: int = 0
+    execution_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -244,12 +272,25 @@ class SchedulerSelection:
     policy: str = SFUZZ_SCHEDULER_POLICY
     focus_group: str = ""
     focus_deficit: int = 0
+    bucket: str = ""
 
 
 @dataclass(frozen=True)
 class CoverageGroupSnapshot:
     covered: dict[str, int]
     total: dict[str, int]
+    order: tuple[str, ...] = ()
+
+
+@dataclass
+class SchedulerRuntime:
+    operator_credit: dict[str, int] = field(default_factory=dict)
+    operator_attempts: dict[str, int] = field(default_factory=dict)
+    operator_stall: dict[str, int] = field(default_factory=dict)
+    family_credit: dict[str, int] = field(default_factory=dict)
+    family_attempts: dict[str, int] = field(default_factory=dict)
+    family_stall: dict[str, int] = field(default_factory=dict)
+    hard_target_first_hit: dict[str, int] = field(default_factory=dict)
 
 
 def run_outcome(result: Any, info: Any, infrastructure_error: str) -> str:
@@ -301,6 +342,10 @@ def group_trace(values: dict[str, int]) -> str:
     return ";".join(f"{key}:{values[key]}" for key in sorted(values) if values[key])
 
 
+def group_accumulated_trace(values: dict[str, bytearray]) -> str:
+    return group_trace({key: sum(1 for item in bitmap if item) for key, bitmap in values.items()})
+
+
 def entry_group_affinity(entry: CorpusEntry) -> dict[str, int]:
     affinity: dict[str, int] = {}
     for raw_item in str(entry.seed_ir_targets or "").split(";"):
@@ -328,6 +373,7 @@ def infer_entry_ir_fields(seed: Path) -> tuple[str, str]:
 def parse_coverage_group_snapshot(coverage: CoverageResult) -> CoverageGroupSnapshot:
     covered: dict[str, int] = {}
     total: dict[str, int] = {}
+    order: list[str] = []
     sources = [item for item in str(coverage.coverage_source or "").split(";") if item]
     for source in sources:
         path = Path(source)
@@ -353,7 +399,9 @@ def parse_coverage_group_snapshot(coverage: CoverageResult) -> CoverageGroupSnap
                 continue
             total[name] = max(total.get(name, 0), group_total)
             covered[name] = max(covered.get(name, 0), group_covered)
-    return CoverageGroupSnapshot(covered=covered, total=total)
+            if name not in {"all", "common", SFUZZ_NATIVE_GROUP} and name not in order:
+                order.append(name)
+    return CoverageGroupSnapshot(covered=covered, total=total, order=tuple(order))
 
 
 def coverage_group_deficits(snapshot: CoverageGroupSnapshot) -> dict[str, int]:
@@ -362,6 +410,95 @@ def coverage_group_deficits(snapshot: CoverageGroupSnapshot) -> dict[str, int]:
         if total > 0:
             deficits[group] = max(0, total - snapshot.covered.get(group, 0))
     return deficits
+
+
+def coverage_group_delta(
+    bitmap: bytes | None,
+    accumulated_by_group: dict[str, bytearray],
+    snapshot: CoverageGroupSnapshot,
+) -> tuple[dict[str, int], dict[str, int]]:
+    if bitmap is None or not snapshot.order:
+        return {}, {group: sum(1 for value in values if value) for group, values in accumulated_by_group.items()}
+    ordered_groups = [group for group in snapshot.order if snapshot.total.get(group, 0) > 0]
+    expected_bytes = sum(snapshot.total[group] for group in ordered_groups)
+    if expected_bytes != len(bitmap):
+        return {}, {group: sum(1 for value in values if value) for group, values in accumulated_by_group.items()}
+
+    offset = 0
+    new_by_group: dict[str, int] = {}
+    accumulated_counts: dict[str, int] = {}
+    for group in ordered_groups:
+        width = snapshot.total[group]
+        chunk = bitmap[offset : offset + width]
+        offset += width
+        group_accumulated = accumulated_by_group.setdefault(group, bytearray(width))
+        if len(group_accumulated) != width:
+            group_accumulated[:] = b"\x00" * width
+        new_points = 0
+        for idx, value in enumerate(chunk):
+            covered = 1 if value else 0
+            if covered and not group_accumulated[idx]:
+                new_points += 1
+                group_accumulated[idx] = 1
+        new_by_group[group] = new_points
+        accumulated_counts[group] = sum(1 for value in group_accumulated if value)
+    return new_by_group, accumulated_counts
+
+
+def accumulated_group_deficits(totals: dict[str, int], accumulated_counts: dict[str, int]) -> dict[str, int]:
+    deficits: dict[str, int] = {}
+    for group, total in totals.items():
+        if group in {"all", "common", SFUZZ_NATIVE_GROUP}:
+            continue
+        if total > 0:
+            deficits[group] = max(0, total - accumulated_counts.get(group, 0))
+    return deficits
+
+
+def update_runtime_feedback(
+    runtime: SchedulerRuntime,
+    entry: CorpusEntry,
+    *,
+    campaign_exec: int,
+    new_bits: int,
+    group_new_bits: dict[str, int],
+) -> None:
+    entry.execution_count += 1
+    entry.total_new_coverage_bits += max(0, new_bits)
+    if new_bits > 0:
+        entry.no_new_coverage_streak = 0
+    else:
+        entry.no_new_coverage_streak += 1
+
+    operator = semantic_operator_name(entry)
+    if operator:
+        runtime.operator_attempts[operator] = runtime.operator_attempts.get(operator, 0) + 1
+        runtime.operator_credit[operator] = runtime.operator_credit.get(operator, 0) + max(0, new_bits)
+        if new_bits > 0:
+            runtime.operator_stall[operator] = 0
+        else:
+            runtime.operator_stall[operator] = runtime.operator_stall.get(operator, 0) + 1
+        entry.semantic_operator_credit = runtime.operator_credit.get(operator, 0)
+        entry.semantic_operator_stall = runtime.operator_stall.get(operator, 0)
+
+    family = scenario_family_name(entry)
+    if family:
+        runtime.family_attempts[family] = runtime.family_attempts.get(family, 0) + 1
+        runtime.family_credit[family] = runtime.family_credit.get(family, 0) + max(0, new_bits)
+        if new_bits > 0:
+            runtime.family_stall[family] = 0
+        else:
+            runtime.family_stall[family] = runtime.family_stall.get(family, 0) + 1
+        entry.scenario_family_credit = runtime.family_credit.get(family, 0)
+        entry.scenario_family_stall = runtime.family_stall.get(family, 0)
+
+    first_hits: list[str] = []
+    for group in SFUZZ_HARD_TARGET_GROUPS:
+        if group_new_bits.get(group, 0) > 0 and group not in runtime.hard_target_first_hit:
+            runtime.hard_target_first_hit[group] = campaign_exec
+            first_hits.append(f"{group}:{campaign_exec}")
+    if first_hits:
+        entry.hard_target_first_hits = ";".join(first_hits)
 
 
 def entry_focus_from_deficits(entry: CorpusEntry, deficits: dict[str, int]) -> tuple[str, int]:
@@ -380,6 +517,25 @@ def entry_focus_from_deficits(entry: CorpusEntry, deficits: dict[str, int]) -> t
             best_score = score
             best_deficit = deficit
     return best_group, best_deficit
+
+
+def semantic_operator_name(entry: CorpusEntry) -> str:
+    for raw_item in str(entry.mutation_operators or "").split(";"):
+        item = raw_item.strip()
+        if item.startswith("semantic."):
+            return item[len("semantic.") :]
+    return ""
+
+
+def scenario_family_name(entry: CorpusEntry) -> str:
+    for raw_item in str(entry.mutation_sections or "").split(";"):
+        item = raw_item.strip()
+        if item.startswith("scenario:"):
+            return item.split(":", 1)[1]
+    raw_family = str(entry.scheduler_family or "")
+    if ":" in raw_family:
+        return raw_family.rsplit(":", 1)[1]
+    return ""
 
 
 def bounded_energy(new_bits: int, min_energy: int, max_energy: int) -> int:
@@ -407,6 +563,20 @@ def scheduler_weight(entry: CorpusEntry, deficits: dict[str, int] | None = None)
         scale = 1 + min(16, max(1, focus_deficit).bit_length()) + min(8, affinity)
         weight *= scale
     return max(1, weight)
+
+
+def choose_weighted_index(indices: list[int], weights: list[int], rng: random.Random) -> tuple[int, int, int]:
+    if not indices:
+        raise ValueError("SFuzz scheduler requires a non-empty candidate set")
+    total = sum(max(1, weight) for weight in weights)
+    ticket = rng.randrange(total)
+    cursor = 0
+    for idx, weight in zip(indices, weights):
+        normalized = max(1, weight)
+        cursor += normalized
+        if ticket < cursor:
+            return idx, normalized, total
+    return indices[-1], max(1, weights[-1]), total
 
 
 def select_weighted_parent(
@@ -438,6 +608,125 @@ def select_weighted_parent(
     )
 
 
+def hard_target_focus_group(deficits: dict[str, int], runtime: SchedulerRuntime) -> tuple[str, int]:
+    best_group = ""
+    best_score = 0
+    best_deficit = 0
+    for group in SFUZZ_HARD_TARGET_GROUPS:
+        deficit = deficits.get(group, 0)
+        if deficit <= 0:
+            continue
+        priority = MICRO_GROUP_PRIORITY.get(group, 1)
+        first_hit_bonus = 3 if group not in runtime.hard_target_first_hit else 1
+        score = priority * deficit * first_hit_bonus
+        if score > best_score:
+            best_group = group
+            best_score = score
+            best_deficit = deficit
+    return best_group, best_deficit
+
+
+def semantic_bandit_weight(
+    entry: CorpusEntry,
+    deficits: dict[str, int],
+    runtime: SchedulerRuntime,
+    forced_focus_group: str = "",
+) -> int:
+    weight = scheduler_weight(entry, deficits)
+    focus_group, focus_deficit = entry_focus_from_deficits(entry, deficits)
+    if forced_focus_group:
+        affinity = entry_group_affinity(entry).get(forced_focus_group, 0)
+        if affinity:
+            focus_group = forced_focus_group
+            focus_deficit = deficits.get(forced_focus_group, 0)
+            weight += max(1, affinity) * max(1, MICRO_GROUP_PRIORITY.get(forced_focus_group, 1))
+
+    if focus_group in SFUZZ_HARD_TARGET_GROUPS and focus_deficit > 0:
+        weight *= 2
+        if focus_group not in runtime.hard_target_first_hit:
+            weight *= 2
+
+    operator = semantic_operator_name(entry)
+    if operator:
+        credit = runtime.operator_credit.get(operator, 0)
+        attempts = runtime.operator_attempts.get(operator, 0)
+        stall = runtime.operator_stall.get(operator, 0)
+        weight += min(64, credit.bit_length() * 4)
+        if attempts <= 1:
+            weight += 8
+        weight = max(1, weight // (1 + min(4, stall)))
+
+    family = scenario_family_name(entry)
+    if family:
+        credit = runtime.family_credit.get(family, 0)
+        attempts = runtime.family_attempts.get(family, 0)
+        stall = runtime.family_stall.get(family, 0)
+        weight += min(64, credit.bit_length() * 3)
+        if attempts <= 1:
+            weight += 8
+        weight = max(1, weight // (1 + min(4, stall)))
+
+    if entry.no_new_coverage_streak:
+        weight = max(1, weight // (1 + min(4, entry.no_new_coverage_streak)))
+    if entry.execution_count:
+        weight = max(1, weight // (1 + min(3, entry.execution_count // 4)))
+    return max(1, weight)
+
+
+def select_semantic_bandit_parent(
+    corpus: list[CorpusEntry],
+    rng: random.Random,
+    deficits: dict[str, int] | None,
+    runtime: SchedulerRuntime,
+) -> SchedulerSelection:
+    if not corpus:
+        raise ValueError("SFuzz scheduler requires a non-empty corpus")
+    active_deficits = deficits or {}
+    roll = rng.randrange(100)
+    indices = list(range(len(corpus)))
+    forced_focus = ""
+    bucket = "credit"
+
+    if active_deficits and roll < 25:
+        forced_focus, _forced_deficit = hard_target_focus_group(active_deficits, runtime)
+        if forced_focus:
+            affinity_indices = [
+                idx for idx, entry in enumerate(corpus) if entry_group_affinity(entry).get(forced_focus, 0) > 0
+            ]
+            if affinity_indices:
+                indices = affinity_indices
+            bucket = f"hard-target:{forced_focus}"
+    elif roll < 45:
+        family_to_indices: dict[str, list[int]] = {}
+        for idx, entry in enumerate(corpus):
+            family = scenario_family_name(entry)
+            if family:
+                family_to_indices.setdefault(family, []).append(idx)
+        if family_to_indices:
+            least_attempts = min(runtime.family_attempts.get(family, 0) for family in family_to_indices)
+            families = sorted(family for family in family_to_indices if runtime.family_attempts.get(family, 0) == least_attempts)
+            family = families[rng.randrange(len(families))]
+            indices = family_to_indices[family]
+            bucket = f"family-explore:{family}"
+
+    weights = [semantic_bandit_weight(corpus[idx], active_deficits, runtime, forced_focus) for idx in indices]
+    selected_idx, selected_weight, total = choose_weighted_index(indices, weights, rng)
+    focus_group, focus_deficit = entry_focus_from_deficits(corpus[selected_idx], active_deficits)
+    if forced_focus and entry_group_affinity(corpus[selected_idx]).get(forced_focus, 0) > 0:
+        focus_group = forced_focus
+        focus_deficit = active_deficits.get(forced_focus, 0)
+    return SchedulerSelection(
+        corpus[selected_idx],
+        selected_idx,
+        selected_weight,
+        total,
+        SEMANTIC_BANDIT_SCHEDULER_POLICY,
+        focus_group,
+        focus_deficit,
+        bucket,
+    )
+
+
 def select_baseline_parent(corpus: list[CorpusEntry], mutation_counter: int) -> SchedulerSelection:
     if not corpus:
         raise ValueError("SFuzz scheduler requires a non-empty corpus")
@@ -451,10 +740,13 @@ def select_parent(
     policy: str,
     mutation_counter: int,
     deficits: dict[str, int] | None = None,
+    runtime: SchedulerRuntime | None = None,
 ) -> SchedulerSelection:
     normalized = (policy or WEIGHTED_SCHEDULER_POLICY).replace("-", "_")
     if normalized in {"baseline", "baseline_fifo", "fifo"}:
         return select_baseline_parent(corpus, mutation_counter)
+    if normalized in {"semantic_bandit", "semantic", "bandit"}:
+        return select_semantic_bandit_parent(corpus, rng, deficits, runtime or SchedulerRuntime())
     if normalized in {"weighted", "weighted_innovation", "coverage_weighted_energy"}:
         selected = select_weighted_parent(corpus, rng, deficits)
         return SchedulerSelection(
@@ -465,6 +757,7 @@ def select_parent(
             WEIGHTED_SCHEDULER_POLICY,
             selected.focus_group,
             selected.focus_deficit,
+            selected.bucket,
         )
     raise ValueError(f"unsupported SFuzz scheduler policy: {policy}")
 
@@ -851,6 +1144,8 @@ def row_from_run(
     entry: CorpusEntry,
     run: dict[str, Any],
     new_bits: int,
+    group_new_bits: dict[str, int],
+    group_accumulated_bits: dict[str, int],
     accumulated: bytearray,
     retained: bool,
     retention_reason: str,
@@ -877,12 +1172,20 @@ def row_from_run(
         "seed_event_plan": entry.seed_event_plan,
         "coverage_group_focus": entry.coverage_group_focus,
         "coverage_group_deficit": entry.coverage_group_deficit,
+        "coverage_group_new_bits": group_trace(group_new_bits),
+        "coverage_group_accumulated_bits": group_trace(group_accumulated_bits),
+        "hard_target_first_hits": entry.hard_target_first_hits,
         "scheduler_policy": entry.scheduler_policy,
         "scheduler_family": entry.scheduler_family,
+        "scheduler_bucket": entry.scheduler_bucket,
         "innovation_enabled": entry.innovation_enabled,
         "scheduler_corpus_index": entry.scheduler_corpus_index,
         "scheduler_weight": entry.scheduler_weight,
         "scheduler_total_weight": entry.scheduler_total_weight,
+        "semantic_operator_credit": entry.semantic_operator_credit,
+        "semantic_operator_stall": entry.semantic_operator_stall,
+        "scenario_family_credit": entry.scenario_family_credit,
+        "scenario_family_stall": entry.scenario_family_stall,
         "retained": retained,
         "retention_reason": retention_reason,
         "comparison_tier": run["comparison_tier"],
@@ -973,7 +1276,11 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
     corpus = initial_corpus(args, work_dir)
     rows: list[dict[str, Any]] = []
     accumulated = bytearray()
+    accumulated_by_group: dict[str, bytearray] = {}
+    accumulated_group_counts: dict[str, int] = {}
+    group_totals: dict[str, int] = {}
     group_deficits: dict[str, int] = {}
+    scheduler_runtime = SchedulerRuntime()
     rng = random.Random(getattr(args, "rng_seed", 1))
     campaign_runs = len(corpus) if getattr(args, "batch_replay", False) else max(1, getattr(args, "campaign_runs", 8))
     next_corpus_id = len(corpus)
@@ -993,7 +1300,14 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
         else:
             scheduler_policy = getattr(args, "scheduler_policy", WEIGHTED_SCHEDULER_POLICY)
             scheduling_deficits = {} if getattr(args, "disable_scenario_aware_scheduling", False) else group_deficits
-            scheduled = select_parent(corpus, rng, scheduler_policy, mutation_counter, scheduling_deficits)
+            scheduled = select_parent(
+                corpus,
+                rng,
+                scheduler_policy,
+                mutation_counter,
+                scheduling_deficits,
+                scheduler_runtime,
+            )
             parent = scheduled.entry
             mutation_counter += 1
             mutated_path = generated_dir / f"sfuzz-mut-{mutation_counter:04d}.sfuz"
@@ -1036,6 +1350,7 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
                 mutation_sections=mutation.section_trace,
                 scheduler_policy=scheduled.policy,
                 scheduler_family=f"{scheduler_family}:{mutation.scenario_family}" if mutation.scenario_family else scheduler_family,
+                scheduler_bucket=scheduled.bucket,
                 innovation_enabled=scheduler_family == "innovation" and not getattr(args, "disable_semantic_mutation", False),
                 scheduler_corpus_index=scheduled.corpus_index,
                 scheduler_weight=scheduled.weight,
@@ -1049,7 +1364,20 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
         new_bits = coverage_delta(bitmap, accumulated)
         snapshot = parse_coverage_group_snapshot(run["coverage"])
         if snapshot.total:
-            group_deficits = coverage_group_deficits(snapshot)
+            for group, total in snapshot.total.items():
+                if group not in {"all", "common", SFUZZ_NATIVE_GROUP}:
+                    group_totals[group] = max(group_totals.get(group, 0), total)
+        group_new_bits, accumulated_group_counts = coverage_group_delta(bitmap, accumulated_by_group, snapshot)
+        if snapshot.total:
+            accumulated_deficits = accumulated_group_deficits(group_totals, accumulated_group_counts)
+            group_deficits = accumulated_deficits or coverage_group_deficits(snapshot)
+        update_runtime_feedback(
+            scheduler_runtime,
+            entry,
+            campaign_exec=exec_idx,
+            new_bits=new_bits,
+            group_new_bits=group_new_bits,
+        )
         retained = new_bits > 0 or run["run_outcome"] == "bug_triggered"
         retention_reason = "new_coverage" if new_bits > 0 else run["run_outcome"] if retained else "not_interesting"
         if retained:
@@ -1075,6 +1403,8 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
                 entry=entry,
                 run=run,
                 new_bits=new_bits,
+                group_new_bits=group_new_bits,
+                group_accumulated_bits=accumulated_group_counts,
                 accumulated=accumulated,
                 retained=retained,
                 retention_reason=retention_reason,
@@ -1102,8 +1432,15 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
             "core1_handoff_enabled": getattr(args, "enable_core1_handoff", False),
             "coverage_bitmap_semantics": SFUZZ_COVERAGE_BITMAP_SEMANTICS,
             "coverage_group_deficits": group_trace(group_deficits),
+            "coverage_group_accumulated_bits": group_accumulated_trace(accumulated_by_group),
+            "hard_target_first_hits": group_trace(scheduler_runtime.hard_target_first_hit),
+            "semantic_operator_credit": group_trace(scheduler_runtime.operator_credit),
+            "semantic_operator_stall": group_trace(scheduler_runtime.operator_stall),
+            "scenario_family_credit": group_trace(scheduler_runtime.family_credit),
+            "scenario_family_stall": group_trace(scheduler_runtime.family_stall),
             "baseline_policy": BASELINE_SCHEDULER_POLICY,
             "innovation_policy": WEIGHTED_SCHEDULER_POLICY,
+            "semantic_bandit_policy": SEMANTIC_BANDIT_SCHEDULER_POLICY,
         },
     )
     return 0

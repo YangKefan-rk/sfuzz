@@ -106,9 +106,9 @@ def main() -> int:
     sfuzz.add_argument("--max-energy", type=int, default=8, help="maximum mutations for high-yield corpus seeds")
     sfuzz.add_argument(
         "--scheduler-policy",
-        choices=["weighted-innovation", "baseline-fifo", "coverage-weighted-energy"],
+        choices=["weighted-innovation", "semantic-bandit", "baseline-fifo", "coverage-weighted-energy"],
         default="weighted-innovation",
-        help="SFuzz corpus scheduler; baseline-fifo disables weighted innovation scheduling",
+        help="SFuzz corpus scheduler; semantic-bandit adds exploration-aware semantic feedback",
     )
     sfuzz.add_argument(
         "--mutation-sections",

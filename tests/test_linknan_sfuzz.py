@@ -14,10 +14,12 @@ from linknan.methods.sfuzz import (  # noqa: E402
     BASELINE_SCHEDULER_POLICY,
     DEFAULT_CORE0_PROG,
     CorpusEntry,
+    SchedulerRuntime,
     apply_sfuz_mutation_operator,
     available_mutation_operators,
     bounded_energy,
     coverage_delta,
+    coverage_group_delta,
     accumulated_covered,
     coverage_group_deficits,
     mutate_core0_program,
@@ -28,8 +30,10 @@ from linknan.methods.sfuzz import (  # noqa: E402
     plan_sections_for_focus,
     select_baseline_parent,
     select_parent,
+    select_semantic_bandit_parent,
     select_weighted_parent,
     scheduler_weight,
+    update_runtime_feedback,
 )
 from linknan.seeds import SfuzSeed, infer_seed_micro_ir, read_sfuz_seed, write_sfuz_seed  # noqa: E402
 from linknan.sfuzz_scenarios import (  # noqa: E402
@@ -419,6 +423,23 @@ class SfuzzCoverageTests(unittest.TestCase):
         self.assertEqual(snapshot.covered["sfuzz_lsq"], 3)
         self.assertEqual(coverage_group_deficits(snapshot)["sfuzz_fence"], 4)
 
+    def test_coverage_group_delta_slices_native_bitmap_in_group_order(self) -> None:
+        snapshot = parse_coverage_group_snapshot(CoverageResult())
+        snapshot = type(snapshot)(
+            covered={"sfuzz_atomic": 2, "sfuzz_fence": 1},
+            total={"sfuzz_atomic": 4, "sfuzz_fence": 3},
+            order=("sfuzz_atomic", "sfuzz_fence"),
+        )
+        accumulated: dict[str, bytearray] = {}
+
+        first_new, first_acc = coverage_group_delta(b"\x01\x00\x01\x00\x00\x01\x00", accumulated, snapshot)
+        second_new, second_acc = coverage_group_delta(b"\x01\x01\x01\x00\x00\x01\x01", accumulated, snapshot)
+
+        self.assertEqual(first_new, {"sfuzz_atomic": 2, "sfuzz_fence": 1})
+        self.assertEqual(first_acc, {"sfuzz_atomic": 2, "sfuzz_fence": 1})
+        self.assertEqual(second_new, {"sfuzz_atomic": 1, "sfuzz_fence": 1})
+        self.assertEqual(second_acc, {"sfuzz_atomic": 3, "sfuzz_fence": 2})
+
 
 class SfuzzSchedulerTests(unittest.TestCase):
     def test_select_weighted_parent_uses_energy_as_ticket_weight(self) -> None:
@@ -515,6 +536,64 @@ class SfuzzSchedulerTests(unittest.TestCase):
         self.assertEqual(weighted.entry.corpus_id, 1)
         with self.assertRaises(ValueError):
             select_parent(corpus, random.Random(1), "unknown", 0)
+
+    def test_semantic_bandit_parent_keeps_hard_target_exploration(self) -> None:
+        corpus = [
+            CorpusEntry(0, Path("a.sfuz"), "a", "cat", energy=1, seed_ir_targets="sfuzz_dcache:8"),
+            CorpusEntry(1, Path("b.sfuz"), "b", "cat", energy=1, seed_ir_targets="sfuzz_atomic:8"),
+        ]
+        runtime = SchedulerRuntime()
+        deficits = {"sfuzz_dcache": 100, "sfuzz_atomic": 16}
+
+        selected = select_semantic_bandit_parent(corpus, FixedTicketRng(0), deficits, runtime)
+
+        self.assertEqual(selected.entry.corpus_id, 1)
+        self.assertEqual(selected.policy, "semantic_bandit")
+        self.assertEqual(selected.focus_group, "sfuzz_atomic")
+        self.assertTrue(selected.bucket.startswith("hard-target:"))
+
+    def test_runtime_feedback_tracks_operator_family_and_first_hit(self) -> None:
+        entry = CorpusEntry(
+            2,
+            Path("mut.sfuz"),
+            "mut",
+            "cat",
+            energy=1,
+            mutation_operators="semantic.insert_amo_sequence",
+            mutation_sections="scenario:amo_contention",
+        )
+        runtime = SchedulerRuntime()
+
+        update_runtime_feedback(
+            runtime,
+            entry,
+            campaign_exec=7,
+            new_bits=5,
+            group_new_bits={"sfuzz_atomic": 2, "sfuzz_lsq": 0},
+        )
+        update_runtime_feedback(runtime, entry, campaign_exec=8, new_bits=0, group_new_bits={})
+
+        self.assertEqual(runtime.operator_credit["insert_amo_sequence"], 5)
+        self.assertEqual(runtime.operator_stall["insert_amo_sequence"], 1)
+        self.assertEqual(runtime.family_credit["amo_contention"], 5)
+        self.assertEqual(runtime.hard_target_first_hit["sfuzz_atomic"], 7)
+        self.assertEqual(entry.no_new_coverage_streak, 1)
+
+    def test_select_parent_dispatches_semantic_bandit_policy(self) -> None:
+        corpus = [
+            CorpusEntry(0, Path("a.sfuz"), "a", "cat", energy=1, seed_ir_targets="sfuzz_atomic:8"),
+            CorpusEntry(1, Path("b.sfuz"), "b", "cat", energy=1, seed_ir_targets="sfuzz_lsq:8"),
+        ]
+        selected = select_parent(
+            corpus,
+            FixedTicketRng(0),
+            "semantic-bandit",
+            0,
+            {"sfuzz_atomic": 10, "sfuzz_lsq": 1},
+            SchedulerRuntime(),
+        )
+
+        self.assertEqual(selected.policy, "semantic_bandit")
 
 
 if __name__ == "__main__":
