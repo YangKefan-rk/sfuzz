@@ -699,3 +699,45 @@ SurgeFuzz feedback=SURGE_FREQ(MSHR.retry_ack)+ancestor_state
 
 这条路线的优点是第一步已经有现成 LinkNan FIRRTL coverage 证据，后续每加一层都能
 独立评估，不需要一次性完成完整 RFuzz/DirectFuzz/SurgeFuzz 级别的插桩基础设施。
+
+## 2026-06-04 SFuzz 最小创新切片
+
+本次 SFuzz 主工具侧落地了一个不依赖 LinkNan exporter 改动的最小创新切片：
+**基于微结构目标的 seed IR + 事件计划 + coverage group weighting**。它不是对
+`.sfuz` 字节做普通 flip/overwrite/delete/insert 的包装，而是在现有 SFUZ v1
+容器上建立一层可解释的结构化意图。
+
+实现边界：
+
+- `scripts/linknan/seeds.py` 为每个 `SfuzSeed` 推断 `SeedMicroIR`：
+  - 从 core0/core1 的 32-bit RISC-V opcode 粗分类 `load/store/amo/branch/jump/fence/csr/trap/return/alu/other`。
+  - 从 shared memory segment 识别 memory stream、cacheline alias、resource pressure。
+  - 从 interrupt plan 识别 exception/control 事件。
+  - 从 seed name/description/tag 中识别 `mmu/tlb/cache/mshr/branch/redirect/exception/interrupt/queue` 等意图关键词。
+  - 输出 `event_plan` 和 `group_affinity`，例如 `core0:memory_stream`、
+    `shared:cacheline_alias`、`memory_event:7;resource_event:3`。
+- `scripts/linknan/methods/sfuzz.py` 在 runner 侧记录 `seed_ir_targets`、
+  `seed_event_plan`、`coverage_group_focus`、`coverage_group_deficit`。
+- 当 VCS 导出的 `sfuzz_firrtl_coverage.json` 含有 `groups` 字段时，SFuzz 解析
+  每组 `covered/total`，形成 group deficit。
+- weighted scheduler 不再只用 `energy`，而是把 seed IR 的 group affinity 与
+  未覆盖 group deficit 相乘，优先选择更可能触达当前稀缺微结构组的 corpus entry。
+- mutation section planner 根据 focus group 调整 section 顺序：
+  - `memory_event/resource_event/queue_event` 优先 `shared,core0,core1`。
+  - `branch_event/control_event` 优先 `core0,core1,interrupt`。
+  - `exception_event` 优先 `interrupt,core0,core1`。
+  - 无 group metadata 时回退到原 `energy` weighted 行为。
+
+这个切片的论文价值在于：SFuzz 的“结构化输入”不只是 SFUZ 容器格式，而是把 seed
+解释成会刺激哪些硬件微结构事件的 IR，再用真实 FIRRTL group coverage 的缺口反向
+影响调度与变异位置。后续可以用 `--scheduler-policy baseline-fifo` 做消融，对比
+`weighted-innovation` 中 seed IR/group weighting 的贡献。
+
+### Coverage backend 选择
+
+SFuzz 主工具的横向比较应使用 `FIRRTL.common` 或后续 `SFUZZ.<layer>` native group。
+如果最近一次 LinkNan build 使用的是 `SurgeFuzz.trace`，runner 只能看到
+`surgefuzz_trace` group；这只适合 SurgeFuzz target/ancestor trace smoke，不能作为
+SFuzz common coverage 分母。运行 SFuzz 消融前应重新生成 common/backend metadata，并
+确认 `sfuzz_firrtl_coverage.json` 中存在 `ready_valid/mux/toggle/control_event/...`
+等 group。

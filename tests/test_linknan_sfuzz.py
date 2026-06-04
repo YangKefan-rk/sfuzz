@@ -19,15 +19,20 @@ from linknan.methods.sfuzz import (  # noqa: E402
     bounded_energy,
     coverage_delta,
     accumulated_covered,
+    coverage_group_deficits,
     mutate_core0_program,
     mutate_sfuz,
     mutation_operator_selection_pool,
     normalize_mutation_sections,
+    parse_coverage_group_snapshot,
+    plan_sections_for_focus,
     select_baseline_parent,
     select_parent,
     select_weighted_parent,
+    scheduler_weight,
 )
-from linknan.seeds import SfuzSeed, read_sfuz_seed, write_sfuz_seed  # noqa: E402
+from linknan.seeds import SfuzSeed, infer_seed_micro_ir, read_sfuz_seed, write_sfuz_seed  # noqa: E402
+from linknan.vcs import CoverageResult  # noqa: E402
 
 
 class FixedTicketRng:
@@ -41,6 +46,32 @@ class FixedTicketRng:
 
 
 class SfuzzMutationTests(unittest.TestCase):
+    def test_seed_micro_ir_extracts_microarchitectural_intent(self) -> None:
+        seed = SfuzSeed(
+            core0_prog=bytes.fromhex(
+                "03010000"  # load
+                "23200000"  # store
+                "63000000"  # branch
+                "73000000"  # ecall
+            ),
+            core1_prog=bytes.fromhex("2f200000"),
+            shared_mem_init=[(0x80000000, b"a"), (0x80000000 + 8, b"b")],
+            interrupt_plan_raw=[b"\x00" * 24],
+            name="mmu-branch-seed",
+            description="cache redirect exception",
+            tags=["mshr"],
+        )
+
+        ir = infer_seed_micro_ir(seed)
+
+        self.assertIn("core0:memory_stream", ir.event_plan)
+        self.assertIn("core0:control_redirect", ir.event_plan)
+        self.assertIn("core0:privileged_exception", ir.event_plan)
+        self.assertIn("core1:atomic_resource", ir.event_plan)
+        self.assertIn("shared:cacheline_alias", ir.event_plan)
+        self.assertGreater(ir.group_affinity["memory_event"], ir.group_affinity["ready_valid"])
+        self.assertIn("exception_event", ir.group_affinity)
+
     def test_available_mutation_operators_reflect_current_program_shape(self) -> None:
         empty = bytearray()
         self.assertEqual(
@@ -164,6 +195,20 @@ class SfuzzMutationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize_mutation_sections("core0,unknown")
 
+    def test_plan_sections_for_focus_uses_microstructure_hints(self) -> None:
+        self.assertEqual(
+            plan_sections_for_focus("core0,shared,interrupt", "memory_event"),
+            ("shared", "core0", "interrupt"),
+        )
+        self.assertEqual(
+            plan_sections_for_focus("core0,shared,interrupt", "exception_event"),
+            ("interrupt", "core0", "shared"),
+        )
+        self.assertEqual(
+            plan_sections_for_focus("core0,shared", "", "memory_event:5;branch_event:3"),
+            ("shared", "core0"),
+        )
+
 
 class SfuzzCoverageTests(unittest.TestCase):
     def test_coverage_delta_uses_byte_per_point_semantics(self) -> None:
@@ -183,6 +228,30 @@ class SfuzzCoverageTests(unittest.TestCase):
         self.assertEqual(coverage_delta(None, accumulated), 0)
         with self.assertRaises(ValueError):
             coverage_delta(b"\x01", accumulated)
+
+    def test_parse_coverage_group_snapshot_reads_firrtl_group_deficits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            summary = Path(tmp) / "sfuzz_firrtl_coverage.json"
+            summary.write_text(
+                """
+                {
+                  "backend": "sfuzz_firrtl",
+                  "groups": [
+                    {"name": "all", "total": 8, "covered": 3},
+                    {"name": "common", "total": 8, "covered": 3},
+                    {"name": "memory_event", "total": 10, "covered": 4},
+                    {"name": "branch_event", "total": 6, "covered": 6}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+
+            snapshot = parse_coverage_group_snapshot(CoverageResult(coverage_source=str(summary)))
+
+        self.assertEqual(snapshot.total["memory_event"], 10)
+        self.assertEqual(snapshot.covered["memory_event"], 4)
+        self.assertEqual(coverage_group_deficits(snapshot), {"memory_event": 6, "branch_event": 0})
 
 
 class SfuzzSchedulerTests(unittest.TestCase):
@@ -214,6 +283,31 @@ class SfuzzSchedulerTests(unittest.TestCase):
         self.assertEqual(selected.entry.corpus_id, 1)
         self.assertEqual(selected.weight, 1)
         self.assertEqual(selected.total_weight, 2)
+
+    def test_select_weighted_parent_scales_seed_ir_by_group_deficit(self) -> None:
+        corpus = [
+            CorpusEntry(0, Path("a.sfuz"), "a", "cat", energy=1, seed_ir_targets="branch_event:2"),
+            CorpusEntry(1, Path("b.sfuz"), "b", "cat", energy=1, seed_ir_targets="memory_event:4"),
+        ]
+        deficits = {"branch_event": 1, "memory_event": 64}
+
+        first_weight = scheduler_weight(corpus[0], deficits)
+        second_weight = scheduler_weight(corpus[1], deficits)
+        selected = select_weighted_parent(corpus, FixedTicketRng(first_weight), deficits)
+
+        self.assertGreater(second_weight, first_weight)
+        self.assertEqual(selected.entry.corpus_id, 1)
+        self.assertEqual(selected.focus_group, "memory_event")
+        self.assertEqual(selected.focus_deficit, 64)
+
+    def test_select_weighted_parent_ignores_fully_covered_groups(self) -> None:
+        entry = CorpusEntry(0, Path("a.sfuz"), "a", "cat", energy=1, seed_ir_targets="branch_event:9")
+
+        self.assertEqual(scheduler_weight(entry, {"branch_event": 0}), 1)
+        selected = select_weighted_parent([entry], FixedTicketRng(0), {"branch_event": 0})
+
+        self.assertEqual(selected.focus_group, "")
+        self.assertEqual(selected.focus_deficit, 0)
 
     def test_select_weighted_parent_requires_non_empty_corpus(self) -> None:
         with self.assertRaises(ValueError):

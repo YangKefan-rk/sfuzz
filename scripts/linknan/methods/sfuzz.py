@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +11,7 @@ from ..config import VcsContext
 from ..seeds import (
     SfuzSeed,
     collect_seed_paths,
+    infer_seed_micro_ir,
     read_seed_metadata_name,
     read_sfuz_seed,
     seed_category,
@@ -45,6 +47,10 @@ SFUZZ_FIELDS = [
     "mutation_budget",
     "mutation_operators",
     "mutation_sections",
+    "seed_ir_targets",
+    "seed_event_plan",
+    "coverage_group_focus",
+    "coverage_group_deficit",
     "scheduler_policy",
     "scheduler_family",
     "innovation_enabled",
@@ -125,6 +131,30 @@ SFUZZ_INTERRUPT_MUTATION_OPERATORS = (
     "interrupt_overwrite_byte",
 )
 SFUZZ_MUTATION_SECTIONS = ("core0", "core1", "shared", "interrupt")
+MICRO_GROUP_SECTION_HINTS = {
+    "ready_valid": ("core0", "core1"),
+    "mux": ("core0", "core1"),
+    "toggle": ("core0", "core1", "shared"),
+    "control_event": ("core0", "core1", "interrupt"),
+    "queue_event": ("shared", "core0", "core1"),
+    "memory_event": ("shared", "core0", "core1"),
+    "branch_event": ("core0", "core1"),
+    "exception_event": ("interrupt", "core0", "core1"),
+    "resource_event": ("shared", "core0", "core1", "interrupt"),
+    "surgefuzz_trace": ("shared", "core0", "core1"),
+}
+MICRO_GROUP_PRIORITY = {
+    "memory_event": 4,
+    "branch_event": 4,
+    "exception_event": 4,
+    "resource_event": 3,
+    "queue_event": 3,
+    "control_event": 2,
+    "ready_valid": 1,
+    "mux": 1,
+    "toggle": 1,
+    "surgefuzz_trace": 2,
+}
 
 
 @dataclass
@@ -139,6 +169,10 @@ class CorpusEntry:
     mutation_budget: int | str = ""
     mutation_operators: str = ""
     mutation_sections: str = ""
+    seed_ir_targets: str = ""
+    seed_event_plan: str = ""
+    coverage_group_focus: str = ""
+    coverage_group_deficit: int | str = ""
     scheduler_policy: str = ""
     scheduler_family: str = ""
     innovation_enabled: bool | str = ""
@@ -169,6 +203,14 @@ class SchedulerSelection:
     weight: int
     total_weight: int
     policy: str = SFUZZ_SCHEDULER_POLICY
+    focus_group: str = ""
+    focus_deficit: int = 0
+
+
+@dataclass(frozen=True)
+class CoverageGroupSnapshot:
+    covered: dict[str, int]
+    total: dict[str, int]
 
 
 def run_outcome(result: Any, info: Any, infrastructure_error: str) -> str:
@@ -216,6 +258,91 @@ def accumulated_covered(accumulated: bytearray) -> int:
     return sum(1 for value in accumulated if value)
 
 
+def group_trace(values: dict[str, int]) -> str:
+    return ";".join(f"{key}:{values[key]}" for key in sorted(values) if values[key])
+
+
+def entry_group_affinity(entry: CorpusEntry) -> dict[str, int]:
+    affinity: dict[str, int] = {}
+    for raw_item in str(entry.seed_ir_targets or "").split(";"):
+        item = raw_item.strip()
+        if not item or ":" not in item:
+            continue
+        group, weight_text = item.split(":", 1)
+        try:
+            weight = int(weight_text)
+        except ValueError:
+            continue
+        if weight > 0:
+            affinity[group] = weight
+    return affinity
+
+
+def infer_entry_ir_fields(seed: Path) -> tuple[str, str]:
+    try:
+        ir = infer_seed_micro_ir(read_sfuz_seed(seed))
+    except Exception:
+        return "", ""
+    return ir.target_trace, ir.event_trace
+
+
+def parse_coverage_group_snapshot(coverage: CoverageResult) -> CoverageGroupSnapshot:
+    covered: dict[str, int] = {}
+    total: dict[str, int] = {}
+    sources = [item for item in str(coverage.coverage_source or "").split(";") if item]
+    for source in sources:
+        path = Path(source)
+        if path.suffix != ".json" or not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        groups = payload.get("groups")
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            name = str(group.get("name") or "")
+            if not name or name in {"all", "common"}:
+                continue
+            try:
+                group_total = int(group.get("total", 0))
+                group_covered = int(group.get("covered", 0))
+            except (TypeError, ValueError):
+                continue
+            total[name] = max(total.get(name, 0), group_total)
+            covered[name] = max(covered.get(name, 0), group_covered)
+    return CoverageGroupSnapshot(covered=covered, total=total)
+
+
+def coverage_group_deficits(snapshot: CoverageGroupSnapshot) -> dict[str, int]:
+    deficits: dict[str, int] = {}
+    for group, total in snapshot.total.items():
+        if total > 0:
+            deficits[group] = max(0, total - snapshot.covered.get(group, 0))
+    return deficits
+
+
+def entry_focus_from_deficits(entry: CorpusEntry, deficits: dict[str, int]) -> tuple[str, int]:
+    affinity = entry_group_affinity(entry)
+    best_group = ""
+    best_score = 0
+    best_deficit = 0
+    for group, weight in affinity.items():
+        deficit = deficits.get(group, 0)
+        if deficit <= 0:
+            continue
+        priority = MICRO_GROUP_PRIORITY.get(group, 1)
+        score = max(1, weight) * max(1, priority) * deficit
+        if score > best_score:
+            best_group = group
+            best_score = score
+            best_deficit = deficit
+    return best_group, best_deficit
+
+
 def bounded_energy(new_bits: int, min_energy: int, max_energy: int) -> int:
     lo = max(1, min_energy)
     hi = max(lo, max_energy)
@@ -228,26 +355,48 @@ def normalized_mutation_budget(budget: int) -> int:
     return max(1, int(budget))
 
 
-def scheduler_weight(entry: CorpusEntry) -> int:
+def scheduler_weight(entry: CorpusEntry, deficits: dict[str, int] | None = None) -> int:
     try:
-        return max(1, int(entry.energy))
+        weight = max(1, int(entry.energy))
     except (TypeError, ValueError):
-        return 1
+        weight = 1
+    if not deficits:
+        return weight
+    focus_group, focus_deficit = entry_focus_from_deficits(entry, deficits)
+    if focus_group:
+        affinity = entry_group_affinity(entry).get(focus_group, 1)
+        scale = 1 + min(16, max(1, focus_deficit).bit_length()) + min(8, affinity)
+        weight *= scale
+    return max(1, weight)
 
 
-def select_weighted_parent(corpus: list[CorpusEntry], rng: random.Random) -> SchedulerSelection:
+def select_weighted_parent(
+    corpus: list[CorpusEntry],
+    rng: random.Random,
+    deficits: dict[str, int] | None = None,
+) -> SchedulerSelection:
     if not corpus:
         raise ValueError("SFuzz scheduler requires a non-empty corpus")
-    weights = [scheduler_weight(entry) for entry in corpus]
+    weights = [scheduler_weight(entry, deficits) for entry in corpus]
     total = sum(weights)
     ticket = rng.randrange(total)
     cursor = 0
     for idx, weight in enumerate(weights):
         cursor += weight
         if ticket < cursor:
-            return SchedulerSelection(corpus[idx], idx, weight, total)
+            focus_group, focus_deficit = entry_focus_from_deficits(corpus[idx], deficits or {})
+            return SchedulerSelection(corpus[idx], idx, weight, total, SFUZZ_SCHEDULER_POLICY, focus_group, focus_deficit)
     last_idx = len(corpus) - 1
-    return SchedulerSelection(corpus[last_idx], last_idx, weights[last_idx], total)
+    focus_group, focus_deficit = entry_focus_from_deficits(corpus[last_idx], deficits or {})
+    return SchedulerSelection(
+        corpus[last_idx],
+        last_idx,
+        weights[last_idx],
+        total,
+        SFUZZ_SCHEDULER_POLICY,
+        focus_group,
+        focus_deficit,
+    )
 
 
 def select_baseline_parent(corpus: list[CorpusEntry], mutation_counter: int) -> SchedulerSelection:
@@ -257,18 +406,26 @@ def select_baseline_parent(corpus: list[CorpusEntry], mutation_counter: int) -> 
     return SchedulerSelection(corpus[idx], idx, 1, len(corpus), BASELINE_SCHEDULER_POLICY)
 
 
-def select_parent(corpus: list[CorpusEntry], rng: random.Random, policy: str, mutation_counter: int) -> SchedulerSelection:
+def select_parent(
+    corpus: list[CorpusEntry],
+    rng: random.Random,
+    policy: str,
+    mutation_counter: int,
+    deficits: dict[str, int] | None = None,
+) -> SchedulerSelection:
     normalized = (policy or WEIGHTED_SCHEDULER_POLICY).replace("-", "_")
     if normalized in {"baseline", "baseline_fifo", "fifo"}:
         return select_baseline_parent(corpus, mutation_counter)
     if normalized in {"weighted", "weighted_innovation", "coverage_weighted_energy"}:
-        selected = select_weighted_parent(corpus, rng)
+        selected = select_weighted_parent(corpus, rng, deficits)
         return SchedulerSelection(
             selected.entry,
             selected.corpus_index,
             selected.weight,
             selected.total_weight,
             WEIGHTED_SCHEDULER_POLICY,
+            selected.focus_group,
+            selected.focus_deficit,
         )
     raise ValueError(f"unsupported SFuzz scheduler policy: {policy}")
 
@@ -382,6 +539,29 @@ def normalize_mutation_sections(sections: str | tuple[str, ...] | list[str] | No
         if section not in deduped:
             deduped.append(section)
     return tuple(deduped)
+
+
+def plan_sections_for_focus(
+    base_sections: str | tuple[str, ...] | list[str] | None,
+    focus_group: str,
+    seed_ir_targets: str = "",
+) -> tuple[str, ...]:
+    allowed = normalize_mutation_sections(base_sections)
+    planned: list[str] = []
+    for section in MICRO_GROUP_SECTION_HINTS.get(focus_group, ()):
+        if section in allowed and section not in planned:
+            planned.append(section)
+    if not planned and seed_ir_targets:
+        synthetic = CorpusEntry(0, Path("seed.sfuz"), "seed", "seed", 1)
+        synthetic.seed_ir_targets = seed_ir_targets
+        for group, _weight in sorted(entry_group_affinity(synthetic).items(), key=lambda item: (-item[1], item[0])):
+            for section in MICRO_GROUP_SECTION_HINTS.get(group, ()):
+                if section in allowed and section not in planned:
+                    planned.append(section)
+    for section in allowed:
+        if section not in planned:
+            planned.append(section)
+    return tuple(planned) if planned else allowed
 
 
 def choose_program_operator(payload: bytearray, rng: random.Random) -> str:
@@ -610,6 +790,10 @@ def row_from_run(
         "mutation_budget": entry.mutation_budget,
         "mutation_operators": entry.mutation_operators,
         "mutation_sections": entry.mutation_sections,
+        "seed_ir_targets": entry.seed_ir_targets,
+        "seed_event_plan": entry.seed_event_plan,
+        "coverage_group_focus": entry.coverage_group_focus,
+        "coverage_group_deficit": entry.coverage_group_deficit,
         "scheduler_policy": entry.scheduler_policy,
         "scheduler_family": entry.scheduler_family,
         "innovation_enabled": entry.innovation_enabled,
@@ -668,6 +852,7 @@ def initial_corpus(args: Any, work_dir: Path) -> list[CorpusEntry]:
     entries: list[CorpusEntry] = []
     for idx, seed in enumerate(seeds):
         seed_name = read_seed_metadata_name(seed)
+        ir_targets, event_plan = infer_entry_ir_fields(seed)
         entries.append(
             CorpusEntry(
                 corpus_id=idx,
@@ -675,6 +860,8 @@ def initial_corpus(args: Any, work_dir: Path) -> list[CorpusEntry]:
                 seed_name=seed_name,
                 category=seed_category(seed, seed_name),
                 energy=max(1, getattr(args, "min_energy", 1)),
+                seed_ir_targets=ir_targets,
+                seed_event_plan=event_plan,
                 scheduler_family="initial",
                 innovation_enabled=False,
             )
@@ -703,6 +890,7 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
     corpus = initial_corpus(args, work_dir)
     rows: list[dict[str, Any]] = []
     accumulated = bytearray()
+    group_deficits: dict[str, int] = {}
     rng = random.Random(getattr(args, "rng_seed", 1))
     campaign_runs = len(corpus) if getattr(args, "batch_replay", False) else max(1, getattr(args, "campaign_runs", 8))
     next_corpus_id = len(corpus)
@@ -721,18 +909,24 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
             entry.innovation_enabled = False
         else:
             scheduler_policy = getattr(args, "scheduler_policy", WEIGHTED_SCHEDULER_POLICY)
-            scheduled = select_parent(corpus, rng, scheduler_policy, mutation_counter)
+            scheduled = select_parent(corpus, rng, scheduler_policy, mutation_counter, group_deficits)
             parent = scheduled.entry
             mutation_counter += 1
             mutated_path = generated_dir / f"sfuzz-mut-{mutation_counter:04d}.sfuz"
+            mutation_sections = plan_sections_for_focus(
+                getattr(args, "mutation_sections", "core0,core1,shared,interrupt"),
+                scheduled.focus_group,
+                parent.seed_ir_targets,
+            )
             mutation = mutate_sfuz(
                 parent.path,
                 mutated_path,
                 rng,
                 parent.energy,
-                getattr(args, "mutation_sections", "core0,core1,shared,interrupt"),
+                mutation_sections,
             )
             seed_name = read_seed_metadata_name(mutated_path)
+            ir_targets, event_plan = infer_entry_ir_fields(mutated_path)
             scheduler_family = "baseline" if scheduled.policy == BASELINE_SCHEDULER_POLICY else "innovation"
             entry = CorpusEntry(
                 corpus_id=next_corpus_id,
@@ -740,6 +934,10 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
                 seed_name=seed_name,
                 category=seed_category(mutated_path, seed_name),
                 energy=parent.energy,
+                seed_ir_targets=ir_targets,
+                seed_event_plan=event_plan,
+                coverage_group_focus=scheduled.focus_group,
+                coverage_group_deficit=scheduled.focus_deficit,
                 parent_corpus_id=parent.corpus_id,
                 mutation_index=mutation_counter,
                 mutation_budget=mutation.budget,
@@ -758,14 +956,21 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
         run = run_one(args, ctx, runs_dir, logs_dir, entry.path, case_name)
         bitmap = read_bitmap(run["coverage"])
         new_bits = coverage_delta(bitmap, accumulated)
+        snapshot = parse_coverage_group_snapshot(run["coverage"])
+        if snapshot.total:
+            group_deficits = coverage_group_deficits(snapshot)
         retained = new_bits > 0 or run["run_outcome"] == "bug_triggered"
         retention_reason = "new_coverage" if new_bits > 0 else run["run_outcome"] if retained else "not_interesting"
         if retained:
             entry.energy = bounded_energy(new_bits, args.min_energy, args.max_energy)
+            focus_group, focus_deficit = entry_focus_from_deficits(entry, group_deficits)
+            entry.coverage_group_focus = focus_group
+            entry.coverage_group_deficit = focus_deficit
             if entry not in corpus:
                 corpus.append(entry)
         notes = (
-            "online SFuzz loop; coverage delta drives corpus retention, mutation energy, and weighted parent selection; "
+            "online SFuzz loop; seed micro-IR plus coverage group deficits drive corpus retention, mutation energy, "
+            "group-weighted parent selection, and event-plan-aware mutation sections; "
             "use --batch-replay only for legacy fixed manifest replay"
         )
         rows.append(
@@ -799,6 +1004,7 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
             "scheduler_policy": getattr(args, "scheduler_policy", WEIGHTED_SCHEDULER_POLICY),
             "mutation_sections": getattr(args, "mutation_sections", "core0,core1,shared,interrupt"),
             "coverage_bitmap_semantics": SFUZZ_COVERAGE_BITMAP_SEMANTICS,
+            "coverage_group_deficits": group_trace(group_deficits),
             "baseline_policy": BASELINE_SCHEDULER_POLICY,
             "innovation_policy": WEIGHTED_SCHEDULER_POLICY,
         },
