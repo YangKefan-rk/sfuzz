@@ -17,6 +17,11 @@ from ..seeds import (
     seed_category,
     write_sfuz_seed,
 )
+from ..sfuzz_scenarios import (
+    choose_semantic_operator,
+    scenario_from_operator,
+    write_scenario_artifacts,
+)
 from ..vcs import (
     CoverageResult,
     assertion_failure,
@@ -212,6 +217,10 @@ class MutationSummary:
     budget: int
     operators: tuple[str, ...]
     sections: tuple[str, ...] = ()
+    scenario_family: str = ""
+    expected_events: tuple[str, ...] = ()
+    requires_core1_handoff: bool = False
+    core1_handoff_enabled: bool = False
 
     @property
     def operator_trace(self) -> str:
@@ -220,6 +229,10 @@ class MutationSummary:
     @property
     def section_trace(self) -> str:
         return ";".join(self.sections)
+
+    @property
+    def expected_event_trace(self) -> str:
+        return ";".join(self.expected_events)
 
 
 @dataclass(frozen=True)
@@ -685,7 +698,7 @@ def mutate_interrupt_plan(events: list[bytearray], rng: random.Random) -> str:
     return f"interrupt.{operator}"
 
 
-def mutate_sfuz(
+def mutate_sfuz_legacy(
     parent: Path,
     output: Path,
     rng: random.Random,
@@ -727,6 +740,56 @@ def mutate_sfuz(
     )
     write_sfuz_seed(output, mutated)
     return summary
+
+
+def mutate_sfuz(
+    parent: Path,
+    output: Path,
+    rng: random.Random,
+    budget: int,
+    sections: str | tuple[str, ...] | list[str] | None = None,
+    *,
+    focus_group: str = "",
+    seed_ir_targets: str = "",
+    semantic: bool = True,
+    core1_handoff_enabled: bool = False,
+    mutation_index: int = 0,
+) -> MutationSummary:
+    if not semantic:
+        return mutate_sfuz_legacy(parent, output, rng, budget, sections)
+
+    mutation_budget = normalized_mutation_budget(budget)
+    operators: list[str] = []
+    scenario = None
+    for step in range(mutation_budget):
+        operator = choose_semantic_operator(
+            focus_group,
+            seed_ir_targets,
+            rng=rng,
+            core1_handoff_enabled=core1_handoff_enabled,
+        )
+        scenario = scenario_from_operator(
+            operator,
+            variant=(mutation_index * 17) + step,
+            rng=rng,
+            core1_handoff_enabled=core1_handoff_enabled,
+        )
+        operators.append(f"semantic.{operator}")
+
+    if scenario is None:
+        raise ValueError("semantic SFuzz mutation failed to generate a scenario")
+
+    write_scenario_artifacts(output, scenario)
+    sections_trace = tuple(f"scenario:{scenario.scenario_family}" for _ in operators)
+    return MutationSummary(
+        mutation_budget,
+        tuple(operators),
+        sections_trace,
+        scenario_family=scenario.scenario_family,
+        expected_events=scenario.expected_micro_events,
+        requires_core1_handoff=scenario.requires_core1_handoff,
+        core1_handoff_enabled=scenario.core1_handoff_enabled,
+    )
 
 
 def command_cycle_markers(command_log: str) -> tuple[bool, bool]:
@@ -937,7 +1000,8 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
             entry.innovation_enabled = False
         else:
             scheduler_policy = getattr(args, "scheduler_policy", WEIGHTED_SCHEDULER_POLICY)
-            scheduled = select_parent(corpus, rng, scheduler_policy, mutation_counter, group_deficits)
+            scheduling_deficits = {} if getattr(args, "disable_scenario_aware_scheduling", False) else group_deficits
+            scheduled = select_parent(corpus, rng, scheduler_policy, mutation_counter, scheduling_deficits)
             parent = scheduled.entry
             mutation_counter += 1
             mutated_path = generated_dir / f"sfuzz-mut-{mutation_counter:04d}.sfuz"
@@ -952,10 +1016,17 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
                 rng,
                 parent.energy,
                 mutation_sections,
+                focus_group="" if getattr(args, "disable_scenario_aware_scheduling", False) else scheduled.focus_group,
+                seed_ir_targets="" if getattr(args, "disable_scenario_aware_scheduling", False) else parent.seed_ir_targets,
+                semantic=not getattr(args, "disable_semantic_mutation", False),
+                core1_handoff_enabled=getattr(args, "enable_core1_handoff", False),
+                mutation_index=mutation_counter,
             )
             seed_name = read_seed_metadata_name(mutated_path)
             ir_targets, event_plan = infer_entry_ir_fields(mutated_path)
             scheduler_family = "baseline" if scheduled.policy == BASELINE_SCHEDULER_POLICY else "innovation"
+            if mutation.scenario_family:
+                event_plan = ";".join(item for item in [event_plan, mutation.expected_event_trace] if item)
             entry = CorpusEntry(
                 corpus_id=next_corpus_id,
                 path=mutated_path,
@@ -972,8 +1043,8 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
                 mutation_operators=mutation.operator_trace,
                 mutation_sections=mutation.section_trace,
                 scheduler_policy=scheduled.policy,
-                scheduler_family=scheduler_family,
-                innovation_enabled=scheduler_family == "innovation",
+                scheduler_family=f"{scheduler_family}:{mutation.scenario_family}" if mutation.scenario_family else scheduler_family,
+                innovation_enabled=scheduler_family == "innovation" and not getattr(args, "disable_semantic_mutation", False),
                 scheduler_corpus_index=scheduled.corpus_index,
                 scheduler_weight=scheduled.weight,
                 scheduler_total_weight=scheduled.total_weight,
@@ -997,8 +1068,11 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
             if entry not in corpus:
                 corpus.append(entry)
         notes = (
-            "online SFuzz loop; seed micro-IR plus coverage group deficits drive corpus retention, mutation energy, "
-            "group-weighted parent selection, and event-plan-aware mutation sections; "
+            "online SFuzz loop; SFUZZ.native group deficits drive corpus retention and parent selection; "
+            f"semantic_mutation={not getattr(args, 'disable_semantic_mutation', False)}; "
+            f"scenario_aware_scheduling={not getattr(args, 'disable_scenario_aware_scheduling', False)}; "
+            f"core1_handoff_enabled={getattr(args, 'enable_core1_handoff', False)}; "
+            "two-core AMO/fence/coherence scenarios are tagged fallback until LinkNan core1 handoff is enabled; "
             "use --batch-replay only for legacy fixed manifest replay"
         )
         rows.append(
@@ -1031,6 +1105,9 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
             "mode": "batch_replay" if getattr(args, "batch_replay", False) else "online",
             "scheduler_policy": getattr(args, "scheduler_policy", WEIGHTED_SCHEDULER_POLICY),
             "mutation_sections": getattr(args, "mutation_sections", "core0,core1,shared,interrupt"),
+            "semantic_mutation": not getattr(args, "disable_semantic_mutation", False),
+            "scenario_aware_scheduling": not getattr(args, "disable_scenario_aware_scheduling", False),
+            "core1_handoff_enabled": getattr(args, "enable_core1_handoff", False),
             "coverage_bitmap_semantics": SFUZZ_COVERAGE_BITMAP_SEMANTICS,
             "coverage_group_deficits": group_trace(group_deficits),
             "baseline_policy": BASELINE_SCHEDULER_POLICY,

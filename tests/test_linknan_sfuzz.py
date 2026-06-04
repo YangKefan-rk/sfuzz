@@ -158,7 +158,7 @@ class SfuzzMutationTests(unittest.TestCase):
                 ),
             )
 
-            summary = mutate_sfuz(parent, output, random.Random(3), 2)
+            summary = mutate_sfuz(parent, output, random.Random(3), 2, semantic=False)
             mutated = read_sfuz_seed(output)
 
         self.assertEqual(summary.budget, 2)
@@ -187,7 +187,7 @@ class SfuzzMutationTests(unittest.TestCase):
                 ),
             )
 
-            summary = mutate_sfuz(parent, output, random.Random(11), 8, "core1,shared,interrupt")
+            summary = mutate_sfuz(parent, output, random.Random(11), 8, "core1,shared,interrupt", semantic=False)
             mutated = read_sfuz_seed(output)
 
         self.assertEqual(summary.budget, 8)
@@ -197,6 +197,44 @@ class SfuzzMutationTests(unittest.TestCase):
         self.assertTrue(mutated.core1_prog or mutated.shared_mem_init or mutated.interrupt_plan_raw)
         for event in mutated.interrupt_plan_raw:
             self.assertEqual(len(event), 24)
+
+    def test_mutate_sfuz_default_uses_semantic_scenario_operator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent = root / "parent.sfuz"
+            output = root / "mutated.sfuz"
+            write_sfuz_seed(
+                parent,
+                SfuzSeed(
+                    core0_prog=DEFAULT_CORE0_PROG,
+                    core1_prog=b"",
+                    shared_mem_init=[],
+                    interrupt_plan_raw=[],
+                    name="seed-semantic",
+                    description="fixture",
+                    tags=["fixture"],
+                ),
+            )
+
+            summary = mutate_sfuz(
+                parent,
+                output,
+                random.Random(2),
+                3,
+                focus_group="sfuzz_atomic",
+                seed_ir_targets="sfuzz_atomic:8",
+                mutation_index=7,
+            )
+            mutated = read_sfuz_seed(output)
+            sidecar_seen = output.with_suffix(".scenario.json").is_file()
+
+        self.assertEqual(summary.budget, 3)
+        self.assertTrue(all(operator.startswith("semantic.") for operator in summary.operators))
+        self.assertTrue(summary.scenario_family)
+        self.assertTrue(summary.expected_events)
+        self.assertIn("sfuzz-scenario", mutated.tags)
+        self.assertTrue(sidecar_seen)
+        self.assertTrue(any(tag.startswith("target:sfuzz_") for tag in mutated.tags))
 
     def test_normalize_mutation_sections_accepts_all_and_deduplicates(self) -> None:
         self.assertEqual(normalize_mutation_sections(None), ("core0",))

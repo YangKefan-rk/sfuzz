@@ -115,6 +115,21 @@ def main() -> int:
         default="core0,core1,shared,interrupt",
         help="comma-separated SFUZ sections to mutate: core0,core1,shared,interrupt,all",
     )
+    sfuzz.add_argument(
+        "--disable-semantic-mutation",
+        action="store_true",
+        help="ablation: use legacy byte/section mutation instead of SFuzz semantic scenario mutation",
+    )
+    sfuzz.add_argument(
+        "--disable-scenario-aware-scheduling",
+        action="store_true",
+        help="ablation: ignore SFUZZ.native group deficits when selecting semantic operators",
+    )
+    sfuzz.add_argument(
+        "--enable-core1-handoff",
+        action="store_true",
+        help="mark generated two-core scenarios as formal results only after LinkNan core1 execution handoff is enabled",
+    )
     sfuzz.set_defaults(case_prefix="sfuzz", handler=run_sfuzz)
 
     rfuzz = subparsers.add_parser(
