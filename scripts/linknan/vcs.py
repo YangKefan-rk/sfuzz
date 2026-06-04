@@ -213,6 +213,22 @@ def simv_cmd_file(sim_dir: Path) -> Path:
     return sim_dir / "simv" / "comp" / "vcs_cmd.sh"
 
 
+def simv_compile_command_text(sim_dir: Path) -> str:
+    cmd_file = simv_cmd_file(sim_dir)
+    text = cmd_file.read_text(encoding="utf-8", errors="replace") if cmd_file.is_file() else ""
+    csrc_file = sim_dir / "simv" / "comp" / "csrc.f"
+    if csrc_file.is_file():
+        text += "\n" + csrc_file.read_text(encoding="utf-8", errors="replace")
+    return text
+
+
+def simv_compiled_without_difftest(sim_dir: Path) -> bool | None:
+    cmd_file = simv_cmd_file(sim_dir)
+    if not cmd_file.is_file():
+        return None
+    return "-DCONFIG_NO_DIFFTEST" in simv_compile_command_text(sim_dir)
+
+
 def requested_firrtl_groups(firrtl_cov: str) -> set[str]:
     normalized = normalize_firrtl_coverage_name(firrtl_cov).lower()
     if normalized in {"firrtl", "firrtl.all", "firrtl.common", "firrtl.sfuzz.firrtl.common.v0"}:
@@ -343,13 +359,9 @@ def firrtl_artifacts_are_not_newer_than_simv(build_dir: Path, simv: Path) -> boo
 
 
 def simv_compiled_with_firrtl_coverage(sim_dir: Path, build_dir: Path | None = None, firrtl_cov: str = "") -> bool | None:
-    cmd_file = simv_cmd_file(sim_dir)
-    if not cmd_file.is_file():
+    if not simv_cmd_file(sim_dir).is_file():
         return None
-    text = cmd_file.read_text(encoding="utf-8", errors="replace")
-    csrc_file = sim_dir / "simv" / "comp" / "csrc.f"
-    if csrc_file.is_file():
-        text += "\n" + csrc_file.read_text(encoding="utf-8", errors="replace")
+    text = simv_compile_command_text(sim_dir)
     if "-DFIRRTL_COVER" not in text or "sfuzz_firrtl_cov_export.cpp" not in text:
         return False
 
@@ -513,17 +525,25 @@ def build_simv_if_needed(args: Any, ctx: VcsContext, work_dir: Path) -> None:
     firrtl_cov = requested_firrtl_coverage(args)
     if getattr(args, "skip_build", False):
         require_file(simv)
+        if not ctx.build_no_diff and simv_compiled_without_difftest(ctx.sim_dir) is True:
+            raise RuntimeError(
+                "existing simv was built with CONFIG_NO_DIFFTEST, which disables the LinkNan trap/commit ABI "
+                "needed for natural XSTrap termination; rebuild without xmake simv --no_diff "
+                "or set VCS_BUILD_NO_DIFF=1 when intentionally accepting timeout-only sampling"
+            )
         if firrtl_cov and simv_compiled_with_firrtl_coverage(ctx.sim_dir, ctx.build_dir, firrtl_cov) is not True:
             raise RuntimeError(
                 f"existing simv was not built with SFuzz FIRRTL coverage; rebuild with {SFUZZ_FIRRTL_COV_ENV}={firrtl_cov}"
             )
         return
     needs_firrtl_rebuild = firrtl_cov and simv_compiled_with_firrtl_coverage(ctx.sim_dir, ctx.build_dir, firrtl_cov) is not True
+    needs_difftest_rebuild = not ctx.build_no_diff and simv_compiled_without_difftest(ctx.sim_dir) is True
     if (
         simv.is_file()
         and not getattr(args, "build", False)
         and not getattr(args, "rebuild_comp", False)
         and not needs_firrtl_rebuild
+        and not needs_difftest_rebuild
     ):
         return
     if shutil.which("xmake") is None:
@@ -541,7 +561,7 @@ def build_simv_if_needed(args: Any, ctx: VcsContext, work_dir: Path) -> None:
         f"--sim_dir={ctx.sim_dir}",
         f"--build_dir={ctx.build_dir}",
     ]
-    if ctx.no_diff:
+    if ctx.build_no_diff:
         command.append("--no_diff")
     if ctx.no_fsdb:
         command.append("--no_fsdb")

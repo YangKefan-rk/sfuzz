@@ -48,7 +48,11 @@ from linknan.sfuzz_scenarios import (  # noqa: E402
     write_scenario_artifacts,
 )
 from linknan.vcs import CoverageResult  # noqa: E402
-from linknan.vcs import normalize_firrtl_coverage_name, requested_firrtl_groups  # noqa: E402
+from linknan.vcs import (  # noqa: E402
+    normalize_firrtl_coverage_name,
+    requested_firrtl_groups,
+    simv_compiled_without_difftest,
+)
 
 
 class FixedTicketRng:
@@ -313,6 +317,7 @@ class SfuzzScenarioTests(unittest.TestCase):
                 seed = read_sfuz_seed(output)
 
                 self.assertGreaterEqual(len(seed.core0_prog), 8)
+                self.assertEqual(int.from_bytes(seed.core0_prog[-4:], "little"), 0x0005006B)
                 self.assertIn("sfuzz-scenario", seed.tags)
                 self.assertIn(f"scenario:{family}", seed.tags)
                 self.assertTrue(scenario.expected_micro_events)
@@ -332,6 +337,18 @@ class SfuzzScenarioTests(unittest.TestCase):
         self.assertTrue(any(word & 0x7F == 0x0F for word in (int.from_bytes(fence_seed.core0_prog[i:i+4], "little") for i in range(0, len(fence_seed.core0_prog), 4))))
         self.assertIn("amo_fire", amo.expected_micro_events)
         self.assertIn("fence_fire", fence.expected_micro_events)
+
+    def test_scenarios_end_with_linknan_good_trap_not_plain_ebreak(self) -> None:
+        scenario = generate_scenario("memory_alias", variant=0, rng=random.Random(0))
+        seed = seed_from_scenario(scenario)
+        words = [
+            int.from_bytes(seed.core0_prog[i : i + 4], "little")
+            for i in range(0, len(seed.core0_prog), 4)
+        ]
+
+        self.assertEqual(words[-2], 0x00000513)
+        self.assertEqual(words[-1], 0x0005006B)
+        self.assertNotEqual(words[-1], 0x00100073)
 
     def test_multicore_scenarios_are_marked_fallback_without_core1_handoff(self) -> None:
         scenario = scenario_from_operator("insert_multicore_pingpong", variant=1, rng=random.Random(1))
@@ -453,6 +470,19 @@ class SfuzzCoverageTests(unittest.TestCase):
         self.assertEqual(first_acc, {"sfuzz_atomic": 2, "sfuzz_fence": 1})
         self.assertEqual(second_new, {"sfuzz_atomic": 1, "sfuzz_fence": 1})
         self.assertEqual(second_acc, {"sfuzz_atomic": 3, "sfuzz_fence": 2})
+
+    def test_simv_no_diff_compile_detection_guards_trap_abi(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            comp = root / "simv" / "comp"
+            comp.mkdir(parents=True)
+            (comp / "vcs_cmd.sh").write_text("vcs -CFLAGS \"-DCONFIG_NO_DIFFTEST -DFIRRTL_COVER\"\n")
+
+            self.assertTrue(simv_compiled_without_difftest(root))
+
+            (comp / "vcs_cmd.sh").write_text("vcs -CFLAGS \"-DFIRRTL_COVER\"\n")
+
+            self.assertFalse(simv_compiled_without_difftest(root))
 
 
 class SfuzzSchedulerTests(unittest.TestCase):

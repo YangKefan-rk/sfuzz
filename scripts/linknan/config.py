@@ -21,6 +21,7 @@ class VcsContext:
     sim_dir: Path
     cycles: int | None
     num_cores: str
+    build_no_diff: bool
     no_diff: bool
     no_fsdb: bool
     no_xprop: bool
@@ -136,6 +137,7 @@ def context_from_config(args: Any) -> VcsContext:
         sim_dir=sim_dir,
         cycles=cycles,
         num_cores=num_cores,
+        build_no_diff=bool_value(os.environ.get("VCS_BUILD_NO_DIFF", cfg(config, "vcs", "build_no_diff", False))),
         no_diff=bool_value(os.environ.get("VCS_NO_DIFF", cfg(config, "vcs", "no_diff", True))),
         no_fsdb=bool_value(os.environ.get("VCS_NO_FSDB", cfg(config, "vcs", "no_fsdb", True))),
         no_xprop=bool_value(os.environ.get("VCS_NO_XPROP", cfg(config, "vcs", "no_xprop", True))),

@@ -302,6 +302,10 @@ def ebreak(role: str = "end") -> EncodedInstruction:
     return inst("ebreak", 0x00100073, role)
 
 
+def xstrap_good(role: str = "end") -> EncodedInstruction:
+    return inst(".word 0x0005006b # xiangshan good trap", 0x0005006B, role)
+
+
 def amoadd_d(rd: int, rs1: int, rs2: int, aq: bool = True, rl: bool = True, role: str = "amo") -> EncodedInstruction:
     return inst(f"amoadd.d{' .aqrl' if aq and rl else ''} x{rd}, x{rs2}, (x{rs1})", amo_type(rd, rs1, rs2, 0x00, aq, rl), role)
 
@@ -349,7 +353,7 @@ def _shared_region(name: str, base: int, size: int) -> SharedRegion:
 
 
 def _finish(seq: list[EncodedInstruction]) -> None:
-    seq.extend([addi(31, 31, 1, "depth"), ebreak()])
+    seq.extend([addi(31, 31, 1, "depth"), addi(10, 0, 0, "good_trap_code"), xstrap_good()])
 
 
 def _block(core: int, label: str, seq: Iterable[EncodedInstruction]) -> InstructionBlock:

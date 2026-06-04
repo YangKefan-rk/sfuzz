@@ -29,6 +29,7 @@ default = "llvm.branch"
 [vcs]
 num_cores = 1
 cycles = 2000
+build_no_diff = false
 no_diff = true
 no_fsdb = true
 no_xprop = true
