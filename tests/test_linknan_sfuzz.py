@@ -22,6 +22,8 @@ from linknan.methods.sfuzz import (  # noqa: E402
     coverage_group_delta,
     accumulated_covered,
     coverage_group_deficits,
+    hard_target_focus_group,
+    infer_seed_semantic_fields,
     mutate_core0_program,
     mutate_sfuz,
     mutation_operator_selection_pool,
@@ -264,6 +266,18 @@ class SfuzzMutationTests(unittest.TestCase):
         self.assertIn("sfuzz-scenario", mutated.tags)
         self.assertTrue(sidecar_seen)
         self.assertTrue(any(tag.startswith("target:sfuzz_") for tag in mutated.tags))
+
+    def test_infer_seed_semantic_fields_reads_scenario_tags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "scenario.sfuz"
+            scenario = scenario_from_operator("insert_amo_sequence", variant=1, rng=random.Random(1))
+            write_scenario_artifacts(path, scenario)
+
+            operator_trace, section_trace, scheduler_family = infer_seed_semantic_fields(path)
+
+        self.assertEqual(operator_trace, "semantic.insert_amo_sequence")
+        self.assertEqual(section_trace, "scenario:amo_contention")
+        self.assertEqual(scheduler_family, "initial:amo_contention")
 
     def test_normalize_mutation_sections_accepts_all_and_deduplicates(self) -> None:
         self.assertEqual(normalize_mutation_sections(None), ("core0",))
@@ -551,6 +565,15 @@ class SfuzzSchedulerTests(unittest.TestCase):
         self.assertEqual(selected.policy, "semantic_bandit")
         self.assertEqual(selected.focus_group, "sfuzz_atomic")
         self.assertTrue(selected.bucket.startswith("hard-target:"))
+
+    def test_hard_target_focus_can_disable_coherence_without_core1_handoff(self) -> None:
+        runtime = SchedulerRuntime()
+        deficits = {"sfuzz_coherence": 1000, "sfuzz_atomic": 8}
+
+        focus, deficit = hard_target_focus_group(deficits, runtime, ("sfuzz_atomic", "sfuzz_fence"))
+
+        self.assertEqual(focus, "sfuzz_atomic")
+        self.assertEqual(deficit, 8)
 
     def test_runtime_feedback_tracks_operator_family_and_first_hit(self) -> None:
         entry = CorpusEntry(
