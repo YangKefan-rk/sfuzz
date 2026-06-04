@@ -315,9 +315,14 @@ class SfuzzScenarioTests(unittest.TestCase):
 
                 write_scenario_artifacts(output, scenario)
                 seed = read_sfuz_seed(output)
+                words = [
+                    int.from_bytes(seed.core0_prog[i : i + 4], "little")
+                    for i in range(0, len(seed.core0_prog), 4)
+                ]
 
                 self.assertGreaterEqual(len(seed.core0_prog), 8)
-                self.assertEqual(int.from_bytes(seed.core0_prog[-4:], "little"), 0x0005006B)
+                self.assertIn(0x0005006B, words)
+                self.assertNotIn(0x00100073, words)
                 self.assertIn("sfuzz-scenario", seed.tags)
                 self.assertIn(f"scenario:{family}", seed.tags)
                 self.assertTrue(scenario.expected_micro_events)
@@ -349,6 +354,19 @@ class SfuzzScenarioTests(unittest.TestCase):
         self.assertEqual(words[-2], 0x00000513)
         self.assertEqual(words[-1], 0x0005006B)
         self.assertNotEqual(words[-1], 0x00100073)
+
+    def test_exception_scenario_has_bounded_handler_after_good_trap_path(self) -> None:
+        scenario = scenario_from_operator("insert_exception_near_memory", variant=0, rng=random.Random(0))
+        seed = seed_from_scenario(scenario)
+        words = [
+            int.from_bytes(seed.core0_prog[i : i + 4], "little")
+            for i in range(0, len(seed.core0_prog), 4)
+        ]
+
+        self.assertIn(0x00000073, words)  # ecall
+        self.assertIn(0x0005006B, words)
+        self.assertEqual(words[-1], 0x30200073)  # mret
+        self.assertLess(words.index(0x0005006B), len(words) - 1)
 
     def test_multicore_scenarios_are_marked_fallback_without_core1_handoff(self) -> None:
         scenario = scenario_from_operator("insert_multicore_pingpong", variant=1, rng=random.Random(1))

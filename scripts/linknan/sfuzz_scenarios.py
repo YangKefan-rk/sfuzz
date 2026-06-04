@@ -14,6 +14,7 @@ from .seeds import SfuzSeed, write_sfuz_seed
 PMEM_BASE = 0x80000000
 DEFAULT_SHARED_BASE = PMEM_BASE + 0x4000
 DEFAULT_CACHELINE_BYTES = 64
+EXCEPTION_HANDLER_OFFSET = 0x100
 
 SCENARIO_FAMILIES = (
     "memory_alias",
@@ -253,6 +254,10 @@ def inst(asm: str, word: int, role: str = "") -> EncodedInstruction:
     return EncodedInstruction(asm, word & 0xFFFFFFFF, role)
 
 
+def nop(role: str = "pad") -> EncodedInstruction:
+    return addi(0, 0, 0, role)
+
+
 def addi(rd: int, rs1: int, imm: int, role: str = "") -> EncodedInstruction:
     return inst(f"addi x{rd}, x{rs1}, {imm}", i_type(0x13, rd, 0, rs1, imm), role)
 
@@ -292,6 +297,20 @@ def fence_rw_rw(role: str = "fence") -> EncodedInstruction:
 
 def sfence_vma(role: str = "mmu") -> EncodedInstruction:
     return inst("sfence.vma x0, x0", 0x12000073, role)
+
+
+def csrr(rd: int, csr: int, role: str = "csr") -> EncodedInstruction:
+    word = ((csr & 0xFFF) << 20) | (0 << 15) | (0x2 << 12) | ((rd & 0x1F) << 7) | 0x73
+    return inst(f"csrr x{rd}, 0x{csr:x}", word, role)
+
+
+def csrw(csr: int, rs1: int, role: str = "csr") -> EncodedInstruction:
+    word = ((csr & 0xFFF) << 20) | ((rs1 & 0x1F) << 15) | (0x1 << 12) | 0x73
+    return inst(f"csrw 0x{csr:x}, x{rs1}", word, role)
+
+
+def mret(role: str = "exception_return") -> EncodedInstruction:
+    return inst("mret", 0x30200073, role)
 
 
 def ecall(role: str = "exception") -> EncodedInstruction:
@@ -354,6 +373,21 @@ def _shared_region(name: str, base: int, size: int) -> SharedRegion:
 
 def _finish(seq: list[EncodedInstruction]) -> None:
     seq.extend([addi(31, 31, 1, "depth"), addi(10, 0, 0, "good_trap_code"), xstrap_good()])
+
+
+def _append_exception_handler(seq: list[EncodedInstruction]) -> None:
+    while len(seq) * 4 < EXCEPTION_HANDLER_OFFSET:
+        seq.append(nop())
+    if len(seq) * 4 != EXCEPTION_HANDLER_OFFSET:
+        raise ValueError("exception handler offset overlaps the generated scenario body")
+    seq.extend(
+        [
+            csrr(29, 0x341, "exception_handler"),  # mepc
+            addi(29, 29, 4, "exception_handler"),
+            csrw(0x341, 29, "exception_handler"),
+            mret(),
+        ]
+    )
 
 
 def _block(core: int, label: str, seq: Iterable[EncodedInstruction]) -> InstructionBlock:
@@ -424,6 +458,7 @@ def generate_scenario(
     core1: list[EncodedInstruction] = []
     requires_core1 = False
     sync: tuple[str, ...] = ()
+    needs_exception_handler = False
 
     if family == "memory_alias":
         core0.extend([sd(6, 5, 0), ld(8, 5, 0), sd(8, 5, alias_offset), ld(9, 5, alias_offset)])
@@ -493,7 +528,11 @@ def generate_scenario(
         target_groups = ("sfuzz_branch", "sfuzz_lsq", "sfuzz_frontend")
         expected = ("branch_redirect", "redirect_from_branch", "ibuffer_flush", "load_replay")
     elif family == "exception_during_memory":
+        handler_addr = PMEM_BASE + EXCEPTION_HANDLER_OFFSET
+        core0.extend(li_pmem_addr(28, handler_addr, "exception_handler_addr"))
+        core0.append(csrw(0x305, 28, "exception_setup"))  # mtvec
         core0.extend([sd(6, 5, 0), ld(8, 5, 0), ecall(), ld(9, 5, 8)])
+        needs_exception_handler = True
         target_groups = ("sfuzz_exception", "sfuzz_lsq", "sfuzz_rob")
         expected = ("trap_enter", "redirect_from_exception", "rob_commit_valid")
     elif family == "tlb_refill_memory":
@@ -512,13 +551,15 @@ def generate_scenario(
     elif family == "queue_backpressure":
         for offset in range(0, 96, 8):
             core0.extend([sd(6, 5, offset), ld(8, 5, offset)])
-        core0.extend([fence_rw_rw(), bne(6, 7, -8)])
+        core0.extend([fence_rw_rw(), addi(6, 6, 1, "bounded_loop"), bne(6, 7, -4)])
         target_groups = ("sfuzz_resource", "sfuzz_rob", "sfuzz_lsq")
         expected = ("fence_wait", "store_replay", "load_replay", "rob_commit_valid")
     else:
         raise AssertionError(f"unhandled family {family}")
 
     _finish(core0)
+    if needs_exception_handler:
+        _append_exception_handler(core0)
     return _scenario(
         family=family,
         operator=op,
