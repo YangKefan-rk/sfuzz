@@ -230,6 +230,7 @@ class SfuzzMutationTests(unittest.TestCase):
 
         self.assertEqual(summary.budget, 3)
         self.assertTrue(all(operator.startswith("semantic.") for operator in summary.operators))
+        self.assertEqual(len(summary.operators), 1)
         self.assertTrue(summary.scenario_family)
         self.assertTrue(summary.expected_events)
         self.assertIn("sfuzz-scenario", mutated.tags)

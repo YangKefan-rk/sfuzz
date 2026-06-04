@@ -759,32 +759,24 @@ def mutate_sfuz(
         return mutate_sfuz_legacy(parent, output, rng, budget, sections)
 
     mutation_budget = normalized_mutation_budget(budget)
-    operators: list[str] = []
-    scenario = None
-    for step in range(mutation_budget):
-        operator = choose_semantic_operator(
-            focus_group,
-            seed_ir_targets,
-            rng=rng,
-            core1_handoff_enabled=core1_handoff_enabled,
-        )
-        scenario = scenario_from_operator(
-            operator,
-            variant=(mutation_index * 17) + step,
-            rng=rng,
-            core1_handoff_enabled=core1_handoff_enabled,
-        )
-        operators.append(f"semantic.{operator}")
-
-    if scenario is None:
-        raise ValueError("semantic SFuzz mutation failed to generate a scenario")
+    operator = choose_semantic_operator(
+        focus_group,
+        seed_ir_targets,
+        rng=rng,
+        core1_handoff_enabled=core1_handoff_enabled,
+    )
+    scenario = scenario_from_operator(
+        operator,
+        variant=(mutation_index * 17) + rng.randrange(997),
+        rng=rng,
+        core1_handoff_enabled=core1_handoff_enabled,
+    )
 
     write_scenario_artifacts(output, scenario)
-    sections_trace = tuple(f"scenario:{scenario.scenario_family}" for _ in operators)
     return MutationSummary(
         mutation_budget,
-        tuple(operators),
-        sections_trace,
+        (f"semantic.{operator}",),
+        (f"scenario:{scenario.scenario_family}",),
         scenario_family=scenario.scenario_family,
         expected_events=scenario.expected_micro_events,
         requires_core1_handoff=scenario.requires_core1_handoff,
