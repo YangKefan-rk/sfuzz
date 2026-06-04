@@ -426,6 +426,12 @@ def main() -> int:
         help="maximum candidate ancestor signals sampled per target; 0 means all candidates",
     )
     surge_profile.add_argument(
+        "--profile-min-scope-candidates",
+        type=int,
+        default=64,
+        help="extend weak distance-only target scopes with related control/register candidates up to this count; 0 disables",
+    )
+    surge_profile.add_argument(
         "--profile-chunk-bits",
         type=int,
         default=64,

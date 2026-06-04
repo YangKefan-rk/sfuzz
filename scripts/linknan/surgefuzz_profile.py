@@ -14,6 +14,7 @@ from .surgefuzz_ancestors import (
     AncestorCandidate,
     normalized_mutual_information,
     select_ancestor_names,
+    signal_name_for_profile,
     target_distance_candidates,
 )
 from .surgefuzz_targets import SurgeTarget, load_target_manifest
@@ -209,6 +210,96 @@ def read_profile_pairs(path: Path, rhs: str) -> dict[str, tuple[list[int], list[
     return pairs
 
 
+def profile_candidate_quality(candidates: list[AncestorCandidate], profile_csv: Path) -> dict[str, object]:
+    if not profile_csv.is_file():
+        return {
+            "profile_csv": str(profile_csv),
+            "profile_exists": False,
+            "profile_row_count": 0,
+            "candidate_count": len(candidates),
+            "profiled_candidate_count": 0,
+            "varying_candidate_count": 0,
+            "target_sample_count": 0,
+            "target_distinct_values": 0,
+            "nmi": {},
+        }
+
+    pairs = read_profile_pairs(profile_csv, "coverage_target")
+    profile_row_count = 0
+    target_values: list[int] = []
+    with profile_csv.open(newline="", encoding="utf-8") as input_file:
+        reader = csv.DictReader(input_file)
+        for row in reader:
+            profile_row_count += 1
+            raw = row.get("coverage_target")
+            if raw in {None, ""}:
+                continue
+            try:
+                target_values.append(int(raw, 0))
+            except ValueError:
+                continue
+
+    profiled = 0
+    varying = 0
+    missing = 0
+    constant = 0
+    nmi_values: list[float] = []
+    zero_nmi = 0
+    high_nmi = 0
+    samples_by_candidate: dict[str, int] = {}
+    for candidate in candidates:
+        name = signal_name_for_profile(candidate.name)
+        candidate_samples, target_samples = pairs.get(name, ([], []))
+        samples_by_candidate[candidate.name] = len(candidate_samples)
+        if not candidate_samples or not target_samples:
+            missing += 1
+            continue
+        profiled += 1
+        if len(set(candidate_samples)) <= 1:
+            constant += 1
+            continue
+        varying += 1
+        nmi = normalized_mutual_information(candidate_samples, target_samples)
+        nmi_values.append(nmi)
+        if nmi == 0.0:
+            zero_nmi += 1
+        if nmi > 0.85:
+            high_nmi += 1
+
+    nmi_values.sort()
+
+    def percentile(values: list[float], fraction: float) -> float:
+        if not values:
+            return 0.0
+        index = min(len(values) - 1, max(0, int(round((len(values) - 1) * fraction))))
+        return values[index]
+
+    return {
+        "profile_csv": str(profile_csv),
+        "profile_exists": True,
+        "profile_row_count": profile_row_count,
+        "candidate_count": len(candidates),
+        "profiled_candidate_count": profiled,
+        "missing_profile_candidate_count": missing,
+        "varying_candidate_count": varying,
+        "constant_candidate_count": constant,
+        "target_sample_count": len(target_values),
+        "target_distinct_values": len(set(target_values)),
+        "nmi": {
+            "count": len(nmi_values),
+            "min": round(nmi_values[0], 9) if nmi_values else 0.0,
+            "p25": round(percentile(nmi_values, 0.25), 9),
+            "median": round(percentile(nmi_values, 0.50), 9),
+            "p75": round(percentile(nmi_values, 0.75), 9),
+            "max": round(nmi_values[-1], 9) if nmi_values else 0.0,
+            "zero_count": zero_nmi,
+            "high_gt_0_85_count": high_nmi,
+        },
+        "sample_count_min": min(samples_by_candidate.values(), default=0),
+        "sample_count_max": max(samples_by_candidate.values(), default=0),
+    }
+
+
 def write_nmi_report(path: Path, candidates: list[AncestorCandidate], profile_csv: Path, selected: list[str]) -> None:
     selected_bases = {item.split("[", 1)[0] for item in selected}
     pairs = read_profile_pairs(profile_csv, "coverage_target")
@@ -354,18 +445,19 @@ def select_targets_for_profile(args: Any) -> list[SurgeTarget]:
     return [by_id[target_id] for target_id in ids]
 
 
-def build_target_candidates(ctx: VcsContext, target: SurgeTarget) -> list[AncestorCandidate]:
+def build_target_candidates(ctx: VcsContext, target: SurgeTarget, *, min_scope_candidates: int = 0) -> list[AncestorCandidate]:
     modules = parse_rtl_modules(ctx.build_dir / "rtl")
     module = modules.get(target.module)
     if module is None:
         raise ValueError(f"target module {target.module!r} was not found in {ctx.build_dir / 'rtl'}")
-    return target_distance_candidates(module, target.signal)
+    return target_distance_candidates(module, target.signal, min_scope_candidates=min_scope_candidates)
 
 
 def run_profile_for_target(args: Any, ctx: VcsContext, target: SurgeTarget) -> TargetSelection:
     target_dir = args.work_dir.expanduser().resolve() / "profile" / target.id
     target_dir.mkdir(parents=True, exist_ok=True)
-    candidates = build_target_candidates(ctx, target)
+    min_scope_candidates = int(getattr(args, "profile_min_scope_candidates", 64) or 0)
+    candidates = build_target_candidates(ctx, target, min_scope_candidates=min_scope_candidates)
     candidates_csv = target_dir / "candidates.csv"
     write_candidate_csv(candidates_csv, candidates)
 
@@ -427,6 +519,7 @@ def run_profile_for_target(args: Any, ctx: VcsContext, target: SurgeTarget) -> T
 
     profile_csv = target_dir / "dependents.csv"
     merge_profile_rows(profile_csv, profile_rows)
+    quality = profile_candidate_quality(candidates, profile_csv)
     distance_selected, distance_selection_meta = select_ancestor_names(
         candidates,
         max_bits=int(getattr(args, "max_surgefuzz_ancestor_width", 64) or 64),
@@ -446,6 +539,9 @@ def run_profile_for_target(args: Any, ctx: VcsContext, target: SurgeTarget) -> T
     use_mi = not getattr(args, "profile_no_mi", False) and bool(mi_selection_meta.get("mi_pruning_applied"))
     selected = mi_selected if use_mi else distance_selected
     selection_meta = mi_selection_meta if use_mi else distance_selection_meta
+    for meta_item in (selection_meta, distance_selection_meta, mi_selection_meta):
+        meta_item["profile_quality"] = quality
+        meta_item["profile_min_scope_candidates"] = min_scope_candidates
     selected_csv = target_dir / "selected_ancestors.csv"
     nmi_report_csv = target_dir / "nmi_report.csv"
     meta_json = target_dir / "selection_meta.json"
@@ -455,7 +551,9 @@ def run_profile_for_target(args: Any, ctx: VcsContext, target: SurgeTarget) -> T
         "generated_at": now_iso(),
         "target": target.__dict__,
         "candidate_count": len(candidates),
+        "profile_min_scope_candidates": min_scope_candidates,
         "profile_rows": len(profile_rows),
+        "profile_quality": quality,
         "profile_csv": str(profile_csv),
         "candidates_csv": str(candidates_csv),
         "selected_csv": str(selected_csv),
@@ -515,6 +613,7 @@ def write_rotation_manifest(path: Path, selections: list[TargetSelection]) -> No
                 "mi_selected_ancestors": selection.mi_selected,
                 "mi_pruning_applied": bool(selection.selection_meta.get("mi_pruning_applied")),
                 "nmi_threshold": selection.target.nmi_threshold,
+                "profile_quality": selection.selection_meta.get("profile_quality", {}),
                 "selection_meta": str(selection.meta_json),
             }
             for selection in selections
@@ -537,6 +636,7 @@ def run_surgefuzz_profile(args: Any, ctx: VcsContext) -> int:
             {
                 "id": selection.target.id,
                 "candidate_count": len(selection.candidates),
+                "profile_quality": selection.selection_meta.get("profile_quality", {}),
                 "selected_count": len(selection.selected),
                 "distance_selected_count": len(selection.distance_selected),
                 "mi_selected_count": len(selection.mi_selected),

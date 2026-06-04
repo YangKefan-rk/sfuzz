@@ -22,7 +22,8 @@ from linknan.methods.surgefuzz import (  # noqa: E402
     write_instrumentation_target_config,
 )
 from linknan.surgefuzz_ancestors import AncestorCandidate  # noqa: E402
-from linknan.surgefuzz_profile import write_nmi_report  # noqa: E402
+from linknan.surgefuzz_ancestors import target_distance_candidates  # noqa: E402
+from linknan.surgefuzz_profile import RtlModule, RtlSignal, profile_candidate_quality, write_nmi_report  # noqa: E402
 
 
 class SurgeFuzzTraceTests(unittest.TestCase):
@@ -67,6 +68,49 @@ class SurgeFuzzTraceTests(unittest.TestCase):
 
         self.assertIn("a,1,1,0,1,1,2,", rows[1])
         self.assertIn("b,1,1,0,1,0,2,", rows[2])
+
+    def test_profile_quality_counts_profiled_and_varying_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "profile.csv"
+            profile.write_text(
+                "cycle,coverage_target,a,b,c\n"
+                "0,0,0,7,\n"
+                "1,1,1,7,\n"
+                "2,0,0,7,\n",
+                encoding="utf-8",
+            )
+            candidates = [
+                AncestorCandidate("a", 1, "wire", 1, 0, True, "test"),
+                AncestorCandidate("b", 1, "wire", 1, 0, True, "test"),
+                AncestorCandidate("c", 1, "wire", 1, 0, True, "test"),
+            ]
+
+            quality = profile_candidate_quality(candidates, profile)
+
+        self.assertEqual(quality["candidate_count"], 3)
+        self.assertEqual(quality["profiled_candidate_count"], 2)
+        self.assertEqual(quality["varying_candidate_count"], 1)
+        self.assertEqual(quality["constant_candidate_count"], 1)
+        self.assertEqual(quality["missing_profile_candidate_count"], 1)
+        self.assertEqual(quality["target_distinct_values"], 2)
+
+    def test_target_scope_extends_weak_distance_candidates(self) -> None:
+        module = RtlModule(
+            "MemBlock",
+            "assign target_sig = miss_req_fire;\n",
+            {
+                "target_sig": RtlSignal("target_sig", 1, "wire"),
+                "miss_req_fire": RtlSignal("miss_req_fire", 1, "wire"),
+                "load_miss_replay_valid": RtlSignal("load_miss_replay_valid", 1, "reg"),
+                "unrelated_data": RtlSignal("unrelated_data", 32, "wire"),
+            },
+        )
+
+        candidates = target_distance_candidates(module, "target_sig", min_scope_candidates=3)
+
+        self.assertEqual(candidates[0].name, "miss_req_fire")
+        self.assertIn("load_miss_replay_valid", [candidate.name for candidate in candidates])
+        self.assertNotIn("unrelated_data", [candidate.name for candidate in candidates])
 
 
 class SurgeFuzzRotationTests(unittest.TestCase):

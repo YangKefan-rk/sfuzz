@@ -106,11 +106,72 @@ def is_control_signal(name: str) -> bool:
     )
 
 
+def target_tokens(name: str) -> list[str]:
+    tokens = [token for token in re.split(r"[_$]+", base_name(name).lower()) if len(token) >= 3]
+    return [token for token in tokens if token not in {"info", "monitor", "pipe", "vec", "req"}]
+
+
 def register_depth(direction: str) -> int:
     return 0 if direction in {"input", "output", "wire"} else 1
 
 
-def target_distance_candidates(module: object, target: str) -> list[AncestorCandidate]:
+def target_scope_candidates(
+    module: object,
+    target: str,
+    *,
+    exclude: set[str] | None = None,
+    min_score: int = 1,
+    depth: int = 90,
+) -> list[AncestorCandidate]:
+    signals: dict[str, object] = getattr(module, "signals", {})
+    target_name = base_name(target)
+    tokens = target_tokens(target_name)
+    excluded = set(exclude or ())
+    candidates: list[tuple[int, AncestorCandidate]] = []
+    for name, signal in signals.items():
+        direction = str(getattr(signal, "direction", ""))
+        width = int(getattr(signal, "width", 1))
+        if name == target_name or name in excluded or width <= 0 or direction == "inout":
+            continue
+        lower = name.lower()
+        token_hits = sum(1 for token in tokens if token in lower)
+        control = is_control_signal(name)
+        reg_depth = register_depth(direction)
+        score = token_hits + (2 if control else 0) + (1 if reg_depth > 0 else 0)
+        if score < min_score:
+            continue
+        candidates.append(
+            (
+                -score,
+                AncestorCandidate(
+                    name,
+                    width,
+                    direction,
+                    depth,
+                    reg_depth,
+                    control,
+                    f"target-scope:{target_name}:score={score}:tokens={token_hits}",
+                ),
+            )
+        )
+    return [candidate for _score, candidate in sorted(candidates, key=lambda item: (item[0], item[1].register_depth, item[1].width, item[1].name))]
+
+
+def extend_target_specific_candidates(
+    module: object,
+    target: str,
+    candidates: list[AncestorCandidate],
+    *,
+    min_count: int = 64,
+) -> list[AncestorCandidate]:
+    if len(candidates) >= min_count:
+        return candidates
+    seen = {candidate.name for candidate in candidates}
+    scoped = target_scope_candidates(module, target, exclude=seen, min_score=1)
+    return [*candidates, *scoped[: max(0, min_count - len(candidates))]]
+
+
+def target_distance_candidates(module: object, target: str, *, min_scope_candidates: int = 0) -> list[AncestorCandidate]:
     graph = build_dependency_graph(module)
     signals: dict[str, object] = getattr(module, "signals", {})
     target_name = base_name(target)
@@ -141,29 +202,9 @@ def target_distance_candidates(module: object, target: str) -> list[AncestorCand
                     )
             queue.append((dep, depth + 1))
     if candidates:
-        return candidates
+        return extend_target_specific_candidates(module, target, candidates, min_count=min_scope_candidates) if min_scope_candidates > 0 else candidates
 
-    fallback: list[AncestorCandidate] = []
-    target_words = [word for word in re.split(r"[_$]+", target_name.lower()) if len(word) >= 3]
-    for name, signal in signals.items():
-        direction = str(getattr(signal, "direction", ""))
-        width = int(getattr(signal, "width", 1))
-        if name == target_name or width <= 0 or direction == "inout":
-            continue
-        lower = name.lower()
-        if is_control_signal(name) or any(word in lower for word in target_words):
-            fallback.append(
-                AncestorCandidate(
-                    name,
-                    width,
-                    direction,
-                    99,
-                    register_depth(direction),
-                    is_control_signal(name),
-                    f"fallback-name:{target_name}",
-                )
-            )
-    return fallback
+    return target_scope_candidates(module, target, min_score=1, depth=99)
 
 
 def sort_candidates(candidates: list[AncestorCandidate]) -> list[AncestorCandidate]:
@@ -252,6 +293,7 @@ def select_ancestor_names(
     use_mi = selector in {"distance-nmi", "distance_nmi", "nmi"} and bool(samples)
     selected: list[str] = []
     rejected: list[dict[str, object]] = []
+    selected_records: list[dict[str, object]] = []
     used_bits = 0
     reference_name = target_column if target_column in samples else ""
 
@@ -259,30 +301,58 @@ def select_ancestor_names(
         if used_bits >= max_bits:
             break
         name = signal_name_for_profile(candidate.name)
+        nmi: float | None = None
+        reference_for_candidate = reference_name
         if use_mi:
             candidate_samples = samples.get(name)
-            reference_samples = samples.get(reference_name) if reference_name else None
+            reference_samples = samples.get(reference_for_candidate) if reference_for_candidate else None
             if not candidate_samples:
                 rejected.append({"name": candidate.name, "reason": "missing_profile_samples"})
                 continue
             if reference_samples:
                 if profile_csv is not None:
-                    candidate_samples, reference_samples = paired_profile_samples(profile_csv, name, reference_name)
+                    candidate_samples, reference_samples = paired_profile_samples(profile_csv, name, reference_for_candidate)
                 nmi = normalized_mutual_information(candidate_samples, reference_samples)
                 if nmi > nmi_threshold:
-                    rejected.append({"name": candidate.name, "reason": "nmi", "nmi": round(nmi, 6)})
+                    rejected.append(
+                        {
+                            "name": candidate.name,
+                            "reason": "nmi",
+                            "reference": reference_for_candidate,
+                            "nmi": round(nmi, 6),
+                            "samples": min(len(candidate_samples), len(reference_samples)),
+                        }
+                    )
                     continue
 
         remaining = max_bits - used_bits
+        selected_name = candidate.name
+        selected_width = candidate.width
         if candidate.width <= remaining:
-            selected.append(candidate.name)
+            selected.append(selected_name)
             used_bits += candidate.width
         else:
-            selected.append(f"{candidate.name}[{remaining - 1}:0]" if remaining > 1 else f"{candidate.name}[0]")
+            selected_name = f"{candidate.name}[{remaining - 1}:0]" if remaining > 1 else f"{candidate.name}[0]"
+            selected_width = remaining
+            selected.append(selected_name)
             used_bits += remaining
+        selected_records.append(
+            {
+                "name": selected_name,
+                "base_name": candidate.name,
+                "width": selected_width,
+                "depth": candidate.depth,
+                "register_depth": candidate.register_depth,
+                "is_control": candidate.is_control,
+                "source": candidate.source,
+                "reference": reference_for_candidate,
+                "nmi": round(nmi, 6) if nmi is not None else None,
+            }
+        )
         if use_mi:
             reference_name = name
 
+    rejected_by_reason = dict(Counter(str(item.get("reason", "")) for item in rejected))
     meta = {
         "selector": selector,
         "candidate_count": len(candidates),
@@ -291,6 +361,10 @@ def select_ancestor_names(
         "profile_csv": str(profile_csv) if profile_csv else "",
         "mi_pruning_applied": use_mi,
         "nmi_threshold": nmi_threshold,
+        "profile_column_count": len(samples),
+        "selected": selected_records,
+        "rejected_count": len(rejected),
+        "rejected_by_reason": rejected_by_reason,
         "rejected": rejected[:64],
     }
     return selected, meta
