@@ -11,14 +11,20 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from linknan.methods.sfuzz import (  # noqa: E402
+    BASELINE_SCHEDULER_POLICY,
     DEFAULT_CORE0_PROG,
     CorpusEntry,
     apply_sfuz_mutation_operator,
     available_mutation_operators,
     bounded_energy,
+    coverage_delta,
+    accumulated_covered,
     mutate_core0_program,
     mutate_sfuz,
     mutation_operator_selection_pool,
+    normalize_mutation_sections,
+    select_baseline_parent,
+    select_parent,
     select_weighted_parent,
 )
 from linknan.seeds import SfuzSeed, read_sfuz_seed, write_sfuz_seed  # noqa: E402
@@ -91,8 +97,9 @@ class SfuzzMutationTests(unittest.TestCase):
         self.assertEqual(len(summary.operators), 3)
         self.assertNotEqual(bytes(core0), DEFAULT_CORE0_PROG)
         self.assertEqual(summary.operator_trace, ";".join(summary.operators))
+        self.assertEqual(summary.section_trace, "core0;core0;core0")
 
-    def test_mutate_sfuz_preserves_non_core0_sections(self) -> None:
+    def test_mutate_sfuz_default_preserves_non_core0_sections(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             parent = root / "parent.sfuz"
@@ -120,6 +127,62 @@ class SfuzzMutationTests(unittest.TestCase):
         self.assertEqual(mutated.shared_mem_init, [(0x8000, b"shared")])
         self.assertEqual(mutated.interrupt_plan_raw, [b"\x01" * 24])
         self.assertIn("sfuzz-online-mutated", mutated.tags)
+
+    def test_mutate_sfuz_can_target_core1_shared_and_interrupt_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent = root / "parent.sfuz"
+            output = root / "mutated.sfuz"
+            write_sfuz_seed(
+                parent,
+                SfuzSeed(
+                    core0_prog=DEFAULT_CORE0_PROG,
+                    core1_prog=b"",
+                    shared_mem_init=[],
+                    interrupt_plan_raw=[],
+                    name="seed-b",
+                    description="fixture",
+                    tags=["fixture"],
+                ),
+            )
+
+            summary = mutate_sfuz(parent, output, random.Random(11), 8, "core1,shared,interrupt")
+            mutated = read_sfuz_seed(output)
+
+        self.assertEqual(summary.budget, 8)
+        self.assertIn("core1", summary.section_trace)
+        self.assertTrue({"shared", "interrupt"} & set(summary.sections))
+        self.assertEqual(mutated.core0_prog, DEFAULT_CORE0_PROG)
+        self.assertTrue(mutated.core1_prog or mutated.shared_mem_init or mutated.interrupt_plan_raw)
+        for event in mutated.interrupt_plan_raw:
+            self.assertEqual(len(event), 24)
+
+    def test_normalize_mutation_sections_accepts_all_and_deduplicates(self) -> None:
+        self.assertEqual(normalize_mutation_sections(None), ("core0",))
+        self.assertEqual(normalize_mutation_sections("core0, core1,core0"), ("core0", "core1"))
+        self.assertEqual(normalize_mutation_sections("all"), ("core0", "core1", "shared", "interrupt"))
+        with self.assertRaises(ValueError):
+            normalize_mutation_sections("core0,unknown")
+
+
+class SfuzzCoverageTests(unittest.TestCase):
+    def test_coverage_delta_uses_byte_per_point_semantics(self) -> None:
+        accumulated = bytearray()
+
+        first = coverage_delta(b"\x00\x01\xff", accumulated)
+        second = coverage_delta(b"\x00\x02\x80", accumulated)
+
+        self.assertEqual(first, 2)
+        self.assertEqual(second, 0)
+        self.assertEqual(accumulated, bytearray(b"\x00\x01\x01"))
+        self.assertEqual(accumulated_covered(accumulated), 2)
+
+    def test_coverage_delta_handles_missing_bitmap_and_size_mismatch(self) -> None:
+        accumulated = bytearray(b"\x00\x01")
+
+        self.assertEqual(coverage_delta(None, accumulated), 0)
+        with self.assertRaises(ValueError):
+            coverage_delta(b"\x01", accumulated)
 
 
 class SfuzzSchedulerTests(unittest.TestCase):
@@ -160,6 +223,38 @@ class SfuzzSchedulerTests(unittest.TestCase):
         self.assertEqual(bounded_energy(0, 2, 8), 2)
         self.assertEqual(bounded_energy(1, 2, 8), 3)
         self.assertEqual(bounded_energy(255, 2, 8), 8)
+
+    def test_baseline_parent_round_robins_without_energy_weighting(self) -> None:
+        corpus = [
+            CorpusEntry(0, Path("a.sfuz"), "a", "cat", energy=100),
+            CorpusEntry(1, Path("b.sfuz"), "b", "cat", energy=1),
+        ]
+
+        first = select_baseline_parent(corpus, 0)
+        second = select_baseline_parent(corpus, 1)
+        wrapped = select_baseline_parent(corpus, 2)
+
+        self.assertEqual(first.entry.corpus_id, 0)
+        self.assertEqual(second.entry.corpus_id, 1)
+        self.assertEqual(wrapped.entry.corpus_id, 0)
+        self.assertEqual(first.policy, BASELINE_SCHEDULER_POLICY)
+        self.assertEqual(first.weight, 1)
+        self.assertEqual(first.total_weight, 2)
+
+    def test_select_parent_dispatches_baseline_and_weighted_policies(self) -> None:
+        corpus = [
+            CorpusEntry(0, Path("a.sfuz"), "a", "cat", energy=1),
+            CorpusEntry(1, Path("b.sfuz"), "b", "cat", energy=3),
+        ]
+
+        baseline = select_parent(corpus, random.Random(1), "baseline-fifo", 1)
+        weighted = select_parent(corpus, FixedTicketRng(3), "weighted-innovation", 0)
+
+        self.assertEqual(baseline.entry.corpus_id, 1)
+        self.assertEqual(baseline.policy, BASELINE_SCHEDULER_POLICY)
+        self.assertEqual(weighted.entry.corpus_id, 1)
+        with self.assertRaises(ValueError):
+            select_parent(corpus, random.Random(1), "unknown", 0)
 
 
 if __name__ == "__main__":

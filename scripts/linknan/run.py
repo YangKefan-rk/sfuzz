@@ -104,6 +104,17 @@ def main() -> int:
     sfuzz.add_argument("--rng-seed", type=int, default=1, help="deterministic host RNG seed for mutation order")
     sfuzz.add_argument("--min-energy", type=int, default=1, help="minimum mutations before rotating a corpus seed")
     sfuzz.add_argument("--max-energy", type=int, default=8, help="maximum mutations for high-yield corpus seeds")
+    sfuzz.add_argument(
+        "--scheduler-policy",
+        choices=["weighted-innovation", "baseline-fifo", "coverage-weighted-energy"],
+        default="weighted-innovation",
+        help="SFuzz corpus scheduler; baseline-fifo disables weighted innovation scheduling",
+    )
+    sfuzz.add_argument(
+        "--mutation-sections",
+        default="core0,core1,shared,interrupt",
+        help="comma-separated SFUZ sections to mutate: core0,core1,shared,interrupt,all",
+    )
     sfuzz.set_defaults(case_prefix="sfuzz", handler=run_sfuzz)
 
     rfuzz = subparsers.add_parser(

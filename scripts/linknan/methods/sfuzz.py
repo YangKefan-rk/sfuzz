@@ -44,7 +44,10 @@ SFUZZ_FIELDS = [
     "energy",
     "mutation_budget",
     "mutation_operators",
+    "mutation_sections",
     "scheduler_policy",
+    "scheduler_family",
+    "innovation_enabled",
     "scheduler_corpus_index",
     "scheduler_weight",
     "scheduler_total_weight",
@@ -53,6 +56,7 @@ SFUZZ_FIELDS = [
     "comparison_tier",
     "paper_faithful",
     "coverage_backend",
+    "coverage_bitmap_semantics",
     "common_coverage_backend",
     "common_coverage_name",
     "common_coverage_value",
@@ -94,7 +98,10 @@ SFUZZ_FIELDS = [
 ]
 
 DEFAULT_CORE0_PROG = bytes.fromhex("73001000")
-SFUZZ_SCHEDULER_POLICY = "coverage_weighted_energy"
+BASELINE_SCHEDULER_POLICY = "baseline_fifo"
+WEIGHTED_SCHEDULER_POLICY = "weighted_innovation"
+SFUZZ_SCHEDULER_POLICY = WEIGHTED_SCHEDULER_POLICY
+SFUZZ_COVERAGE_BITMAP_SEMANTICS = "byte_per_point_nonzero_hit"
 SFUZZ_MUTATION_OPERATORS = (
     "bitflip_byte",
     "overwrite_byte",
@@ -102,6 +109,22 @@ SFUZZ_MUTATION_OPERATORS = (
     "delete_range",
     "insert_random_bytes",
 )
+SFUZZ_SHARED_MUTATION_OPERATORS = (
+    "shared_insert_segment",
+    "shared_delete_segment",
+    "shared_mutate_base",
+    "shared_bitflip_byte",
+    "shared_overwrite_byte",
+    "shared_insert_random_bytes",
+    "shared_delete_range",
+)
+SFUZZ_INTERRUPT_MUTATION_OPERATORS = (
+    "interrupt_insert_event",
+    "interrupt_delete_event",
+    "interrupt_bitflip_byte",
+    "interrupt_overwrite_byte",
+)
+SFUZZ_MUTATION_SECTIONS = ("core0", "core1", "shared", "interrupt")
 
 
 @dataclass
@@ -115,7 +138,10 @@ class CorpusEntry:
     mutation_index: int | str = ""
     mutation_budget: int | str = ""
     mutation_operators: str = ""
+    mutation_sections: str = ""
     scheduler_policy: str = ""
+    scheduler_family: str = ""
+    innovation_enabled: bool | str = ""
     scheduler_corpus_index: int | str = ""
     scheduler_weight: int | str = ""
     scheduler_total_weight: int | str = ""
@@ -125,10 +151,15 @@ class CorpusEntry:
 class MutationSummary:
     budget: int
     operators: tuple[str, ...]
+    sections: tuple[str, ...] = ()
 
     @property
     def operator_trace(self) -> str:
         return ";".join(self.operators)
+
+    @property
+    def section_trace(self) -> str:
+        return ";".join(self.sections)
 
 
 @dataclass(frozen=True)
@@ -172,17 +203,17 @@ def coverage_delta(bitmap: bytes | None, accumulated: bytearray) -> int:
         accumulated.extend(b"\x00" * len(bitmap))
     if len(bitmap) != len(accumulated):
         raise ValueError(f"coverage bitmap size changed: {len(bitmap)} != {len(accumulated)}")
-    new_bits = 0
+    new_points = 0
     for idx, value in enumerate(bitmap):
-        delta = value & (~accumulated[idx] & 0xFF)
-        if delta:
-            new_bits += delta.bit_count()
-            accumulated[idx] |= value
-    return new_bits
+        covered = 1 if value else 0
+        if covered and not accumulated[idx]:
+            new_points += 1
+            accumulated[idx] = 1
+    return new_points
 
 
 def accumulated_covered(accumulated: bytearray) -> int:
-    return sum(value.bit_count() for value in accumulated)
+    return sum(1 for value in accumulated if value)
 
 
 def bounded_energy(new_bits: int, min_energy: int, max_energy: int) -> int:
@@ -219,9 +250,37 @@ def select_weighted_parent(corpus: list[CorpusEntry], rng: random.Random) -> Sch
     return SchedulerSelection(corpus[last_idx], last_idx, weights[last_idx], total)
 
 
+def select_baseline_parent(corpus: list[CorpusEntry], mutation_counter: int) -> SchedulerSelection:
+    if not corpus:
+        raise ValueError("SFuzz scheduler requires a non-empty corpus")
+    idx = mutation_counter % len(corpus)
+    return SchedulerSelection(corpus[idx], idx, 1, len(corpus), BASELINE_SCHEDULER_POLICY)
+
+
+def select_parent(corpus: list[CorpusEntry], rng: random.Random, policy: str, mutation_counter: int) -> SchedulerSelection:
+    normalized = (policy or WEIGHTED_SCHEDULER_POLICY).replace("-", "_")
+    if normalized in {"baseline", "baseline_fifo", "fifo"}:
+        return select_baseline_parent(corpus, mutation_counter)
+    if normalized in {"weighted", "weighted_innovation", "coverage_weighted_energy"}:
+        selected = select_weighted_parent(corpus, rng)
+        return SchedulerSelection(
+            selected.entry,
+            selected.corpus_index,
+            selected.weight,
+            selected.total_weight,
+            WEIGHTED_SCHEDULER_POLICY,
+        )
+    raise ValueError(f"unsupported SFuzz scheduler policy: {policy}")
+
+
 def ensure_core0_program(core0: bytearray) -> None:
     if not core0:
         core0.extend(DEFAULT_CORE0_PROG)
+
+
+def ensure_program_payload(payload: bytearray) -> None:
+    if not payload:
+        payload.extend(DEFAULT_CORE0_PROG)
 
 
 def available_mutation_operators(core0: bytearray) -> tuple[str, ...]:
@@ -250,34 +309,41 @@ def choose_mutation_operator(core0: bytearray, rng: random.Random) -> str:
     return operators[rng.randrange(len(operators))]
 
 
+def apply_program_mutation_operator(payload: bytearray, operator: str, rng: random.Random) -> None:
+    if operator not in SFUZZ_MUTATION_OPERATORS:
+        raise ValueError(f"unsupported SFuzz mutation operator: {operator}")
+    ensure_program_payload(payload)
+    if operator == "bitflip_byte":
+        idx = rng.randrange(len(payload))
+        payload[idx] ^= 1 << rng.randrange(8)
+    elif operator == "overwrite_byte":
+        idx = rng.randrange(len(payload))
+        payload[idx] = rng.randrange(256)
+    elif operator == "bitflip_word":
+        if len(payload) < 4:
+            raise ValueError("bitflip_word requires at least 4 bytes")
+        word_count = len(payload) // 4
+        word_idx = rng.randrange(word_count)
+        start = word_idx * 4
+        word = int.from_bytes(payload[start : start + 4], "little")
+        word ^= 1 << rng.randrange(32)
+        payload[start : start + 4] = word.to_bytes(4, "little")
+    elif operator == "delete_range":
+        if len(payload) <= 4:
+            raise ValueError("delete_range requires more than 4 bytes")
+        start = rng.randrange(len(payload))
+        width = rng.randrange(1, min(8, len(payload) - start) + 1)
+        del payload[start : min(len(payload), start + width)]
+    elif operator == "insert_random_bytes":
+        idx = rng.randrange(len(payload) + 1)
+        payload[idx:idx] = rng.randbytes(rng.randrange(1, 9))
+
+
 def apply_sfuz_mutation_operator(core0: bytearray, operator: str, rng: random.Random) -> None:
     if operator not in SFUZZ_MUTATION_OPERATORS:
         raise ValueError(f"unsupported SFuzz mutation operator: {operator}")
     ensure_core0_program(core0)
-    if operator == "bitflip_byte":
-        idx = rng.randrange(len(core0))
-        core0[idx] ^= 1 << rng.randrange(8)
-    elif operator == "overwrite_byte":
-        idx = rng.randrange(len(core0))
-        core0[idx] = rng.randrange(256)
-    elif operator == "bitflip_word":
-        if len(core0) < 4:
-            raise ValueError("bitflip_word requires at least 4 bytes")
-        word_count = len(core0) // 4
-        word_idx = rng.randrange(word_count)
-        start = word_idx * 4
-        word = int.from_bytes(core0[start : start + 4], "little")
-        word ^= 1 << rng.randrange(32)
-        core0[start : start + 4] = word.to_bytes(4, "little")
-    elif operator == "delete_range":
-        if len(core0) <= 4:
-            raise ValueError("delete_range requires more than 4 bytes")
-        start = rng.randrange(len(core0))
-        width = rng.randrange(1, min(8, len(core0) - start) + 1)
-        del core0[start : min(len(core0), start + width)]
-    elif operator == "insert_random_bytes":
-        idx = rng.randrange(len(core0) + 1)
-        core0[idx:idx] = rng.randbytes(rng.randrange(1, 9))
+    apply_program_mutation_operator(core0, operator, rng)
 
 
 def mutate_core0_program(core0: bytearray, rng: random.Random, budget: int) -> MutationSummary:
@@ -288,18 +354,167 @@ def mutate_core0_program(core0: bytearray, rng: random.Random, budget: int) -> M
         operator = choose_mutation_operator(core0, rng)
         apply_sfuz_mutation_operator(core0, operator, rng)
         operators.append(operator)
-    return MutationSummary(mutation_budget, tuple(operators))
+    return MutationSummary(mutation_budget, tuple(operators), ("core0",) * len(operators))
 
 
-def mutate_sfuz(parent: Path, output: Path, rng: random.Random, budget: int) -> MutationSummary:
+def normalize_mutation_sections(sections: str | tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
+    if sections is None:
+        return ("core0",)
+    if isinstance(sections, str):
+        raw_items = [item.strip() for item in sections.replace(";", ",").split(",")]
+    else:
+        raw_items = [str(item).strip() for item in sections]
+    selected: list[str] = []
+    for item in raw_items:
+        if not item:
+            continue
+        normalized = item.lower().replace("-", "_")
+        if normalized == "all":
+            selected.extend(SFUZZ_MUTATION_SECTIONS)
+            continue
+        if normalized not in SFUZZ_MUTATION_SECTIONS:
+            raise ValueError(f"unsupported SFuzz mutation section: {item}")
+        selected.append(normalized)
+    if not selected:
+        return ("core0",)
+    deduped: list[str] = []
+    for section in selected:
+        if section not in deduped:
+            deduped.append(section)
+    return tuple(deduped)
+
+
+def choose_program_operator(payload: bytearray, rng: random.Random) -> str:
+    ensure_program_payload(payload)
+    operators = mutation_operator_selection_pool(payload)
+    return operators[rng.randrange(len(operators))]
+
+
+def mutate_program_payload(section: str, payload: bytearray, rng: random.Random) -> str:
+    operator = choose_program_operator(payload, rng)
+    apply_program_mutation_operator(payload, operator, rng)
+    return f"{section}.{operator}"
+
+
+def random_shared_segment(rng: random.Random) -> tuple[int, bytes]:
+    base = 0x80000000 + (rng.randrange(0, 256) * 0x40)
+    size = rng.randrange(1, 33)
+    return base, rng.randbytes(size)
+
+
+def mutate_shared_segments(segments: list[tuple[int, bytes]], rng: random.Random) -> str:
+    if not segments:
+        operator = "shared_insert_segment"
+    else:
+        operator = SFUZZ_SHARED_MUTATION_OPERATORS[rng.randrange(len(SFUZZ_SHARED_MUTATION_OPERATORS))]
+    if operator == "shared_insert_segment":
+        segments.append(random_shared_segment(rng))
+    elif operator == "shared_delete_segment":
+        if len(segments) <= 1:
+            operator = "shared_insert_segment"
+            segments.append(random_shared_segment(rng))
+        else:
+            del segments[rng.randrange(len(segments))]
+    elif operator == "shared_mutate_base":
+        idx = rng.randrange(len(segments))
+        base, data = segments[idx]
+        delta = (rng.randrange(-16, 17) * 0x40)
+        segments[idx] = (max(0, base + delta), data)
+    else:
+        idx = rng.randrange(len(segments))
+        base, data = segments[idx]
+        payload = bytearray(data)
+        ensure_program_payload(payload)
+        if operator == "shared_bitflip_byte":
+            pos = rng.randrange(len(payload))
+            payload[pos] ^= 1 << rng.randrange(8)
+        elif operator == "shared_overwrite_byte":
+            pos = rng.randrange(len(payload))
+            payload[pos] = rng.randrange(256)
+        elif operator == "shared_insert_random_bytes":
+            pos = rng.randrange(len(payload) + 1)
+            payload[pos:pos] = rng.randbytes(rng.randrange(1, 9))
+        elif operator == "shared_delete_range":
+            if len(payload) <= 1:
+                operator = "shared_insert_random_bytes"
+                pos = rng.randrange(len(payload) + 1)
+                payload[pos:pos] = rng.randbytes(rng.randrange(1, 9))
+            else:
+                start = rng.randrange(len(payload))
+                width = rng.randrange(1, min(8, len(payload) - start) + 1)
+                del payload[start : min(len(payload), start + width)]
+        else:
+            raise ValueError(f"unsupported SFuzz shared mutation operator: {operator}")
+        segments[idx] = (base, bytes(payload))
+    return f"shared.{operator}"
+
+
+def random_interrupt_event(rng: random.Random) -> bytes:
+    return rng.randbytes(24)
+
+
+def mutate_interrupt_plan(events: list[bytearray], rng: random.Random) -> str:
+    if not events:
+        operator = "interrupt_insert_event"
+    else:
+        operator = SFUZZ_INTERRUPT_MUTATION_OPERATORS[rng.randrange(len(SFUZZ_INTERRUPT_MUTATION_OPERATORS))]
+    if operator == "interrupt_insert_event":
+        events.append(bytearray(random_interrupt_event(rng)))
+    elif operator == "interrupt_delete_event":
+        if len(events) <= 1:
+            operator = "interrupt_insert_event"
+            events.append(bytearray(random_interrupt_event(rng)))
+        else:
+            del events[rng.randrange(len(events))]
+    elif operator == "interrupt_bitflip_byte":
+        idx = rng.randrange(len(events))
+        pos = rng.randrange(24)
+        events[idx][pos] ^= 1 << rng.randrange(8)
+    elif operator == "interrupt_overwrite_byte":
+        idx = rng.randrange(len(events))
+        pos = rng.randrange(24)
+        events[idx][pos] = rng.randrange(256)
+    else:
+        raise ValueError(f"unsupported SFuzz interrupt mutation operator: {operator}")
+    return f"interrupt.{operator}"
+
+
+def mutate_sfuz(
+    parent: Path,
+    output: Path,
+    rng: random.Random,
+    budget: int,
+    sections: str | tuple[str, ...] | list[str] | None = None,
+) -> MutationSummary:
     seed = read_sfuz_seed(parent)
     core0 = bytearray(seed.core0_prog)
-    summary = mutate_core0_program(core0, rng, budget)
+    core1 = bytearray(seed.core1_prog)
+    shared = [(base, bytes(data)) for base, data in seed.shared_mem_init]
+    interrupts = [bytearray(event) for event in seed.interrupt_plan_raw]
+    mutation_budget = normalized_mutation_budget(budget)
+    mutation_sections = normalize_mutation_sections(sections)
+    operators: list[str] = []
+    section_trace: list[str] = []
+    for _ in range(mutation_budget):
+        section = mutation_sections[rng.randrange(len(mutation_sections))]
+        if section == "core0":
+            operator = mutate_program_payload("core0", core0, rng)
+        elif section == "core1":
+            operator = mutate_program_payload("core1", core1, rng)
+        elif section == "shared":
+            operator = mutate_shared_segments(shared, rng)
+        elif section == "interrupt":
+            operator = mutate_interrupt_plan(interrupts, rng)
+        else:
+            raise ValueError(f"unsupported SFuzz mutation section: {section}")
+        operators.append(operator)
+        section_trace.append(section)
+    summary = MutationSummary(mutation_budget, tuple(operators), tuple(section_trace))
     mutated = SfuzSeed(
         core0_prog=bytes(core0),
-        core1_prog=seed.core1_prog,
-        shared_mem_init=seed.shared_mem_init,
-        interrupt_plan_raw=seed.interrupt_plan_raw,
+        core1_prog=bytes(core1),
+        shared_mem_init=shared,
+        interrupt_plan_raw=[bytes(event) for event in interrupts],
         name=f"{seed.name or parent.stem}.mut",
         description=f"mutated from {parent}",
         tags=[*seed.tags, "sfuzz-online-mutated"],
@@ -394,7 +609,10 @@ def row_from_run(
         "energy": entry.energy,
         "mutation_budget": entry.mutation_budget,
         "mutation_operators": entry.mutation_operators,
+        "mutation_sections": entry.mutation_sections,
         "scheduler_policy": entry.scheduler_policy,
+        "scheduler_family": entry.scheduler_family,
+        "innovation_enabled": entry.innovation_enabled,
         "scheduler_corpus_index": entry.scheduler_corpus_index,
         "scheduler_weight": entry.scheduler_weight,
         "scheduler_total_weight": entry.scheduler_total_weight,
@@ -403,6 +621,7 @@ def row_from_run(
         "comparison_tier": run["comparison_tier"],
         "paper_faithful": run["coverage_backend"] == "sfuzz_firrtl",
         "coverage_backend": run["coverage_backend"],
+        "coverage_bitmap_semantics": SFUZZ_COVERAGE_BITMAP_SEMANTICS if run["coverage_backend"] == "sfuzz_firrtl" else "",
         "common_coverage_backend": run["coverage_backend"],
         "common_coverage_name": coverage.coverage_name,
         "common_coverage_value": coverage.coverage_value,
@@ -456,6 +675,8 @@ def initial_corpus(args: Any, work_dir: Path) -> list[CorpusEntry]:
                 seed_name=seed_name,
                 category=seed_category(seed, seed_name),
                 energy=max(1, getattr(args, "min_energy", 1)),
+                scheduler_family="initial",
+                innovation_enabled=False,
             )
         )
     return entries
@@ -491,16 +712,28 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
         if getattr(args, "batch_replay", False):
             entry = corpus[exec_idx - 1]
             entry.scheduler_policy = "batch_replay"
+            entry.scheduler_family = "batch_replay"
+            entry.innovation_enabled = False
         elif exec_idx <= len(corpus):
             entry = corpus[exec_idx - 1]
             entry.scheduler_policy = "initial_corpus"
+            entry.scheduler_family = "initial"
+            entry.innovation_enabled = False
         else:
-            scheduled = select_weighted_parent(corpus, rng)
+            scheduler_policy = getattr(args, "scheduler_policy", WEIGHTED_SCHEDULER_POLICY)
+            scheduled = select_parent(corpus, rng, scheduler_policy, mutation_counter)
             parent = scheduled.entry
             mutation_counter += 1
             mutated_path = generated_dir / f"sfuzz-mut-{mutation_counter:04d}.sfuz"
-            mutation = mutate_sfuz(parent.path, mutated_path, rng, parent.energy)
+            mutation = mutate_sfuz(
+                parent.path,
+                mutated_path,
+                rng,
+                parent.energy,
+                getattr(args, "mutation_sections", "core0,core1,shared,interrupt"),
+            )
             seed_name = read_seed_metadata_name(mutated_path)
+            scheduler_family = "baseline" if scheduled.policy == BASELINE_SCHEDULER_POLICY else "innovation"
             entry = CorpusEntry(
                 corpus_id=next_corpus_id,
                 path=mutated_path,
@@ -511,7 +744,10 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
                 mutation_index=mutation_counter,
                 mutation_budget=mutation.budget,
                 mutation_operators=mutation.operator_trace,
+                mutation_sections=mutation.section_trace,
                 scheduler_policy=scheduled.policy,
+                scheduler_family=scheduler_family,
+                innovation_enabled=scheduler_family == "innovation",
                 scheduler_corpus_index=scheduled.corpus_index,
                 scheduler_weight=scheduled.weight,
                 scheduler_total_weight=scheduled.total_weight,
@@ -557,6 +793,14 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
         args.output_json or work_dir / "results.json",
         args.output_csv or work_dir / "results.csv",
         SFUZZ_FIELDS,
-        {"fuzzer": "sfuzz", "mode": "batch_replay" if getattr(args, "batch_replay", False) else "online"},
+        {
+            "fuzzer": "sfuzz",
+            "mode": "batch_replay" if getattr(args, "batch_replay", False) else "online",
+            "scheduler_policy": getattr(args, "scheduler_policy", WEIGHTED_SCHEDULER_POLICY),
+            "mutation_sections": getattr(args, "mutation_sections", "core0,core1,shared,interrupt"),
+            "coverage_bitmap_semantics": SFUZZ_COVERAGE_BITMAP_SEMANTICS,
+            "baseline_policy": BASELINE_SCHEDULER_POLICY,
+            "innovation_policy": WEIGHTED_SCHEDULER_POLICY,
+        },
     )
     return 0
