@@ -743,6 +743,12 @@ def select_seed(corpus: list[CorpusEntry], rnd: random.Random, *, disable_power_
     return entry
 
 
+def surgefuzz_mutation_limit(max_execs: int, exec_count: int, configured_mutations: int) -> int:
+    if max_execs > 0:
+        return max(0, max_execs - exec_count)
+    return max(0, configured_mutations)
+
+
 def program_config_from_args(args: Any) -> ProgramConfig:
     return ProgramConfig(
         initial_seed_block_count=args.initial_seed_block_count,
@@ -1176,7 +1182,8 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                 flush=True,
             )
 
-        for round_index in range(args.mutations):
+        mutation_limit = surgefuzz_mutation_limit(args.max_execs, exec_count, args.mutations)
+        for round_index in range(mutation_limit):
             if exec_count >= max_execs or not corpus:
                 break
             parent = select_seed(corpus, rnd, disable_power_scheduling=getattr(args, "disable_power_scheduling", False))
@@ -1348,7 +1355,8 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                 flush=True,
             )
 
-        for round_index in range(args.mutations):
+        mutation_limit = surgefuzz_mutation_limit(args.max_execs, exec_count, args.mutations)
+        for round_index in range(mutation_limit):
             if exec_count >= max_execs or not corpus:
                 break
             parent = select_seed(corpus, rnd, disable_power_scheduling=getattr(args, "disable_power_scheduling", False))

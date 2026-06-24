@@ -603,6 +603,12 @@ def mutation_budget(feedback: dict[str, Any], default_energy: bool) -> int:
     return max(1, min(64, int(round(float(value))) + 1))
 
 
+def directfuzz_mutation_limit(max_execs: int, exec_count: int, configured_mutations: int) -> int:
+    if max_execs > 0:
+        return max(0, max_execs - exec_count)
+    return max(0, configured_mutations)
+
+
 def required_native_abi(args: Any, dynamic_native_coverage: bool, backend: str = "") -> str:
     missing: list[str] = []
     if args.coverage_backend != "native-file":
@@ -861,7 +867,8 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
         exec_idx += 1
 
     mutation_idx = 0
-    while queue and exec_idx < exec_budget and mutation_idx < args.mutations:
+    mutation_limit = directfuzz_mutation_limit(args.max_execs, exec_idx, args.mutations)
+    while queue and exec_idx < exec_budget and mutation_idx < mutation_limit:
         scheduled = queue.next()
         if scheduled is None:
             break
