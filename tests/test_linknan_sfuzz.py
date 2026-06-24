@@ -424,6 +424,24 @@ class SfuzzScenarioTests(unittest.TestCase):
         self.assertIn("runtime_profile:long", seed.tags)
         self.assertIn("target_min_wall_time_sec:60", seed.tags)
 
+    def test_long_multicore_profile_keeps_core1_running(self) -> None:
+        scenario = scenario_from_operator(
+            "insert_amo_sequence",
+            variant=2,
+            rng=random.Random(2),
+            core1_handoff_enabled=True,
+            runtime_profile="long",
+            target_min_wall_time_sec=60,
+        )
+        seed = seed_from_scenario(scenario)
+        core1_words = [
+            int.from_bytes(seed.core1_prog[index : index + 4], "little")
+            for index in range(0, len(seed.core1_prog), 4)
+        ]
+
+        self.assertGreaterEqual(core1_words.count(0x0330000F), 2)
+        self.assertEqual(core1_words[-1], 0x0005006B)
+
     def test_semantic_operator_selection_uses_native_group_deficit(self) -> None:
         atomic_operator = choose_semantic_operator("sfuzz_atomic", rng=random.Random(0))
         fence_operator = choose_semantic_operator("sfuzz_fence", rng=random.Random(0))

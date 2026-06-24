@@ -403,6 +403,20 @@ def _append_runtime_stress_loop(seq: list[EncodedInstruction], iterations: int) 
     )
 
 
+def _insert_runtime_stress_before_finish(seq: list[EncodedInstruction], iterations: int) -> None:
+    if iterations <= 0:
+        return
+    marker = 0x0005006B
+    finish_index = next((index for index in range(len(seq) - 1, -1, -1) if seq[index].word == marker), None)
+    if finish_index is None:
+        _append_runtime_stress_loop(seq, iterations)
+        return
+    insert_index = max(0, finish_index - 2)
+    stress: list[EncodedInstruction] = []
+    _append_runtime_stress_loop(stress, iterations)
+    seq[insert_index:insert_index] = stress
+
+
 def _append_exception_handler(seq: list[EncodedInstruction]) -> None:
     while len(seq) * 4 < EXCEPTION_HANDLER_OFFSET:
         seq.append(nop())
@@ -638,6 +652,8 @@ def generate_scenario(
         raise AssertionError(f"unhandled family {family}")
 
     applied_stress_iterations = stress_iterations if runtime_profile == "long" and not needs_exception_handler else 0
+    if core1 and applied_stress_iterations:
+        _insert_runtime_stress_before_finish(core1, applied_stress_iterations * 2)
     _append_runtime_stress_loop(core0, applied_stress_iterations)
     _finish(core0)
     if needs_exception_handler:
