@@ -88,6 +88,8 @@ SFUZZ_FIELDS = [
     "accumulated_covered_bits",
     "required_native_abi",
     "wall_time_sec",
+    "target_min_wall_time_sec",
+    "short_run",
     "vcs_cycles",
     "vcs_cpu_time_sec",
     "vcs_sim_time_ps",
@@ -97,6 +99,14 @@ SFUZZ_FIELDS = [
     "exit_code",
     "vcs_report_seen",
     "sfuz_expansion_seen",
+    "sfuzz_core0_staged",
+    "sfuzz_core1_staged",
+    "sfuzz_core1_entry",
+    "sfuzz_core1_payload_size",
+    "core1_executed",
+    "core1_handoff_reason",
+    "requires_core1_handoff",
+    "formal_multicore_result",
     "good_trap_seen",
     "bug_triggered",
     "bug_reasons",
@@ -236,6 +246,9 @@ class CorpusEntry:
     semantic_operator_stall: int | str = ""
     scenario_family_credit: int | str = ""
     scenario_family_stall: int | str = ""
+    requires_core1_handoff: bool = False
+    core1_handoff_enabled: bool = False
+    target_min_wall_time_sec: int = 0
     total_new_coverage_bits: int = 0
     no_new_coverage_streak: int = 0
     execution_count: int = 0
@@ -312,6 +325,18 @@ def run_outcome(result: Any, info: Any, infrastructure_error: str) -> str:
     if info.finish_seen:
         return "finished"
     return "unknown"
+
+
+def seed_bool_tag(seed: Path, key: str) -> bool:
+    try:
+        parsed = read_sfuz_seed(seed)
+    except Exception:
+        return False
+    prefix = f"{key}:"
+    for tag in parsed.tags:
+        if tag.strip().lower() == f"{prefix}true":
+            return True
+    return False
 
 
 def read_bitmap(coverage: CoverageResult) -> bytes | None:
@@ -541,6 +566,16 @@ def update_runtime_feedback(
             runtime.group_stall[focus_group] = 0
         else:
             runtime.group_stall[focus_group] = runtime.group_stall.get(focus_group, 0) + 1
+
+
+def retention_reason_for_run(run_outcome_text: str, new_bits: int, group_new_bits: dict[str, int]) -> tuple[bool, str]:
+    if run_outcome_text == "bug_triggered":
+        return True, "bug_signature"
+    if any(group_new_bits.get(group, 0) > 0 for group in SFUZZ_HARD_TARGET_GROUPS):
+        return True, "hard_target_hit"
+    if new_bits > 0:
+        return True, "new_coverage"
+    return False, "not_interesting"
 
 
 def entry_focus_from_deficits(entry: CorpusEntry, deficits: dict[str, int]) -> tuple[str, int]:
@@ -1121,6 +1156,7 @@ def mutate_sfuz(
     seed_ir_targets: str = "",
     semantic: bool = True,
     core1_handoff_enabled: bool = False,
+    target_min_wall_time_sec: int = 0,
     mutation_index: int = 0,
     stalled_operators: tuple[str, ...] = (),
     operator_hint: str = "",
@@ -1144,6 +1180,8 @@ def mutate_sfuz(
         variant=(mutation_index * 17) + rng.randrange(997),
         rng=rng,
         core1_handoff_enabled=core1_handoff_enabled,
+        runtime_profile="long" if target_min_wall_time_sec > 0 else "short",
+        target_min_wall_time_sec=max(0, target_min_wall_time_sec),
     )
 
     write_scenario_artifacts(output, scenario)
@@ -1284,6 +1322,8 @@ def row_from_run(
         "accumulated_covered_bits": accumulated_covered(accumulated),
         "required_native_abi": "" if run["native_feedback"] else "SFUZZ.native",
         "wall_time_sec": round(run["result"].wall_time_sec, 3),
+        "target_min_wall_time_sec": entry.target_min_wall_time_sec,
+        "short_run": bool(entry.target_min_wall_time_sec and run["result"].wall_time_sec < entry.target_min_wall_time_sec),
         "vcs_cycles": run["info"].cycles if run["info"].cycles is not None else "",
         "vcs_cpu_time_sec": run["info"].vcs_cpu_time_sec,
         "vcs_sim_time_ps": run["info"].vcs_sim_time_ps,
@@ -1293,6 +1333,17 @@ def row_from_run(
         "exit_code": run["result"].returncode,
         "vcs_report_seen": run["info"].vcs_report_seen,
         "sfuz_expansion_seen": run["info"].sfuz_expansion_seen,
+        "sfuzz_core0_staged": run["info"].sfuzz_core0_staged,
+        "sfuzz_core1_staged": run["info"].sfuzz_core1_staged,
+        "sfuzz_core1_entry": run["info"].sfuzz_core1_entry,
+        "sfuzz_core1_payload_size": run["info"].sfuzz_core1_payload_size if run["info"].sfuzz_core1_payload_size is not None else "",
+        "core1_executed": run["info"].sfuzz_core1_executed,
+        "core1_handoff_reason": run["info"].sfuzz_core1_handoff_reason,
+        "requires_core1_handoff": entry.requires_core1_handoff,
+        "formal_multicore_result": bool(
+            not entry.requires_core1_handoff
+            or (entry.core1_handoff_enabled and run["info"].sfuzz_core1_executed)
+        ),
         "good_trap_seen": run["info"].good_trap_seen,
         "bug_triggered": run["info"].bug_triggered,
         "bug_reasons": run["info"].bug_reasons,
@@ -1334,6 +1385,9 @@ def initial_corpus(args: Any, work_dir: Path) -> list[CorpusEntry]:
                 seed_event_plan=event_plan,
                 scheduler_family=scheduler_family,
                 innovation_enabled=False,
+                requires_core1_handoff=seed_bool_tag(seed, "requires_core1_handoff"),
+                core1_handoff_enabled=getattr(args, "enable_core1_handoff", False),
+                target_min_wall_time_sec=getattr(args, "target_min_wall_time_sec", 0),
             )
         )
     return entries
@@ -1411,6 +1465,7 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
                 seed_ir_targets="" if getattr(args, "disable_scenario_aware_scheduling", False) else parent.seed_ir_targets,
                 semantic=not getattr(args, "disable_semantic_mutation", False),
                 core1_handoff_enabled=getattr(args, "enable_core1_handoff", False),
+                target_min_wall_time_sec=getattr(args, "target_min_wall_time_sec", 0),
                 mutation_index=mutation_counter,
                 stalled_operators=tuple(
                     operator
@@ -1446,6 +1501,9 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
                 scheduler_corpus_index=scheduled.corpus_index,
                 scheduler_weight=scheduled.weight,
                 scheduler_total_weight=scheduled.total_weight,
+                requires_core1_handoff=mutation.requires_core1_handoff,
+                core1_handoff_enabled=mutation.core1_handoff_enabled,
+                target_min_wall_time_sec=getattr(args, "target_min_wall_time_sec", 0),
             )
             next_corpus_id += 1
 
@@ -1469,8 +1527,7 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
             new_bits=new_bits,
             group_new_bits=group_new_bits,
         )
-        retained = new_bits > 0 or run["run_outcome"] == "bug_triggered"
-        retention_reason = "new_coverage" if new_bits > 0 else run["run_outcome"] if retained else "not_interesting"
+        retained, retention_reason = retention_reason_for_run(run["run_outcome"], new_bits, group_new_bits)
         if retained:
             entry.energy = bounded_energy(new_bits, args.min_energy, args.max_energy)
             focus_group, focus_deficit = entry_focus_from_deficits(entry, group_deficits)

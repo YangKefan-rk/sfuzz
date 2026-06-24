@@ -659,6 +659,19 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
 
     if not getattr(args, "firrtl_cov", None):
         args.firrtl_cov = "DirectFuzz.mux-toggle"
+    if getattr(args, "require_paper_native", False):
+        if ctx.cycles is not None:
+            raise ValueError("formal DirectFuzz campaigns require --no-cycle-limit")
+        if args.timeout_sec < 120:
+            raise ValueError("formal DirectFuzz campaigns require --timeout-sec >= 120")
+        if args.max_execs < 1000:
+            raise ValueError("formal DirectFuzz campaigns require --max-execs >= 1000")
+        if args.coverage_backend != "native-file" or args.native_coverage_source != "vcs-native-abi":
+            raise ValueError("formal DirectFuzz campaigns require native-file coverage from vcs-native-abi")
+        if args.metadata_source != "static-analysis":
+            raise ValueError("formal DirectFuzz campaigns require static-analysis distance metadata")
+        if args.native_coverage:
+            raise ValueError("formal DirectFuzz campaigns require dynamic per-testcase coverage, not one static --native-coverage file")
 
     seeds = collect_direct_input_paths(args.seed, args.seed_list, args.seed_dir, work_dir, args.limit, True)
     metadata = load_direct_metadata(args.metadata.expanduser())

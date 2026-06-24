@@ -51,6 +51,7 @@ from linknan.vcs import CoverageResult  # noqa: E402
 from linknan.vcs import (  # noqa: E402
     normalize_firrtl_coverage_name,
     requested_firrtl_groups,
+    scan_vcs_logs,
     simv_compiled_without_difftest,
 )
 
@@ -407,6 +408,21 @@ class SfuzzScenarioTests(unittest.TestCase):
         self.assertGreater(len(seed.core1_prog), 0)
         self.assertIn("single-core-fallback", seed.tags)
 
+    def test_long_runtime_profile_tags_stress_loop(self) -> None:
+        scenario = scenario_from_operator(
+            "insert_amo_sequence",
+            variant=2,
+            rng=random.Random(2),
+            runtime_profile="long",
+            target_min_wall_time_sec=60,
+        )
+        seed = seed_from_scenario(scenario)
+
+        self.assertEqual(scenario.runtime_profile, "long")
+        self.assertGreaterEqual(scenario.stress_iterations, 60 * 4096)
+        self.assertIn("runtime_profile:long", seed.tags)
+        self.assertIn("target_min_wall_time_sec:60", seed.tags)
+
     def test_semantic_operator_selection_uses_native_group_deficit(self) -> None:
         atomic_operator = choose_semantic_operator("sfuzz_atomic", rng=random.Random(0))
         fence_operator = choose_semantic_operator("sfuzz_fence", rng=random.Random(0))
@@ -693,6 +709,36 @@ class SfuzzSchedulerTests(unittest.TestCase):
         self.assertEqual(runtime.family_credit["amo_contention"], 5)
         self.assertEqual(runtime.hard_target_first_hit["sfuzz_atomic"], 7)
         self.assertEqual(entry.no_new_coverage_streak, 1)
+
+    def test_retention_reason_prioritizes_bug_and_hard_target(self) -> None:
+        from linknan.methods.sfuzz import retention_reason_for_run
+
+        self.assertEqual(retention_reason_for_run("bug_triggered", 0, {}), (True, "bug_signature"))
+        self.assertEqual(retention_reason_for_run("good_trap", 0, {"sfuzz_atomic": 1}), (True, "hard_target_hit"))
+        self.assertEqual(retention_reason_for_run("good_trap", 3, {}), (True, "new_coverage"))
+        self.assertEqual(retention_reason_for_run("good_trap", 0, {}), (False, "not_interesting"))
+
+    def test_vcs_log_parser_records_core1_handoff_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_log = root / "run.log"
+            assert_log = root / "assert.log"
+            run_log.write_text(
+                "SFUZZ_CORE_PAYLOAD: name=core0 paddr=0x80000000 size=4\n"
+                "SFUZZ_CORE_PAYLOAD: name=core1 paddr=0x81000000 size=8\n"
+                "SFUZZ_CORE1_HANDOFF: staged=1 entry=0x81000000 size=8 executed=0 reason=secondary_slot_only\n",
+                encoding="utf-8",
+            )
+            assert_log.write_text("", encoding="utf-8")
+
+            info = scan_vcs_logs(run_log, assert_log, None)
+
+        self.assertTrue(info.sfuzz_core0_staged)
+        self.assertTrue(info.sfuzz_core1_staged)
+        self.assertFalse(info.sfuzz_core1_executed)
+        self.assertEqual(info.sfuzz_core1_entry, "0x81000000")
+        self.assertEqual(info.sfuzz_core1_payload_size, 8)
+        self.assertEqual(info.sfuzz_core1_handoff_reason, "secondary_slot_only")
 
     def test_select_parent_dispatches_semantic_bandit_policy(self) -> None:
         corpus = [

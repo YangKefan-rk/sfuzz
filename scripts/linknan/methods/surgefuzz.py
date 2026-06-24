@@ -1008,6 +1008,18 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
         )
     if args.timeout_sec <= 0:
         raise ValueError("SurgeFuzz LinkNan loop requires --timeout-sec to bound natural-end VCS runs")
+    if getattr(args, "require_paper_native", False):
+        if args.timeout_sec < 120:
+            raise ValueError("formal SurgeFuzz campaigns require --timeout-sec >= 120")
+        if args.input_mode != "artifact-program":
+            raise ValueError("formal SurgeFuzz campaigns require artifact-program input generation")
+        if args.trace_source != "vcs-native-abi" or args.trace_is_dev_mock:
+            raise ValueError("formal SurgeFuzz campaigns require VCS-native trace feedback")
+        if args.rotation_mode != "none" or getattr(args, "rotation_manifest", None):
+            raise ValueError("formal SurgeFuzz paper-native campaigns are single-target; rotation is an extension")
+        exec_budget = args.max_execs if args.max_execs > 0 else args.initial_seed_count + args.mutations
+        if exec_budget < 1000:
+            raise ValueError("formal SurgeFuzz campaigns require at least 1000 executions")
     if not getattr(args, "firrtl_cov", None):
         args.firrtl_cov = "SurgeFuzz.trace"
 

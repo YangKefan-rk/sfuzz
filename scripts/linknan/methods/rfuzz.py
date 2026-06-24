@@ -428,6 +428,15 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
 
     if ctx.cycles is None and args.timeout_sec <= 0:
         raise ValueError("RFuzz --no-cycle-limit runs require --timeout-sec to bound wall-clock time")
+    if getattr(args, "require_formal_feedback", False):
+        if ctx.cycles is not None:
+            raise ValueError("formal RFuzz LinkNan campaigns require --no-cycle-limit")
+        if args.timeout_sec < 120:
+            raise ValueError("formal RFuzz LinkNan campaigns require --timeout-sec >= 120")
+        if args.rfuzz_rounds < 1000:
+            raise ValueError("formal RFuzz LinkNan campaigns require --rfuzz-rounds >= 1000")
+        if args.rfuzz_toggle_bitmap_source != "vcs-native-abi":
+            raise ValueError("formal RFuzz LinkNan campaigns require VCS-native mux-toggle feedback")
     if not getattr(args, "firrtl_cov", None):
         args.firrtl_cov = "RFuzz.mux-toggle"
 

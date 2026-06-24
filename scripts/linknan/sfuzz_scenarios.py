@@ -144,6 +144,9 @@ class ScenarioIR:
     semantic_operator: str
     requires_core1_handoff: bool = False
     core1_handoff_enabled: bool = False
+    runtime_profile: str = "short"
+    stress_iterations: int = 0
+    target_min_wall_time_sec: int = 0
 
     @property
     def formal_multicore_result(self) -> bool:
@@ -186,6 +189,9 @@ class ScenarioIR:
             "requires_core1_handoff": self.requires_core1_handoff,
             "core1_handoff_enabled": self.core1_handoff_enabled,
             "formal_multicore_result": self.formal_multicore_result,
+            "runtime_profile": self.runtime_profile,
+            "stress_iterations": self.stress_iterations,
+            "target_min_wall_time_sec": self.target_min_wall_time_sec,
         }
 
 
@@ -375,6 +381,22 @@ def _finish(seq: list[EncodedInstruction]) -> None:
     seq.extend([addi(31, 31, 1, "depth"), addi(10, 0, 0, "good_trap_code"), xstrap_good()])
 
 
+def _append_runtime_stress_loop(seq: list[EncodedInstruction], iterations: int) -> None:
+    if iterations <= 0:
+        return
+    seq.extend(li_small(28, max(1, iterations), "stress_loop_count"))
+    seq.extend(
+        [
+            ld(29, 5, 0, "stress_loop_load"),
+            addi(29, 29, 1, "stress_loop_dependency"),
+            sd(29, 5, 0, "stress_loop_store"),
+            fence_rw_rw("stress_loop_fence"),
+            addi(28, 28, -1, "stress_loop_count"),
+            bne(28, 0, -20, "stress_loop_branch"),
+        ]
+    )
+
+
 def _append_exception_handler(seq: list[EncodedInstruction]) -> None:
     while len(seq) * 4 < EXCEPTION_HANDLER_OFFSET:
         seq.append(nop())
@@ -407,6 +429,9 @@ def _scenario(
     sync: tuple[str, ...] = (),
     requires_core1_handoff: bool = False,
     core1_handoff_enabled: bool = False,
+    runtime_profile: str = "short",
+    stress_iterations: int = 0,
+    target_min_wall_time_sec: int = 0,
 ) -> ScenarioIR:
     blocks = [_block(0, f"{family}_core0", core0)]
     cores = [0]
@@ -426,6 +451,9 @@ def _scenario(
         semantic_operator=operator,
         requires_core1_handoff=requires_core1_handoff,
         core1_handoff_enabled=core1_handoff_enabled,
+        runtime_profile=runtime_profile,
+        stress_iterations=stress_iterations,
+        target_min_wall_time_sec=target_min_wall_time_sec,
     )
 
 
@@ -452,11 +480,18 @@ def generate_scenario(
     variant: int = 0,
     rng: random.Random | None = None,
     core1_handoff_enabled: bool = False,
+    runtime_profile: str = "short",
+    stress_iterations: int = 0,
+    target_min_wall_time_sec: int = 0,
 ) -> ScenarioIR:
     if family not in SCENARIO_FAMILIES:
         raise ValueError(f"unsupported SFuzz scenario family: {family}")
     rnd = rng or random.Random(variant)
     op = operator or family_default_operator(family)
+    if runtime_profile not in {"short", "long"}:
+        raise ValueError(f"unsupported SFuzz runtime profile: {runtime_profile}")
+    if runtime_profile == "long" and stress_iterations <= 0:
+        stress_iterations = max(4096, target_min_wall_time_sec * 4096)
     base = _base_for_variant(variant + rnd.randrange(16))
     alias_offset = 8 if op != "create_cross_cacheline_alias" else DEFAULT_CACHELINE_BYTES
     shared_size = 0x6000 if family == "tlb_refill_memory" else 512
@@ -596,6 +631,8 @@ def generate_scenario(
     else:
         raise AssertionError(f"unhandled family {family}")
 
+    applied_stress_iterations = stress_iterations if runtime_profile == "long" and not needs_exception_handler else 0
+    _append_runtime_stress_loop(core0, applied_stress_iterations)
     _finish(core0)
     if needs_exception_handler:
         _append_exception_handler(core0)
@@ -611,6 +648,9 @@ def generate_scenario(
         sync=sync,
         requires_core1_handoff=requires_core1,
         core1_handoff_enabled=core1_handoff_enabled,
+        runtime_profile=runtime_profile if applied_stress_iterations else "short",
+        stress_iterations=applied_stress_iterations,
+        target_min_wall_time_sec=target_min_wall_time_sec if applied_stress_iterations else 0,
     )
 
 
@@ -670,6 +710,9 @@ def scenario_from_operator(
     variant: int = 0,
     rng: random.Random | None = None,
     core1_handoff_enabled: bool = False,
+    runtime_profile: str = "short",
+    stress_iterations: int = 0,
+    target_min_wall_time_sec: int = 0,
 ) -> ScenarioIR:
     if operator not in SEMANTIC_OPERATORS:
         raise ValueError(f"unsupported SFuzz semantic operator: {operator}")
@@ -679,6 +722,9 @@ def scenario_from_operator(
         variant=variant,
         rng=rng,
         core1_handoff_enabled=core1_handoff_enabled,
+        runtime_profile=runtime_profile,
+        stress_iterations=stress_iterations,
+        target_min_wall_time_sec=target_min_wall_time_sec,
     )
 
 
@@ -692,6 +738,9 @@ def seed_from_scenario(scenario: ScenarioIR) -> SfuzSeed:
         *[f"event:{event}" for event in scenario.expected_micro_events],
         f"requires_core1_handoff:{str(scenario.requires_core1_handoff).lower()}",
         f"core1_handoff_enabled:{str(scenario.core1_handoff_enabled).lower()}",
+        f"runtime_profile:{scenario.runtime_profile}",
+        f"stress_iterations:{scenario.stress_iterations}",
+        f"target_min_wall_time_sec:{scenario.target_min_wall_time_sec}",
     ]
     if scenario.requires_core1_handoff and not scenario.core1_handoff_enabled:
         tags.append("single-core-fallback")
@@ -733,6 +782,8 @@ def generate_scenario_corpus(
     count: int = len(SCENARIO_FAMILIES),
     rng_seed: int = 1,
     core1_handoff_enabled: bool = False,
+    runtime_profile: str = "short",
+    target_min_wall_time_sec: int = 0,
 ) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     rnd = random.Random(rng_seed)
@@ -744,6 +795,8 @@ def generate_scenario_corpus(
             variant=index,
             rng=rnd,
             core1_handoff_enabled=core1_handoff_enabled,
+            runtime_profile=runtime_profile,
+            target_min_wall_time_sec=target_min_wall_time_sec,
         )
         output = output_dir / f"{index:04d}-{slugify(scenario.scenario_id)}.sfuz"
         write_scenario_artifacts(output, scenario)
@@ -757,12 +810,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--count", type=int, default=len(SCENARIO_FAMILIES))
     parser.add_argument("--rng-seed", type=int, default=1)
     parser.add_argument("--enable-core1-handoff", action="store_true")
+    parser.add_argument("--runtime-profile", choices=["short", "long"], default="short")
+    parser.add_argument("--target-min-wall-time-sec", type=int, default=0)
     args = parser.parse_args(argv)
     paths = generate_scenario_corpus(
         args.output_dir,
         count=args.count,
         rng_seed=args.rng_seed,
         core1_handoff_enabled=args.enable_core1_handoff,
+        runtime_profile=args.runtime_profile,
+        target_min_wall_time_sec=args.target_min_wall_time_sec,
     )
     for path in paths:
         print(path)

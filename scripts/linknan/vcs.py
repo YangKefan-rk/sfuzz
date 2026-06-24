@@ -68,6 +68,12 @@ class VcsLogInfo:
     cycles_are_requested_only: bool = False
     vcs_sim_time_ps: int | None = None
     vcs_cpu_time_sec: float | None = None
+    sfuzz_core0_staged: bool = False
+    sfuzz_core1_staged: bool = False
+    sfuzz_core1_executed: bool = False
+    sfuzz_core1_handoff_reason: str = ""
+    sfuzz_core1_entry: str = ""
+    sfuzz_core1_payload_size: int | None = None
 
 
 ASSERTION_REASONS = {"assert_log_nonempty", "assertion_failed"}
@@ -646,6 +652,25 @@ def scan_vcs_logs(run_log: Path, assert_log: Path, requested_cycles: int | None)
         for reason, pattern in BUG_PATTERNS:
             if pattern.search(line) and reason not in info.bug_reasons:
                 info.bug_reasons.append(reason)
+        payload_match = re.search(r"SFUZZ_CORE_PAYLOAD:\s+name=(\S+)\s+paddr=(0x[0-9a-fA-F]+)\s+size=(\d+)", line)
+        if payload_match:
+            core_name = payload_match.group(1)
+            if core_name == "core0":
+                info.sfuzz_core0_staged = True
+            elif core_name == "core1":
+                info.sfuzz_core1_staged = True
+                info.sfuzz_core1_entry = payload_match.group(2)
+                info.sfuzz_core1_payload_size = int(payload_match.group(3))
+        handoff_match = re.search(
+            r"SFUZZ_CORE1_HANDOFF:\s+staged=(\d+)\s+entry=(0x[0-9a-fA-F]+)\s+size=(\d+)\s+executed=(\d+)\s+reason=(\S+)",
+            line,
+        )
+        if handoff_match:
+            info.sfuzz_core1_staged = handoff_match.group(1) != "0"
+            info.sfuzz_core1_entry = handoff_match.group(2)
+            info.sfuzz_core1_payload_size = int(handoff_match.group(3))
+            info.sfuzz_core1_executed = handoff_match.group(4) != "0"
+            info.sfuzz_core1_handoff_reason = handoff_match.group(5)
 
     exceeded = [int(match) for match in re.findall(r"EXCEEDED MAX CYCLE:\s*(\d+)", text)]
     if exceeded:
