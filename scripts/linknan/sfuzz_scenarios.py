@@ -3,12 +3,18 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from .common import slugify
-from .seeds import SfuzSeed, write_sfuz_seed
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from linknan.common import slugify
+    from linknan.seeds import SfuzSeed, write_sfuz_seed
+else:
+    from .common import slugify
+    from .seeds import SfuzSeed, write_sfuz_seed
 
 
 PMEM_BASE = 0x80000000
