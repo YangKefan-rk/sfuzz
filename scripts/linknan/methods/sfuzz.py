@@ -59,6 +59,9 @@ SFUZZ_FIELDS = [
     "coverage_group_deficit",
     "coverage_group_new_bits",
     "coverage_group_accumulated_bits",
+    "hard_target_hit_groups",
+    "hard_target_new_bits",
+    "hard_target_accumulated_bits",
     "hard_target_first_hits",
     "scheduler_policy",
     "scheduler_family",
@@ -68,8 +71,10 @@ SFUZZ_FIELDS = [
     "scheduler_weight",
     "scheduler_total_weight",
     "semantic_operator_credit",
+    "semantic_operator_hard_target_credit",
     "semantic_operator_stall",
     "scenario_family_credit",
+    "scenario_family_hard_target_credit",
     "scenario_family_stall",
     "retained",
     "retention_reason",
@@ -234,6 +239,9 @@ class CorpusEntry:
     coverage_group_deficit: int | str = ""
     coverage_group_new_bits: str = ""
     coverage_group_accumulated_bits: str = ""
+    hard_target_hit_groups: str = ""
+    hard_target_new_bits: int | str = ""
+    hard_target_accumulated_bits: str = ""
     hard_target_first_hits: str = ""
     scheduler_policy: str = ""
     scheduler_family: str = ""
@@ -243,8 +251,10 @@ class CorpusEntry:
     scheduler_weight: int | str = ""
     scheduler_total_weight: int | str = ""
     semantic_operator_credit: int | str = ""
+    semantic_operator_hard_target_credit: int | str = ""
     semantic_operator_stall: int | str = ""
     scenario_family_credit: int | str = ""
+    scenario_family_hard_target_credit: int | str = ""
     scenario_family_stall: int | str = ""
     requires_core1_handoff: bool = False
     core1_handoff_enabled: bool = False
@@ -300,9 +310,11 @@ class CoverageGroupSnapshot:
 @dataclass
 class SchedulerRuntime:
     operator_credit: dict[str, int] = field(default_factory=dict)
+    operator_hard_target_credit: dict[str, int] = field(default_factory=dict)
     operator_attempts: dict[str, int] = field(default_factory=dict)
     operator_stall: dict[str, int] = field(default_factory=dict)
     family_credit: dict[str, int] = field(default_factory=dict)
+    family_hard_target_credit: dict[str, int] = field(default_factory=dict)
     family_attempts: dict[str, int] = field(default_factory=dict)
     family_stall: dict[str, int] = field(default_factory=dict)
     group_credit: dict[str, int] = field(default_factory=dict)
@@ -370,6 +382,22 @@ def accumulated_covered(accumulated: bytearray) -> int:
 
 def group_trace(values: dict[str, int]) -> str:
     return ";".join(f"{key}:{values[key]}" for key in sorted(values) if values[key])
+
+
+def hard_target_hits(group_new_bits: dict[str, int]) -> dict[str, int]:
+    return {
+        group: max(0, group_new_bits.get(group, 0))
+        for group in SFUZZ_HARD_TARGET_GROUPS
+        if group_new_bits.get(group, 0) > 0
+    }
+
+
+def hard_target_total(values: dict[str, int]) -> int:
+    return sum(max(0, values.get(group, 0)) for group in SFUZZ_HARD_TARGET_GROUPS)
+
+
+def hard_target_group_list(values: dict[str, int]) -> str:
+    return ";".join(group for group in SFUZZ_HARD_TARGET_GROUPS if values.get(group, 0) > 0)
 
 
 def group_accumulated_trace(values: dict[str, bytearray]) -> str:
@@ -516,6 +544,8 @@ def update_runtime_feedback(
     new_bits: int,
     group_new_bits: dict[str, int],
 ) -> None:
+    hard_hits = hard_target_hits(group_new_bits)
+    hard_new_bits = hard_target_total(hard_hits)
     entry.execution_count += 1
     entry.total_new_coverage_bits += max(0, new_bits)
     if new_bits > 0:
@@ -527,22 +557,28 @@ def update_runtime_feedback(
     if operator:
         runtime.operator_attempts[operator] = runtime.operator_attempts.get(operator, 0) + 1
         runtime.operator_credit[operator] = runtime.operator_credit.get(operator, 0) + max(0, new_bits)
-        if new_bits > 0:
+        runtime.operator_hard_target_credit[operator] = (
+            runtime.operator_hard_target_credit.get(operator, 0) + hard_new_bits
+        )
+        if new_bits > 0 or hard_new_bits > 0:
             runtime.operator_stall[operator] = 0
         else:
             runtime.operator_stall[operator] = runtime.operator_stall.get(operator, 0) + 1
         entry.semantic_operator_credit = runtime.operator_credit.get(operator, 0)
+        entry.semantic_operator_hard_target_credit = runtime.operator_hard_target_credit.get(operator, 0)
         entry.semantic_operator_stall = runtime.operator_stall.get(operator, 0)
 
     family = scenario_family_name(entry)
     if family:
         runtime.family_attempts[family] = runtime.family_attempts.get(family, 0) + 1
         runtime.family_credit[family] = runtime.family_credit.get(family, 0) + max(0, new_bits)
-        if new_bits > 0:
+        runtime.family_hard_target_credit[family] = runtime.family_hard_target_credit.get(family, 0) + hard_new_bits
+        if new_bits > 0 or hard_new_bits > 0:
             runtime.family_stall[family] = 0
         else:
             runtime.family_stall[family] = runtime.family_stall.get(family, 0) + 1
         entry.scenario_family_credit = runtime.family_credit.get(family, 0)
+        entry.scenario_family_hard_target_credit = runtime.family_hard_target_credit.get(family, 0)
         entry.scenario_family_stall = runtime.family_stall.get(family, 0)
 
     first_hits: list[str] = []
@@ -552,6 +588,8 @@ def update_runtime_feedback(
             first_hits.append(f"{group}:{campaign_exec}")
     if first_hits:
         entry.hard_target_first_hits = ";".join(first_hits)
+    entry.hard_target_hit_groups = hard_target_group_list(hard_hits)
+    entry.hard_target_new_bits = hard_new_bits
 
     for group, points in group_new_bits.items():
         if points > 0:
@@ -568,11 +606,19 @@ def update_runtime_feedback(
             runtime.group_stall[focus_group] = runtime.group_stall.get(focus_group, 0) + 1
 
 
-def retention_reason_for_run(run_outcome_text: str, new_bits: int, group_new_bits: dict[str, int]) -> tuple[bool, str]:
+def retention_reason_for_run(
+    run_outcome_text: str,
+    new_bits: int,
+    group_new_bits: dict[str, int],
+    focus_group: str = "",
+) -> tuple[bool, str]:
     if run_outcome_text == "bug_triggered":
         return True, "bug_signature"
-    if any(group_new_bits.get(group, 0) > 0 for group in SFUZZ_HARD_TARGET_GROUPS):
-        return True, "hard_target_hit"
+    hard_hits = hard_target_hits(group_new_bits)
+    if hard_hits:
+        return True, f"hard_target_hit:{hard_target_group_list(hard_hits)}"
+    if focus_group and group_new_bits.get(focus_group, 0) > 0:
+        return True, f"score_improvement:{focus_group}"
     if new_bits > 0:
         return True, "new_coverage"
     return False, "not_interesting"
@@ -741,9 +787,11 @@ def semantic_bandit_weight(
     operator = semantic_operator_name(entry)
     if operator:
         credit = runtime.operator_credit.get(operator, 0)
+        hard_credit = runtime.operator_hard_target_credit.get(operator, 0)
         attempts = runtime.operator_attempts.get(operator, 0)
         stall = runtime.operator_stall.get(operator, 0)
         weight += min(64, credit.bit_length() * 4)
+        weight += min(96, hard_credit.bit_length() * 8)
         if attempts <= 1:
             weight += 8
         weight = max(1, weight // (1 + min(4, stall)))
@@ -751,9 +799,11 @@ def semantic_bandit_weight(
     family = scenario_family_name(entry)
     if family:
         credit = runtime.family_credit.get(family, 0)
+        hard_credit = runtime.family_hard_target_credit.get(family, 0)
         attempts = runtime.family_attempts.get(family, 0)
         stall = runtime.family_stall.get(family, 0)
         weight += min(64, credit.bit_length() * 3)
+        weight += min(96, hard_credit.bit_length() * 6)
         if attempts <= 1:
             weight += 8
         weight = max(1, weight // (1 + min(8, stall)))
@@ -1302,6 +1352,9 @@ def row_from_run(
         "coverage_group_deficit": entry.coverage_group_deficit,
         "coverage_group_new_bits": group_trace(group_new_bits),
         "coverage_group_accumulated_bits": group_trace(group_accumulated_bits),
+        "hard_target_hit_groups": entry.hard_target_hit_groups,
+        "hard_target_new_bits": entry.hard_target_new_bits,
+        "hard_target_accumulated_bits": group_trace(hard_target_hits(group_accumulated_bits)),
         "hard_target_first_hits": entry.hard_target_first_hits,
         "scheduler_policy": entry.scheduler_policy,
         "scheduler_family": entry.scheduler_family,
@@ -1311,8 +1364,10 @@ def row_from_run(
         "scheduler_weight": entry.scheduler_weight,
         "scheduler_total_weight": entry.scheduler_total_weight,
         "semantic_operator_credit": entry.semantic_operator_credit,
+        "semantic_operator_hard_target_credit": entry.semantic_operator_hard_target_credit,
         "semantic_operator_stall": entry.semantic_operator_stall,
         "scenario_family_credit": entry.scenario_family_credit,
+        "scenario_family_hard_target_credit": entry.scenario_family_hard_target_credit,
         "scenario_family_stall": entry.scenario_family_stall,
         "retained": retained,
         "retention_reason": retention_reason,
@@ -1536,7 +1591,12 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
             new_bits=new_bits,
             group_new_bits=group_new_bits,
         )
-        retained, retention_reason = retention_reason_for_run(run["run_outcome"], new_bits, group_new_bits)
+        retained, retention_reason = retention_reason_for_run(
+            run["run_outcome"],
+            new_bits,
+            group_new_bits,
+            str(entry.coverage_group_focus or ""),
+        )
         if retained:
             entry.energy = bounded_energy(new_bits, args.min_energy, args.max_energy)
             focus_group, focus_deficit = entry_focus_from_deficits(entry, group_deficits)
@@ -1592,8 +1652,10 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
             "coverage_group_accumulated_bits": group_accumulated_trace(accumulated_by_group),
             "hard_target_first_hits": group_trace(scheduler_runtime.hard_target_first_hit),
             "semantic_operator_credit": group_trace(scheduler_runtime.operator_credit),
+            "semantic_operator_hard_target_credit": group_trace(scheduler_runtime.operator_hard_target_credit),
             "semantic_operator_stall": group_trace(scheduler_runtime.operator_stall),
             "scenario_family_credit": group_trace(scheduler_runtime.family_credit),
+            "scenario_family_hard_target_credit": group_trace(scheduler_runtime.family_hard_target_credit),
             "scenario_family_stall": group_trace(scheduler_runtime.family_stall),
             "coverage_group_credit": group_trace(scheduler_runtime.group_credit),
             "coverage_group_stall": group_trace(scheduler_runtime.group_stall),

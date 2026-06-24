@@ -721,19 +721,32 @@ class SfuzzSchedulerTests(unittest.TestCase):
             new_bits=5,
             group_new_bits={"sfuzz_atomic": 2, "sfuzz_lsq": 0},
         )
+        self.assertEqual(entry.hard_target_hit_groups, "sfuzz_atomic")
+        self.assertEqual(entry.hard_target_new_bits, 2)
+
         update_runtime_feedback(runtime, entry, campaign_exec=8, new_bits=0, group_new_bits={})
 
         self.assertEqual(runtime.operator_credit["insert_amo_sequence"], 5)
+        self.assertEqual(runtime.operator_hard_target_credit["insert_amo_sequence"], 2)
         self.assertEqual(runtime.operator_stall["insert_amo_sequence"], 1)
         self.assertEqual(runtime.family_credit["amo_contention"], 5)
+        self.assertEqual(runtime.family_hard_target_credit["amo_contention"], 2)
         self.assertEqual(runtime.hard_target_first_hit["sfuzz_atomic"], 7)
+        self.assertEqual(entry.hard_target_new_bits, 0)
         self.assertEqual(entry.no_new_coverage_streak, 1)
 
     def test_retention_reason_prioritizes_bug_and_hard_target(self) -> None:
         from linknan.methods.sfuzz import retention_reason_for_run
 
         self.assertEqual(retention_reason_for_run("bug_triggered", 0, {}), (True, "bug_signature"))
-        self.assertEqual(retention_reason_for_run("good_trap", 0, {"sfuzz_atomic": 1}), (True, "hard_target_hit"))
+        self.assertEqual(
+            retention_reason_for_run("good_trap", 0, {"sfuzz_atomic": 1}),
+            (True, "hard_target_hit:sfuzz_atomic"),
+        )
+        self.assertEqual(
+            retention_reason_for_run("good_trap", 0, {"sfuzz_branch": 1}, "sfuzz_branch"),
+            (True, "score_improvement:sfuzz_branch"),
+        )
         self.assertEqual(retention_reason_for_run("good_trap", 3, {}), (True, "new_coverage"))
         self.assertEqual(retention_reason_for_run("good_trap", 0, {}), (False, "not_interesting"))
 
