@@ -1435,6 +1435,7 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                 flush=True,
             )
 
+    all_paper_faithful = all(str(row.get("paper_faithful")) == "True" for row in rows) if rows else False
     write_table(
         rows,
         args.output_json or work_dir / "surgefuzz_results.json",
@@ -1477,8 +1478,11 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                 "ancestor_selector": args.ancestor_selector,
                 "ancestor_profile": str(args.ancestor_profile or ""),
             },
+            "paper_faithful": all_paper_faithful,
         },
     )
+    if getattr(args, "require_paper_native", False) and not all_paper_faithful:
+        return 2
     return 0
 
 

@@ -887,6 +887,7 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
         exec_idx += 1
         mutation_idx += 1
 
+    all_paper_faithful = all(str(row.get("paper_faithful")) == "True" for row in rows) if rows else False
     write_table(
         rows,
         args.output_json or work_dir / "results.json",
@@ -894,12 +895,14 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
         DIRECTFUZZ_FIELDS,
         {
             "fuzzer": "directfuzz",
-            "paper_faithful": all(str(row.get("paper_faithful")) == "True" for row in rows) if rows else False,
+            "paper_faithful": all_paper_faithful,
             "paper_faithful_scope": PAPER_FAITHFUL_SCOPE,
             "target_instance": args.target_instance,
             "metadata_source": args.metadata_source,
         },
     )
+    if getattr(args, "require_paper_native", False) and not all_paper_faithful:
+        return 2
     return 0
 
 

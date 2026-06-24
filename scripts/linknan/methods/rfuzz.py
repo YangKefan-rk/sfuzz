@@ -640,6 +640,7 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
             flush=True,
         )
 
+    all_paper_faithful = all(str(row.get("paper_faithful")) == "True" for row in rows) if rows else False
     write_table(
         rows,
         args.output_json or work_dir / "results.json",
@@ -651,8 +652,10 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
             "rfuzz_abi_audit": abi_audit.to_dict(),
             "actual_input_abi": actual_input_abi,
             "cycle_limit": cycle_limit,
-            "paper_faithful": all(str(row.get("paper_faithful")) == "True" for row in rows) if rows else False,
+            "paper_faithful": all_paper_faithful,
             "paper_faithful_scope": "linknan-processor-workload",
         },
     )
+    if getattr(args, "require_formal_feedback", False) and not all_paper_faithful:
+        return 2
     return 0

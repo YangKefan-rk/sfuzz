@@ -6,6 +6,7 @@ crashes/
 errors/
 corpus/
 work/
+campaigns/
 generated-litmus-c/
 
 *.log
