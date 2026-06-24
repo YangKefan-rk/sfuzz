@@ -1204,11 +1204,19 @@ def command_cycle_markers(command_log: str) -> tuple[bool, bool]:
     return "--cycles=" in text, "+max-cycles=" in text
 
 
+def append_simv_arg(existing: str | None, extra: str) -> str:
+    text = str(existing or "").strip()
+    return f"{text} {extra}".strip() if text else extra
+
+
 def run_one(args: Any, ctx: VcsContext, runs_dir: Path, logs_dir: Path, seed: Path, case_name: str) -> dict[str, Any]:
     extra_env = {}
     firrtl_cov = getattr(args, "firrtl_cov", None)
     if firrtl_cov:
         extra_env["SFUZZ_FIRRTL_COV"] = str(firrtl_cov)
+    simv_args = args.simv_args
+    if getattr(args, "enable_core1_handoff", False):
+        simv_args = append_simv_arg(simv_args, "+sfuzz_enable_all_cores=1")
     result, case_dir, run_log, assert_log = run_vcs_seed(
         seed=seed,
         case_name=case_name,
@@ -1217,7 +1225,7 @@ def run_one(args: Any, ctx: VcsContext, runs_dir: Path, logs_dir: Path, seed: Pa
         ctx=ctx,
         timeout_sec=args.timeout_sec,
         cov=args.cov,
-        simv_args=args.simv_args,
+        simv_args=simv_args,
         extra_env=extra_env or None,
     )
     info = scan_vcs_logs(run_log, assert_log, ctx.cycles)

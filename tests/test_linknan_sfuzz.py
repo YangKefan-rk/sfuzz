@@ -16,6 +16,7 @@ from linknan.methods.sfuzz import (  # noqa: E402
     CorpusEntry,
     SchedulerRuntime,
     apply_sfuz_mutation_operator,
+    append_simv_arg,
     available_mutation_operators,
     bounded_energy,
     coverage_delta,
@@ -717,6 +718,13 @@ class SfuzzSchedulerTests(unittest.TestCase):
         self.assertEqual(retention_reason_for_run("good_trap", 0, {"sfuzz_atomic": 1}), (True, "hard_target_hit"))
         self.assertEqual(retention_reason_for_run("good_trap", 3, {}), (True, "new_coverage"))
         self.assertEqual(retention_reason_for_run("good_trap", 0, {}), (False, "not_interesting"))
+
+    def test_append_simv_arg_preserves_existing_args(self) -> None:
+        self.assertEqual(append_simv_arg(None, "+sfuzz_enable_all_cores=1"), "+sfuzz_enable_all_cores=1")
+        self.assertEqual(
+            append_simv_arg("+foo=1", "+sfuzz_enable_all_cores=1"),
+            "+foo=1 +sfuzz_enable_all_cores=1",
+        )
 
     def test_vcs_log_parser_records_core1_handoff_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
