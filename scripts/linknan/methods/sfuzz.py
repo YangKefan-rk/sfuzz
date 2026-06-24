@@ -1429,6 +1429,39 @@ def row_from_run(
     }
 
 
+def sfuzz_result_meta(
+    args: Any,
+    *,
+    group_deficits: dict[str, int],
+    accumulated_by_group: dict[str, bytearray],
+    scheduler_runtime: SchedulerRuntime,
+) -> dict[str, Any]:
+    return {
+        "fuzzer": "sfuzz",
+        "mode": "batch_replay" if getattr(args, "batch_replay", False) else "online",
+        "scheduler_policy": getattr(args, "scheduler_policy", WEIGHTED_SCHEDULER_POLICY),
+        "mutation_sections": getattr(args, "mutation_sections", "core0,core1,shared,interrupt"),
+        "semantic_mutation": not getattr(args, "disable_semantic_mutation", False),
+        "scenario_aware_scheduling": not getattr(args, "disable_scenario_aware_scheduling", False),
+        "core1_handoff_enabled": getattr(args, "enable_core1_handoff", False),
+        "coverage_bitmap_semantics": SFUZZ_COVERAGE_BITMAP_SEMANTICS,
+        "coverage_group_deficits": group_trace(group_deficits),
+        "coverage_group_accumulated_bits": group_accumulated_trace(accumulated_by_group),
+        "hard_target_first_hits": group_trace(scheduler_runtime.hard_target_first_hit),
+        "semantic_operator_credit": group_trace(scheduler_runtime.operator_credit),
+        "semantic_operator_hard_target_credit": group_trace(scheduler_runtime.operator_hard_target_credit),
+        "semantic_operator_stall": group_trace(scheduler_runtime.operator_stall),
+        "scenario_family_credit": group_trace(scheduler_runtime.family_credit),
+        "scenario_family_hard_target_credit": group_trace(scheduler_runtime.family_hard_target_credit),
+        "scenario_family_stall": group_trace(scheduler_runtime.family_stall),
+        "coverage_group_credit": group_trace(scheduler_runtime.group_credit),
+        "coverage_group_stall": group_trace(scheduler_runtime.group_stall),
+        "baseline_policy": BASELINE_SCHEDULER_POLICY,
+        "innovation_policy": WEIGHTED_SCHEDULER_POLICY,
+        "semantic_bandit_policy": SEMANTIC_BANDIT_SCHEDULER_POLICY,
+    }
+
+
 def initial_corpus(args: Any, work_dir: Path) -> list[CorpusEntry]:
     seeds = collect_seed_paths(args.seed, args.seed_list, args.seed_dir, work_dir, args.limit, True, "sfuzz-smoke")
     entries: list[CorpusEntry] = []
@@ -1633,35 +1666,29 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
             f"new={new_bits} acc={accumulated_covered(accumulated)} log={run['run_log']}",
             flush=True,
         )
+        write_table(
+            rows,
+            args.output_json or work_dir / "results.json",
+            args.output_csv or work_dir / "results.csv",
+            SFUZZ_FIELDS,
+            sfuzz_result_meta(
+                args,
+                group_deficits=group_deficits,
+                accumulated_by_group=accumulated_by_group,
+                scheduler_runtime=scheduler_runtime,
+            ),
+        )
 
     write_table(
         rows,
         args.output_json or work_dir / "results.json",
         args.output_csv or work_dir / "results.csv",
         SFUZZ_FIELDS,
-        {
-            "fuzzer": "sfuzz",
-            "mode": "batch_replay" if getattr(args, "batch_replay", False) else "online",
-            "scheduler_policy": getattr(args, "scheduler_policy", WEIGHTED_SCHEDULER_POLICY),
-            "mutation_sections": getattr(args, "mutation_sections", "core0,core1,shared,interrupt"),
-            "semantic_mutation": not getattr(args, "disable_semantic_mutation", False),
-            "scenario_aware_scheduling": not getattr(args, "disable_scenario_aware_scheduling", False),
-            "core1_handoff_enabled": getattr(args, "enable_core1_handoff", False),
-            "coverage_bitmap_semantics": SFUZZ_COVERAGE_BITMAP_SEMANTICS,
-            "coverage_group_deficits": group_trace(group_deficits),
-            "coverage_group_accumulated_bits": group_accumulated_trace(accumulated_by_group),
-            "hard_target_first_hits": group_trace(scheduler_runtime.hard_target_first_hit),
-            "semantic_operator_credit": group_trace(scheduler_runtime.operator_credit),
-            "semantic_operator_hard_target_credit": group_trace(scheduler_runtime.operator_hard_target_credit),
-            "semantic_operator_stall": group_trace(scheduler_runtime.operator_stall),
-            "scenario_family_credit": group_trace(scheduler_runtime.family_credit),
-            "scenario_family_hard_target_credit": group_trace(scheduler_runtime.family_hard_target_credit),
-            "scenario_family_stall": group_trace(scheduler_runtime.family_stall),
-            "coverage_group_credit": group_trace(scheduler_runtime.group_credit),
-            "coverage_group_stall": group_trace(scheduler_runtime.group_stall),
-            "baseline_policy": BASELINE_SCHEDULER_POLICY,
-            "innovation_policy": WEIGHTED_SCHEDULER_POLICY,
-            "semantic_bandit_policy": SEMANTIC_BANDIT_SCHEDULER_POLICY,
-        },
+        sfuzz_result_meta(
+            args,
+            group_deficits=group_deficits,
+            accumulated_by_group=accumulated_by_group,
+            scheduler_runtime=scheduler_runtime,
+        ),
     )
     return 0

@@ -37,8 +37,11 @@ def write_table(rows: list[dict[str, Any]], json_path: Path, csv_path: Path, fie
         **meta,
         "results": rows,
     }
-    json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    with csv_path.open("w", encoding="utf-8", newline="") as csv_file:
+    json_tmp = json_path.with_name(f"{json_path.name}.tmp")
+    csv_tmp = csv_path.with_name(f"{csv_path.name}.tmp")
+    json_tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    json_tmp.replace(json_path)
+    with csv_tmp.open("w", encoding="utf-8", newline="") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
@@ -49,6 +52,7 @@ def write_table(rows: list[dict[str, Any]], json_path: Path, csv_path: Path, fie
                     value = ";".join(str(item) for item in value)
                 clean[key] = value
             writer.writerow(clean)
+    csv_tmp.replace(csv_path)
 
 
 def append_notes(*items: Any) -> str:

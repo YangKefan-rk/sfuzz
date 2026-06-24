@@ -1096,6 +1096,53 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
     exec_count = 0
     input_mode = getattr(args, "input_mode", "workload")
 
+    def checkpoint_results() -> None:
+        write_table(
+            rows,
+            args.output_json or work_dir / "surgefuzz_results.json",
+            args.output_csv or work_dir / "surgefuzz_results.csv",
+            SURGEFUZZ_FIELDS,
+            {
+                "fuzzer": "surgefuzz",
+                "input_contract": (
+                    "Paper/artifact SurgeFuzz generates RISC-V instruction programs, compiles them to a simulator "
+                    "workload, and feeds back per-cycle annotated-signal score plus ancestor-register coverage. "
+                    "The artifact-program mode mutates Program/Block/Instruction objects and emits LinkNan-native "
+                    ".bin workloads; workload mode remains a legacy LinkNan .bin/.elf adapter."
+                ),
+                "cycle_policy": "no --cycles passed by SFuzz; LinkNan xmake simv-run default is +max-cycles=0; external timeout bounds runs",
+                "required_native_abi": REQUIRED_SURGE_NATIVE_ABI,
+                "input_mode": input_mode,
+                "target_manifest": str(args.target_manifest),
+                "surgefuzz_targets": manifest_table(args.target_manifest),
+                "paper_based": getattr(args, "rotation_mode", "none") != "none",
+                "extension": "target_rotation" if getattr(args, "rotation_mode", "none") != "none" else "",
+                "rotation": {
+                    "mode": getattr(args, "rotation_mode", "none"),
+                    "manifest": str(getattr(args, "rotation_manifest", "") or ""),
+                    "instrumentation_config": str(rotation_config_path or ""),
+                    "target_count": len(rotation_targets),
+                    "budget_per_target": getattr(args, "rotation_budget_per_target", ""),
+                    "stall_threshold": getattr(args, "rotation_stall_threshold", ""),
+                },
+                "ablation": {
+                    "disable_mi": bool(getattr(args, "disable_mi", False)),
+                    "disable_power_scheduling": bool(getattr(args, "disable_power_scheduling", False)),
+                },
+                "selected_target": {
+                    "id": target.id,
+                    "category": target.category,
+                    "module": target.module,
+                    "instance": target.instance,
+                    "signal": target.signal,
+                    "annotation": args.annotation_type,
+                    "ancestor_selector": args.ancestor_selector,
+                    "ancestor_profile": str(args.ancestor_profile or ""),
+                },
+                "paper_faithful": all(str(row.get("paper_faithful")) == "True" for row in rows) if rows else False,
+            },
+        )
+
     if input_mode == "artifact-program":
         program_config = program_config_from_args(args)
         max_execs = args.max_execs if args.max_execs > 0 else args.initial_seed_count + args.mutations
@@ -1176,6 +1223,7 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                 active_target_index=active_target_index if active_target_index is not None else "",
                 active_target=active_target,
             )
+            checkpoint_results()
             print(
                 f"[artifact init {index + 1}/{args.initial_seed_count}] exit={result.returncode} "
                 f"score={feedback.best_score} new_ancestor={feedback.new_coverage} workload={workload}",
@@ -1273,6 +1321,7 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                 active_target_index=active_target_index if active_target_index is not None else "",
                 active_target=active_target,
             )
+            checkpoint_results()
             print(
                 f"[artifact round {round_index}] parent={parent.seed_id} keep={keep} exit={result.returncode} "
                 f"score={feedback.best_score} new_ancestor={feedback.new_coverage} "
@@ -1349,6 +1398,7 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                 active_target_index=active_target_index if active_target_index is not None else "",
                 active_target=active_target,
             )
+            checkpoint_results()
             print(
                 f"[bootstrap {index + 1}/{len(workloads)}] exit={result.returncode} "
                 f"score={feedback.best_score} new_ancestor={feedback.new_coverage} workload={workload}",
@@ -1428,6 +1478,7 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                 active_target_index=active_target_index if active_target_index is not None else "",
                 active_target=active_target,
             )
+            checkpoint_results()
             print(
                 f"[round {round_index}] parent={parent.seed_id} keep={keep} exit={result.returncode} "
                 f"score={feedback.best_score} new_ancestor={feedback.new_coverage} "
@@ -1436,51 +1487,7 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
             )
 
     all_paper_faithful = all(str(row.get("paper_faithful")) == "True" for row in rows) if rows else False
-    write_table(
-        rows,
-        args.output_json or work_dir / "surgefuzz_results.json",
-        args.output_csv or work_dir / "surgefuzz_results.csv",
-        SURGEFUZZ_FIELDS,
-        {
-            "fuzzer": "surgefuzz",
-            "input_contract": (
-                "Paper/artifact SurgeFuzz generates RISC-V instruction programs, compiles them to a simulator "
-                "workload, and feeds back per-cycle annotated-signal score plus ancestor-register coverage. "
-                "The artifact-program mode mutates Program/Block/Instruction objects and emits LinkNan-native "
-                ".bin workloads; workload mode remains a legacy LinkNan .bin/.elf adapter."
-            ),
-            "cycle_policy": "no --cycles passed by SFuzz; LinkNan xmake simv-run default is +max-cycles=0; external timeout bounds runs",
-            "required_native_abi": REQUIRED_SURGE_NATIVE_ABI,
-            "input_mode": input_mode,
-            "target_manifest": str(args.target_manifest),
-            "surgefuzz_targets": manifest_table(args.target_manifest),
-            "paper_based": getattr(args, "rotation_mode", "none") != "none",
-            "extension": "target_rotation" if getattr(args, "rotation_mode", "none") != "none" else "",
-            "rotation": {
-                "mode": getattr(args, "rotation_mode", "none"),
-                "manifest": str(getattr(args, "rotation_manifest", "") or ""),
-                "instrumentation_config": str(rotation_config_path or ""),
-                "target_count": len(rotation_targets),
-                "budget_per_target": getattr(args, "rotation_budget_per_target", ""),
-                "stall_threshold": getattr(args, "rotation_stall_threshold", ""),
-            },
-            "ablation": {
-                "disable_mi": bool(getattr(args, "disable_mi", False)),
-                "disable_power_scheduling": bool(getattr(args, "disable_power_scheduling", False)),
-            },
-            "selected_target": {
-                "id": target.id,
-                "category": target.category,
-                "module": target.module,
-                "instance": target.instance,
-                "signal": target.signal,
-                "annotation": args.annotation_type,
-                "ancestor_selector": args.ancestor_selector,
-                "ancestor_profile": str(args.ancestor_profile or ""),
-            },
-            "paper_faithful": all_paper_faithful,
-        },
-    )
+    checkpoint_results()
     if getattr(args, "require_paper_native", False) and not all_paper_faithful:
         return 2
     return 0

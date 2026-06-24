@@ -654,6 +654,16 @@ def direct_notes(args: Any, backend: str, common_backend: str, dynamic_native_co
     return notes
 
 
+def directfuzz_result_meta(rows: list[dict[str, Any]], args: Any) -> dict[str, Any]:
+    return {
+        "fuzzer": "directfuzz",
+        "paper_faithful": all(str(row.get("paper_faithful")) == "True" for row in rows) if rows else False,
+        "paper_faithful_scope": PAPER_FAITHFUL_SCOPE,
+        "target_instance": args.target_instance,
+        "metadata_source": args.metadata_source,
+    }
+
+
 def run_directfuzz(args: Any, ctx: VcsContext) -> int:
     work_dir = args.work_dir.expanduser().resolve()
     runs_dir = work_dir / "runs"
@@ -849,6 +859,13 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
                 ),
             }
         )
+        write_table(
+            rows,
+            args.output_json or work_dir / "results.json",
+            args.output_csv or work_dir / "results.csv",
+            DIRECTFUZZ_FIELDS,
+            directfuzz_result_meta(rows, args),
+        )
         return entry
 
     exec_idx = 0
@@ -893,13 +910,7 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
         args.output_json or work_dir / "results.json",
         args.output_csv or work_dir / "results.csv",
         DIRECTFUZZ_FIELDS,
-        {
-            "fuzzer": "directfuzz",
-            "paper_faithful": all_paper_faithful,
-            "paper_faithful_scope": PAPER_FAITHFUL_SCOPE,
-            "target_instance": args.target_instance,
-            "metadata_source": args.metadata_source,
-        },
+        directfuzz_result_meta(rows, args),
     )
     if getattr(args, "require_paper_native", False) and not all_paper_faithful:
         return 2

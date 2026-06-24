@@ -417,6 +417,18 @@ def run_outcome(result: Any, info: Any, infrastructure_error: str) -> str:
     return "unknown"
 
 
+def rfuzz_result_meta(rows: list[dict[str, Any]], abi_audit: Any, actual_input_abi: str, cycle_limit: str) -> dict[str, Any]:
+    return {
+        "fuzzer": "rfuzz",
+        "runner_abi": abi_audit.runner_abi,
+        "rfuzz_abi_audit": abi_audit.to_dict(),
+        "actual_input_abi": actual_input_abi,
+        "cycle_limit": cycle_limit,
+        "paper_faithful": all(str(row.get("paper_faithful")) == "True" for row in rows) if rows else False,
+        "paper_faithful_scope": "linknan-processor-workload",
+    }
+
+
 def run_rfuzz(args: Any, ctx: VcsContext) -> int:
     work_dir = args.work_dir.expanduser().resolve()
     runs_dir = work_dir / "runs"
@@ -639,6 +651,13 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
             f"exit={result.returncode} retained={retained} growth={coverage_delta['growth']} log={run_log}",
             flush=True,
         )
+        write_table(
+            rows,
+            args.output_json or work_dir / "results.json",
+            args.output_csv or work_dir / "results.csv",
+            RFUZZ_FIELDS,
+            rfuzz_result_meta(rows, abi_audit, actual_input_abi, cycle_limit),
+        )
 
     all_paper_faithful = all(str(row.get("paper_faithful")) == "True" for row in rows) if rows else False
     write_table(
@@ -646,15 +665,7 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
         args.output_json or work_dir / "results.json",
         args.output_csv or work_dir / "results.csv",
         RFUZZ_FIELDS,
-        {
-            "fuzzer": "rfuzz",
-            "runner_abi": abi_audit.runner_abi,
-            "rfuzz_abi_audit": abi_audit.to_dict(),
-            "actual_input_abi": actual_input_abi,
-            "cycle_limit": cycle_limit,
-            "paper_faithful": all_paper_faithful,
-            "paper_faithful_scope": "linknan-processor-workload",
-        },
+        rfuzz_result_meta(rows, abi_audit, actual_input_abi, cycle_limit),
     )
     if getattr(args, "require_formal_feedback", False) and not all_paper_faithful:
         return 2
