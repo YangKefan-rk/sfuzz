@@ -734,7 +734,8 @@ class SfuzzSchedulerTests(unittest.TestCase):
             run_log.write_text(
                 "SFUZZ_CORE_PAYLOAD: name=core0 paddr=0x80000000 size=4\n"
                 "SFUZZ_CORE_PAYLOAD: name=core1 paddr=0x81000000 size=8\n"
-                "SFUZZ_CORE1_HANDOFF: staged=1 entry=0x81000000 size=8 executed=0 reason=secondary_slot_only\n",
+                "SFUZZ_CORE1_HANDOFF: staged=1 entry=0x81000000 size=8 executed=0 reason=secondary_slot_only\n"
+                "SFUZZ_CORE_EXECUTED: core=1 instrCnt=16 pc=0x8100001c\n",
                 encoding="utf-8",
             )
             assert_log.write_text("", encoding="utf-8")
@@ -743,10 +744,10 @@ class SfuzzSchedulerTests(unittest.TestCase):
 
         self.assertTrue(info.sfuzz_core0_staged)
         self.assertTrue(info.sfuzz_core1_staged)
-        self.assertFalse(info.sfuzz_core1_executed)
+        self.assertTrue(info.sfuzz_core1_executed)
         self.assertEqual(info.sfuzz_core1_entry, "0x81000000")
         self.assertEqual(info.sfuzz_core1_payload_size, 8)
-        self.assertEqual(info.sfuzz_core1_handoff_reason, "secondary_slot_only")
+        self.assertEqual(info.sfuzz_core1_handoff_reason, "core1_instr_count")
 
     def test_select_parent_dispatches_semantic_bandit_policy(self) -> None:
         corpus = [

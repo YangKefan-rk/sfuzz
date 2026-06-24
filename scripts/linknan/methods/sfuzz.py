@@ -1217,6 +1217,7 @@ def run_one(args: Any, ctx: VcsContext, runs_dir: Path, logs_dir: Path, seed: Pa
     simv_args = args.simv_args
     if getattr(args, "enable_core1_handoff", False):
         simv_args = append_simv_arg(simv_args, "+sfuzz_enable_all_cores=1")
+        simv_args = append_simv_arg(simv_args, "+sfuzz_secondary_reset_vector=2164260864")
     result, case_dir, run_log, assert_log = run_vcs_seed(
         seed=seed,
         case_name=case_name,

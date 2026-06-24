@@ -53,6 +53,11 @@ def add_common_vcs_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--build", action="store_true", help="run xmake simv before executing seeds")
     parser.add_argument("--skip-build", action="store_true", help="require an existing simv")
+    parser.add_argument(
+        "--build-chisel",
+        action="store_true",
+        help="regenerate LinkNan Chisel/RTL before VCS compilation; needed after Scala design changes",
+    )
     parser.add_argument("--rebuild-comp", action="store_true", help="force VCS recompilation when building")
     parser.add_argument("--cov", action="store_true", help="pass --cov to build/run")
     parser.add_argument("--run-urg", action="store_true", help="try to parse VCS .vdb with urg")

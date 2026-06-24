@@ -556,17 +556,18 @@ def build_simv_if_needed(args: Any, ctx: VcsContext, work_dir: Path) -> None:
         raise FileNotFoundError("missing required tool: xmake")
     if shutil.which("vcs") is None:
         raise FileNotFoundError("missing required tool: vcs")
-    if firrtl_cov:
+    if firrtl_cov and not getattr(args, "build_chisel", False):
         ensure_firrtl_coverage_artifacts(firrtl_cov, ctx, work_dir, build_timeout_sec(args))
 
     command = [
         "xmake",
         "simv",
-        "--no_build_chisel",
         f"--noc={num_cores_to_noc(ctx.num_cores)}",
         f"--sim_dir={ctx.sim_dir}",
         f"--build_dir={ctx.build_dir}",
     ]
+    if not getattr(args, "build_chisel", False):
+        command.append("--no_build_chisel")
     if ctx.build_no_diff:
         command.append("--no_diff")
     if ctx.no_fsdb:
@@ -669,8 +670,14 @@ def scan_vcs_logs(run_log: Path, assert_log: Path, requested_cycles: int | None)
             info.sfuzz_core1_staged = handoff_match.group(1) != "0"
             info.sfuzz_core1_entry = handoff_match.group(2)
             info.sfuzz_core1_payload_size = int(handoff_match.group(3))
-            info.sfuzz_core1_executed = handoff_match.group(4) != "0"
-            info.sfuzz_core1_handoff_reason = handoff_match.group(5)
+            handoff_executed = handoff_match.group(4) != "0"
+            info.sfuzz_core1_executed = info.sfuzz_core1_executed or handoff_executed
+            if handoff_executed or not info.sfuzz_core1_handoff_reason:
+                info.sfuzz_core1_handoff_reason = handoff_match.group(5)
+        executed_match = re.search(r"SFUZZ_CORE_EXECUTED:\s+core=(\d+)\s+instrCnt=(\d+)\s+pc=(0x[0-9a-fA-F]+)", line)
+        if executed_match and executed_match.group(1) == "1":
+            info.sfuzz_core1_executed = True
+            info.sfuzz_core1_handoff_reason = "core1_instr_count"
 
     exceeded = [int(match) for match in re.findall(r"EXCEEDED MAX CYCLE:\s*(\d+)", text)]
     if exceeded:
