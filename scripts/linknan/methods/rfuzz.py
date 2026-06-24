@@ -443,8 +443,8 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
     if getattr(args, "require_formal_feedback", False):
         if ctx.cycles is not None:
             raise ValueError("formal RFuzz LinkNan campaigns require --no-cycle-limit")
-        if args.timeout_sec < 120:
-            raise ValueError("formal RFuzz LinkNan campaigns require --timeout-sec >= 120")
+        if args.timeout_sec < 600:
+            raise ValueError("formal RFuzz LinkNan campaigns require --timeout-sec >= 600")
         if args.rfuzz_rounds < 1000:
             raise ValueError("formal RFuzz LinkNan campaigns require --rfuzz-rounds >= 1000")
         if args.rfuzz_toggle_bitmap_source != "vcs-native-abi":

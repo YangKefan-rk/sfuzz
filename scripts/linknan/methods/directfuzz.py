@@ -678,8 +678,8 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
     if getattr(args, "require_paper_native", False):
         if ctx.cycles is not None:
             raise ValueError("formal DirectFuzz campaigns require --no-cycle-limit")
-        if args.timeout_sec < 120:
-            raise ValueError("formal DirectFuzz campaigns require --timeout-sec >= 120")
+        if args.timeout_sec < 600:
+            raise ValueError("formal DirectFuzz campaigns require --timeout-sec >= 600")
         if args.max_execs < 1000:
             raise ValueError("formal DirectFuzz campaigns require --max-execs >= 1000")
         if args.coverage_backend != "native-file" or args.native_coverage_source != "vcs-native-abi":

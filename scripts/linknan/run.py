@@ -35,6 +35,7 @@ except ModuleNotFoundError:
 def add_common_vcs_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="SFuzz TOML config path")
     parser.add_argument("--linknan-root", help="LinkNan checkout root")
+    parser.add_argument("--build-dir", type=Path, help="LinkNan build directory")
     parser.add_argument("--sim-dir", type=Path, help="LinkNan sim directory")
     parser.add_argument("--work-dir", type=Path, default=Path("/tmp/sfuzz-linknan"))
     parser.add_argument("--cycles", type=int, help="max VCS simulation cycles")

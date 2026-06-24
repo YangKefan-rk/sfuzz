@@ -8,6 +8,8 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +24,7 @@ from linknan.config import DEFAULT_CONFIG, SFUZZ_HOME  # noqa: E402
 
 CAMPAIGN_FIELDS = [
     "method",
+    "worker_id",
     "command",
     "env",
     "work_dir",
@@ -29,6 +32,7 @@ CAMPAIGN_FIELDS = [
     "output_json",
     "coverage_name",
     "formal_guard",
+    "seed_list",
 ]
 SUMMARY_FIELDS = [
     "method",
@@ -48,6 +52,8 @@ SUMMARY_FIELDS = [
     "notes",
 ]
 DEFAULT_DIRECT_TARGET = "SimTop.soc.cc_0.tile.core.memBlock"
+ACTIVE_PROCESS_GROUPS: set[int] = set()
+ACTIVE_PROCESS_GROUPS_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -161,6 +167,29 @@ def write_seed_lists(paths: CampaignPaths, testcases: list[Testcase]) -> tuple[P
     return sfuzz_list, workload_list, manifest_csv
 
 
+def write_seed_shards(paths: CampaignPaths, testcases: list[Testcase], workers: int) -> tuple[list[Path], list[Path]]:
+    worker_count = max(1, min(workers, len(testcases)))
+    seed_lists = paths.inputs / "seed_lists"
+    seed_lists.mkdir(parents=True, exist_ok=True)
+    sfuzz_shards: list[list[str]] = [[] for _ in range(worker_count)]
+    workload_shards: list[list[str]] = [[] for _ in range(worker_count)]
+    for index, case in enumerate(testcases):
+        shard = index % worker_count
+        sfuzz_shards[shard].append(str(case.sfuzz_seed))
+        workload_shards[shard].append(str(case.workload))
+
+    sfuzz_paths: list[Path] = []
+    workload_paths: list[Path] = []
+    for worker_id in range(worker_count):
+        sfuzz_path = seed_lists / f"sfuzz_seed_list.worker-{worker_id:03d}.txt"
+        workload_path = seed_lists / f"workload_seed_list.worker-{worker_id:03d}.txt"
+        sfuzz_path.write_text("\n".join(sfuzz_shards[worker_id]) + "\n", encoding="utf-8")
+        workload_path.write_text("\n".join(workload_shards[worker_id]) + "\n", encoding="utf-8")
+        sfuzz_paths.append(sfuzz_path)
+        workload_paths.append(workload_path)
+    return sfuzz_paths, workload_paths
+
+
 def command_to_text(command: list[str]) -> str:
     return " ".join(shlex.quote(item) for item in command)
 
@@ -204,22 +233,88 @@ def build_common_args(args: argparse.Namespace, work_dir: Path, output_csv: Path
     return common
 
 
-def campaign_commands(args: argparse.Namespace, paths: CampaignPaths, sfuzz_list: Path, workload_list: Path) -> list[dict[str, Any]]:
+def method_build_dir(args: argparse.Namespace, method: str, paths: CampaignPaths, worker_id: int | None = None) -> Path | None:
+    if not getattr(args, "isolated_sim_dirs", True):
+        return None
+    if worker_id is not None:
+        return paths.results / method / "workers" / f"worker-{worker_id:03d}" / "linknan-build"
+    return paths.results / method / "linknan-build"
+
+
+def method_sim_dir(args: argparse.Namespace, method: str, paths: CampaignPaths, worker_id: int | None = None) -> Path | None:
+    if not getattr(args, "isolated_sim_dirs", True):
+        return None
+    if worker_id is not None:
+        return paths.results / method / "workers" / f"worker-{worker_id:03d}" / "linknan-sim"
+    return paths.results / method / "linknan-sim"
+
+
+def selected_methods(args: argparse.Namespace) -> set[str]:
+    values = getattr(args, "method", None) or []
+    return {str(value).lower() for value in values}
+
+
+def filter_commands(commands: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str, Any]]:
+    selected = selected_methods(args)
+    if not selected:
+        return commands
+    filtered = [item for item in commands if str(item.get("method", "")).lower() in selected]
+    missing = sorted(selected - {str(item.get("method", "")).lower() for item in filtered})
+    if missing:
+        raise ValueError(f"unknown campaign method(s): {', '.join(missing)}")
+    return filtered
+
+
+def per_worker_budget(total_budget: int, worker_count: int) -> int:
+    return max(1, total_budget)
+
+
+def worker_paths(paths: CampaignPaths, method: str, worker_id: int, worker_count: int) -> tuple[Path, Path, Path]:
+    if worker_count <= 1:
+        return paths.results / method / "work", paths.results / method / "results.csv", paths.results / method / "results.json"
+    root = paths.results / method / "workers" / f"worker-{worker_id:03d}"
+    return root / "work", root / "results.csv", root / "results.json"
+
+
+def campaign_commands(
+    args: argparse.Namespace,
+    paths: CampaignPaths,
+    sfuzz_lists: list[Path] | Path,
+    workload_lists: list[Path] | Path,
+) -> list[dict[str, Any]]:
     run_script = SFUZZ_HOME / "scripts" / "linknan" / "run.py"
     direct_metadata = args.direct_metadata.expanduser().resolve()
     surge_manifest = args.surge_target_manifest.expanduser().resolve()
     commands: list[dict[str, Any]] = []
+    sfuzz_shards = sfuzz_lists if isinstance(sfuzz_lists, list) else [sfuzz_lists]
+    workload_shards = workload_lists if isinstance(workload_lists, list) else [workload_lists]
+    worker_count = max(1, int(getattr(args, "workers_per_fuzzer", 1) or 1))
+    worker_count = min(worker_count, max(len(sfuzz_shards), len(workload_shards)))
+    worker_budget = per_worker_budget(args.exec_budget, worker_count)
 
-    def add(method: str, coverage: str, formal_guard: str, tail: list[str], env: dict[str, str] | None = None) -> None:
-        work_dir = paths.results / method / "work"
-        output_csv = paths.results / method / "results.csv"
-        output_json = paths.results / method / "results.json"
+    def add(
+        method: str,
+        coverage: str,
+        formal_guard: str,
+        tail: list[str],
+        env: dict[str, str] | None = None,
+        worker_id: int | None = None,
+        seed_list: Path | None = None,
+    ) -> None:
+        work_dir, output_csv, output_json = worker_paths(paths, method, worker_id or 0, worker_count)
         command = [run_py(), str(run_script), method]
         command.extend(build_common_args(args, work_dir, output_csv, output_json, coverage))
+        build_dir = method_build_dir(args, method, paths, worker_id if worker_count > 1 else None)
+        sim_dir = method_sim_dir(args, method, paths, worker_id if worker_count > 1 else None)
+        if build_dir is not None:
+            command.extend(["--build-dir", str(build_dir)])
+        if sim_dir is not None:
+            command.extend(["--sim-dir", str(sim_dir)])
         command.extend(tail)
         commands.append(
             {
                 "method": method,
+                "worker_id": "" if worker_id is None else worker_id,
                 "command": command,
                 "env": env or {},
                 "work_dir": work_dir,
@@ -227,94 +322,106 @@ def campaign_commands(args: argparse.Namespace, paths: CampaignPaths, sfuzz_list
                 "output_json": output_json,
                 "coverage_name": coverage,
                 "formal_guard": formal_guard,
+                "seed_list": seed_list or "",
             }
         )
 
-    add(
-        "sfuzz",
-        "SFUZZ.native",
-        "SFUZZ.native; semantic scheduler; short_run filtered by target_min_wall_time_sec",
-        [
-            "--seed-list",
-            str(sfuzz_list),
-            "--campaign-runs",
-            str(args.exec_budget),
-            "--rng-seed",
-            str(args.rng_seed),
-            "--scheduler-policy",
-            args.sfuzz_scheduler,
-            "--target-min-wall-time-sec",
-            str(args.target_min_wall_time_sec),
-            "--enable-core1-handoff",
-        ],
-        {"NUM_CORES": str(args.sfuzz_num_cores)},
-    )
-    add(
-        "rfuzz",
-        "RFuzz.mux-toggle",
-        "--require-formal-feedback; LinkNan workload scope; VCS native mux-toggle",
-        [
-            "--seed-list",
-            str(workload_list),
-            "--rfuzz-rounds",
-            str(args.exec_budget),
-            "--rfuzz-random-seed",
-            str(args.rng_seed),
-            "--rfuzz-toggle-bitmap-source",
-            "vcs-native-abi",
-            "--require-formal-feedback",
-        ],
-    )
-    add(
-        "directfuzz",
-        "DirectFuzz.mux-toggle",
-        "--require-paper-native; static metadata; dynamic per-instance VCS feedback",
-        [
-            "--seed-list",
-            str(workload_list),
-            "--target-instance",
-            args.direct_target_instance,
-            "--metadata",
-            str(direct_metadata),
-            "--metadata-source",
-            "static-analysis",
-            "--coverage-backend",
-            "native-file",
-            "--native-coverage-source",
-            "vcs-native-abi",
-            "--max-execs",
-            str(args.exec_budget),
-            "--mutations",
-            str(args.exec_budget),
-            "--rng-seed",
-            str(args.rng_seed),
-            "--require-paper-native",
-        ],
-    )
-    add(
-        "surgefuzz",
-        "SurgeFuzz.trace",
-        "--require-paper-native; single target; artifact Program mutation; no rotation",
-        [
-            "--input-mode",
-            "artifact-program",
-            "--max-execs",
-            str(args.exec_budget),
-            "--mutations",
-            str(args.exec_budget),
-            "--initial-seed-count",
-            str(args.surge_initial_seed_count),
-            "--rng-seed",
-            str(args.rng_seed),
-            "--target-manifest",
-            str(surge_manifest),
-            "--surge-target",
-            args.surge_target,
-            "--trace-source",
-            "vcs-native-abi",
-            "--require-paper-native",
-        ],
-    )
+    for worker_id in range(worker_count):
+        sfuzz_seed_list = sfuzz_shards[worker_id]
+        workload_seed_list = workload_shards[worker_id]
+        rng_seed = args.rng_seed + worker_id
+        add(
+            "sfuzz",
+            "SFUZZ.native",
+            "SFUZZ.native; semantic scheduler; short_run filtered by target_min_wall_time_sec",
+            [
+                "--seed-list",
+                str(sfuzz_seed_list),
+                "--campaign-runs",
+                str(worker_budget),
+                "--rng-seed",
+                str(rng_seed),
+                "--scheduler-policy",
+                args.sfuzz_scheduler,
+                "--target-min-wall-time-sec",
+                str(args.target_min_wall_time_sec),
+                "--enable-core1-handoff",
+            ],
+            {"NUM_CORES": str(args.sfuzz_num_cores)},
+            worker_id,
+            sfuzz_seed_list,
+        )
+        add(
+            "rfuzz",
+            "RFuzz.mux-toggle",
+            "--require-formal-feedback; LinkNan workload scope; VCS native mux-toggle",
+            [
+                "--seed-list",
+                str(workload_seed_list),
+                "--rfuzz-rounds",
+                str(worker_budget),
+                "--rfuzz-random-seed",
+                str(rng_seed),
+                "--rfuzz-toggle-bitmap-source",
+                "vcs-native-abi",
+                "--require-formal-feedback",
+            ],
+            worker_id=worker_id,
+            seed_list=workload_seed_list,
+        )
+        add(
+            "directfuzz",
+            "DirectFuzz.mux-toggle",
+            "--require-paper-native; static metadata; dynamic per-instance VCS feedback",
+            [
+                "--seed-list",
+                str(workload_seed_list),
+                "--target-instance",
+                args.direct_target_instance,
+                "--metadata",
+                str(direct_metadata),
+                "--metadata-source",
+                "static-analysis",
+                "--coverage-backend",
+                "native-file",
+                "--native-coverage-source",
+                "vcs-native-abi",
+                "--max-execs",
+                str(worker_budget),
+                "--mutations",
+                str(worker_budget),
+                "--rng-seed",
+                str(rng_seed),
+                "--require-paper-native",
+            ],
+            worker_id=worker_id,
+            seed_list=workload_seed_list,
+        )
+        add(
+            "surgefuzz",
+            "SurgeFuzz.trace",
+            "--require-paper-native; single target; artifact Program mutation; no rotation",
+            [
+                "--input-mode",
+                "artifact-program",
+                "--max-execs",
+                str(worker_budget),
+                "--mutations",
+                str(worker_budget),
+                "--initial-seed-count",
+                str(args.surge_initial_seed_count),
+                "--rng-seed",
+                str(rng_seed),
+                "--target-manifest",
+                str(surge_manifest),
+                "--surge-target",
+                args.surge_target,
+                "--trace-source",
+                "vcs-native-abi",
+                "--require-paper-native",
+            ],
+            worker_id=worker_id,
+        )
     return commands
 
 
@@ -322,6 +429,7 @@ def write_campaign_manifest(paths: CampaignPaths, testcases: list[Testcase], com
     rows = [
         {
             "method": item["method"],
+            "worker_id": item.get("worker_id", ""),
             "command": command_to_text(item["command"]),
             "env": ";".join(f"{key}={value}" for key, value in sorted(item.get("env", {}).items())),
             "work_dir": str(item["work_dir"]),
@@ -329,6 +437,7 @@ def write_campaign_manifest(paths: CampaignPaths, testcases: list[Testcase], com
             "output_json": str(item["output_json"]),
             "coverage_name": item["coverage_name"],
             "formal_guard": item["formal_guard"],
+            "seed_list": str(item.get("seed_list", "")),
         }
         for item in commands
     ]
@@ -347,6 +456,9 @@ def write_campaign_manifest(paths: CampaignPaths, testcases: list[Testcase], com
         "rng_seed": args.rng_seed,
         "build_mode": args.build_mode,
         "sfuzz_num_cores": args.sfuzz_num_cores,
+        "workers_per_fuzzer": args.workers_per_fuzzer,
+        "parallel_jobs": args.parallel_jobs,
+        "isolated_sim_dirs": args.isolated_sim_dirs,
         "commands": rows,
     }
     json_path = paths.manifests / "campaign_manifest.json"
@@ -366,8 +478,8 @@ def validate_prepare(args: argparse.Namespace, testcases: list[Testcase]) -> Non
         raise ValueError(f"need at least {args.min_testcases} runnable testcases, found {len(testcases)}")
     if args.exec_budget < 1000:
         raise ValueError("formal four-fuzzer campaign requires --exec-budget >= 1000")
-    if args.timeout_sec < 120:
-        raise ValueError("formal four-fuzzer campaign requires --timeout-sec >= 120")
+    if args.timeout_sec < 600:
+        raise ValueError("formal four-fuzzer campaign requires --timeout-sec >= 600")
     if args.target_min_wall_time_sec < 60:
         raise ValueError("formal SFuzz campaign requires --target-min-wall-time-sec >= 60")
     require_file(args.direct_metadata.expanduser())
@@ -377,23 +489,97 @@ def validate_prepare(args: argparse.Namespace, testcases: list[Testcase]) -> Non
 def run_commands(commands: list[dict[str, Any]], stop_on_failure: bool) -> int:
     overall = 0
     for item in commands:
-        method = item["method"]
-        command = item["command"]
-        log_path = Path(item["work_dir"]).parent / "driver.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        print(f"[campaign] running {method}: {command_to_text(command)}", flush=True)
-        env = os.environ.copy()
-        env.update(item.get("env", {}))
-        with log_path.open("w", encoding="utf-8") as log_file:
-            result = subprocess.run(command, cwd=SFUZZ_HOME, text=True, stdout=log_file, stderr=subprocess.STDOUT, env=env)
-        if result.returncode != 0:
-            overall = result.returncode or 1
-            print(f"[campaign] {method} failed, see {log_path}", flush=True)
+        returncode = run_command_item(item)
+        if returncode != 0:
+            overall = returncode or 1
             if stop_on_failure:
                 return overall
-        else:
-            print(f"[campaign] {method} complete, log={log_path}", flush=True)
     return overall
+
+
+def run_commands_parallel(commands: list[dict[str, Any]], jobs: int, stop_on_failure: bool) -> int:
+    if jobs <= 1 or len(commands) <= 1:
+        return run_commands(commands, stop_on_failure)
+    overall = 0
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as executor:
+        future_to_item = {executor.submit(run_command_item, item): item for item in commands}
+        for future in as_completed(future_to_item):
+            item = future_to_item[future]
+            try:
+                returncode = future.result()
+            except BaseException:
+                terminate_all_process_groups()
+                for pending in future_to_item:
+                    pending.cancel()
+                raise
+            if returncode != 0:
+                overall = returncode or 1
+                if stop_on_failure:
+                    terminate_all_process_groups()
+                    for pending in future_to_item:
+                        pending.cancel()
+                    return overall
+    return overall
+
+
+def run_command_item(item: dict[str, Any]) -> int:
+    method = item["method"]
+    command = item["command"]
+    log_path = Path(item["work_dir"]).parent / "driver.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"[campaign] running {method}: {command_to_text(command)}", flush=True)
+    env = os.environ.copy()
+    env.update(item.get("env", {}))
+    process: subprocess.Popen[str] | None = None
+    try:
+        with log_path.open("w", encoding="utf-8") as log_file:
+            process = subprocess.Popen(
+                command,
+                cwd=SFUZZ_HOME,
+                text=True,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                env=env,
+                start_new_session=True,
+            )
+            register_process_group(process.pid)
+            returncode = process.wait()
+    except KeyboardInterrupt:
+        if process is not None and process.poll() is None:
+            terminate_process_group(process.pid)
+        raise
+    finally:
+        if process is not None:
+            unregister_process_group(process.pid)
+    if returncode != 0:
+        print(f"[campaign] {method} failed with code {returncode}, see {log_path}", flush=True)
+    else:
+        print(f"[campaign] {method} complete, log={log_path}", flush=True)
+    return returncode
+
+
+def terminate_process_group(pid: int) -> None:
+    try:
+        os.killpg(pid, 15)
+    except ProcessLookupError:
+        return
+
+
+def register_process_group(pid: int) -> None:
+    with ACTIVE_PROCESS_GROUPS_LOCK:
+        ACTIVE_PROCESS_GROUPS.add(pid)
+
+
+def unregister_process_group(pid: int) -> None:
+    with ACTIVE_PROCESS_GROUPS_LOCK:
+        ACTIVE_PROCESS_GROUPS.discard(pid)
+
+
+def terminate_all_process_groups() -> None:
+    with ACTIVE_PROCESS_GROUPS_LOCK:
+        pids = list(ACTIVE_PROCESS_GROUPS)
+    for pid in pids:
+        terminate_process_group(pid)
 
 
 def bool_text(value: Any) -> bool:
@@ -506,7 +692,13 @@ def summarize_csv(method: str, csv_path: Path) -> dict[str, Any]:
 def aggregate(paths: CampaignPaths) -> Path:
     rows = []
     for method in ["sfuzz", "rfuzz", "directfuzz", "surgefuzz"]:
-        rows.append(summarize_csv(method, paths.results / method / "results.csv"))
+        worker_csvs = sorted((paths.results / method / "workers").glob("worker-*/results.csv"))
+        if worker_csvs:
+            merged_csv = paths.results / method / "results.csv"
+            merge_worker_csvs(method, worker_csvs, merged_csv)
+            rows.append(summarize_csv(method, merged_csv))
+        else:
+            rows.append(summarize_csv(method, paths.results / method / "results.csv"))
     output_json = paths.results / "aggregate_summary.json"
     output_csv = paths.results / "aggregate_summary.csv"
     write_table(rows, output_json, output_csv, SUMMARY_FIELDS, {"campaign_root": str(paths.root)})
@@ -525,6 +717,27 @@ def aggregate(paths: CampaignPaths) -> Path:
     return output_csv
 
 
+def merge_worker_csvs(method: str, worker_csvs: list[Path], output_csv: Path) -> None:
+    fieldnames: list[str] = []
+    rows: list[dict[str, Any]] = []
+    for worker_csv in worker_csvs:
+        with worker_csv.open(newline="", encoding="utf-8") as input_file:
+            reader = csv.DictReader(input_file)
+            if reader.fieldnames:
+                for name in reader.fieldnames:
+                    if name not in fieldnames:
+                        fieldnames.append(name)
+            worker_id = worker_csv.parent.name.replace("worker-", "")
+            for row in reader:
+                row = dict(row)
+                row["worker_id"] = worker_id
+                rows.append(row)
+    if "worker_id" not in fieldnames:
+        fieldnames.insert(0, "worker_id")
+    output_json = output_csv.with_suffix(".json")
+    write_table(rows, output_json, output_csv, fieldnames, {"method": method, "worker_csvs": [str(path) for path in worker_csvs]})
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare, run, and aggregate a formal T2 four-fuzzer LinkNan campaign")
     parser.add_argument("--phase", choices=["prepare", "run", "aggregate", "all"], default="prepare")
@@ -539,7 +752,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=120, help="maximum testcase count selected from manifest")
     parser.add_argument("--min-testcases", type=int, default=100)
     parser.add_argument("--exec-budget", type=int, default=1000)
-    parser.add_argument("--timeout-sec", type=int, default=120)
+    parser.add_argument("--timeout-sec", type=int, default=600)
     parser.add_argument("--target-min-wall-time-sec", type=int, default=60)
     parser.add_argument("--rng-seed", type=int, default=20260605)
     parser.add_argument("--sfuzz-scheduler", choices=["weighted-innovation", "semantic-bandit"], default="semantic-bandit")
@@ -554,6 +767,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--build-timeout-sec", type=int, default=3600)
     parser.add_argument("--simv-args", default="")
     parser.add_argument("--sfuzz-num-cores", type=int, default=2)
+    parser.add_argument("--workers-per-fuzzer", type=int, default=4)
+    parser.add_argument("--parallel-jobs", type=int, default=16)
+    parser.add_argument("--method", action="append", default=[], help="run only selected method; repeatable")
+    parser.add_argument("--isolated-sim-dirs", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--keep-going", action="store_true")
     return parser.parse_args()
 
@@ -566,7 +783,8 @@ def main() -> int:
         testcases = load_testcases(args.manifest.expanduser(), args.limit)
         validate_prepare(args, testcases)
         sfuzz_list, workload_list, selected_manifest = write_seed_lists(paths, testcases)
-        commands = campaign_commands(args, paths, sfuzz_list, workload_list)
+        sfuzz_shards, workload_shards = write_seed_shards(paths, testcases, args.workers_per_fuzzer)
+        commands = filter_commands(campaign_commands(args, paths, sfuzz_shards, workload_shards), args)
         manifest_json = write_campaign_manifest(paths, testcases, commands, args)
         print(f"prepared {len(testcases)} testcases")
         print(f"selected manifest: {selected_manifest}")
@@ -589,10 +807,13 @@ def main() -> int:
                         "output_json": Path(row["output_json"]),
                         "coverage_name": row["coverage_name"],
                         "formal_guard": row["formal_guard"],
+                        "worker_id": row.get("worker_id", ""),
+                        "seed_list": row.get("seed_list", ""),
                     }
                 )
+        commands = filter_commands(commands, args)
     if args.phase in {"run", "all"}:
-        status = run_commands(commands, stop_on_failure=not args.keep_going)
+        status = run_commands_parallel(commands, args.parallel_jobs, stop_on_failure=not args.keep_going)
         if status != 0:
             return status
     if args.phase in {"aggregate", "all"}:

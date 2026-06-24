@@ -112,7 +112,10 @@ def context_from_config(args: Any) -> VcsContext:
     config = load_toml(config_path)
     linknan_default = cfg_path(config, "linknan", "root", WORKSPACE_ROOT / "LinkNan")
     linknan_root = Path(getattr(args, "linknan_root", "") or linknan_default).expanduser().resolve()
-    build_dir = cfg_path(config, "linknan", "build_dir", linknan_root / "build", linknan_root).resolve()
+    build_dir = Path(
+        getattr(args, "build_dir", "")
+        or cfg_path(config, "linknan", "build_dir", linknan_root / "build", linknan_root)
+    ).expanduser().resolve()
     sim_dir = Path(
         getattr(args, "sim_dir", "")
         or cfg_path(config, "linknan", "sim_dir", linknan_root / "sim", linknan_root)

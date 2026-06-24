@@ -15,6 +15,8 @@ from linknan.t2_four_fuzzer_campaign import (  # noqa: E402
     CampaignPaths,
     campaign_commands,
     load_testcases,
+    merge_worker_csvs,
+    write_seed_shards,
     write_seed_lists,
 )
 
@@ -55,7 +57,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             args = SimpleNamespace(
                 config=root / "sfuzz.toml",
                 linknan_root=root / "LinkNan",
-                timeout_sec=120,
+                timeout_sec=600,
                 build_mode="auto",
                 build_chisel=False,
                 build_timeout_sec=3600,
@@ -70,6 +72,8 @@ class FormalRunnerBudgetTests(unittest.TestCase):
                 surge_target="t",
                 surge_initial_seed_count=1,
                 sfuzz_num_cores=2,
+                workers_per_fuzzer=1,
+                isolated_sim_dirs=True,
             )
 
             commands = campaign_commands(args, paths, sfuzz_list, workload_list)
@@ -78,7 +82,9 @@ class FormalRunnerBudgetTests(unittest.TestCase):
         for item in commands:
             command_text = " ".join(item["command"])
             self.assertIn("--no-cycle-limit", command_text)
-            self.assertIn("--timeout-sec 120", command_text)
+            self.assertIn("--timeout-sec 600", command_text)
+            self.assertIn("--build-dir", command_text)
+            self.assertIn("--sim-dir", command_text)
             self.assertNotIn("--cycles=", command_text)
             self.assertNotIn("--skip-build", command_text)
         self.assertIn("--campaign-runs 1000", " ".join(commands[0]["command"]))
@@ -86,6 +92,86 @@ class FormalRunnerBudgetTests(unittest.TestCase):
         self.assertIn("--rfuzz-rounds 1000", " ".join(commands[1]["command"]))
         self.assertIn("--require-paper-native", " ".join(commands[2]["command"]))
         self.assertIn("--require-paper-native", " ".join(commands[3]["command"]))
+
+    def test_t2_campaign_shards_each_fuzzer_worker(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            metadata = root / "direct.csv"
+            surge_manifest = root / "surge.toml"
+            manifest = root / "manifest.csv"
+            metadata.write_text("instance_name,coverage_signal_name,width,distance\ntarget,cov,1,0\n", encoding="utf-8")
+            surge_manifest.write_text("[[targets]]\nid='t'\n", encoding="utf-8")
+            rows = ["testcase_id,source,category,input_path,input_format,file_size,sfuzz_seed_path,rfuzz_workload_path"]
+            for index in range(4):
+                seed = root / f"seed{index}.sfuz"
+                workload = root / f"seed{index}.bin"
+                seed.write_bytes(b"SFUZ")
+                workload.write_bytes(b"\x73\x00\x10\x00")
+                rows.append(f"tc{index},unit,ISA,{workload},bin,4,{seed},{workload}")
+            manifest.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            testcases = load_testcases(manifest, limit=4)
+            paths = CampaignPaths.create(root / "campaign")
+            sfuzz_lists, workload_lists = write_seed_shards(paths, testcases, workers=2)
+            args = SimpleNamespace(
+                config=root / "sfuzz.toml",
+                linknan_root=root / "LinkNan",
+                timeout_sec=600,
+                build_mode="auto",
+                build_chisel=False,
+                build_timeout_sec=3600,
+                simv_args="",
+                exec_budget=1000,
+                rng_seed=20260605,
+                target_min_wall_time_sec=60,
+                sfuzz_scheduler="semantic-bandit",
+                direct_metadata=metadata,
+                direct_target_instance="target",
+                surge_target_manifest=surge_manifest,
+                surge_target="t",
+                surge_initial_seed_count=1,
+                sfuzz_num_cores=2,
+                workers_per_fuzzer=2,
+                isolated_sim_dirs=True,
+            )
+
+            commands = campaign_commands(args, paths, sfuzz_lists, workload_lists)
+
+        self.assertEqual(len(commands), 8)
+        self.assertEqual([item["worker_id"] for item in commands[:4]], [0, 0, 0, 0])
+        self.assertEqual([item["worker_id"] for item in commands[4:]], [1, 1, 1, 1])
+        for item in commands:
+            command_text = " ".join(item["command"])
+            self.assertIn("workers/worker-", command_text)
+            self.assertIn("--timeout-sec 600", command_text)
+            self.assertNotIn("--worker-id", command_text)
+        self.assertIn("--campaign-runs 1000", " ".join(commands[0]["command"]))
+        self.assertIn("--rfuzz-rounds 1000", " ".join(commands[1]["command"]))
+
+    def test_t2_campaign_merges_worker_csvs(self) -> None:
+        import csv
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker0 = root / "results" / "sfuzz" / "workers" / "worker-000" / "results.csv"
+            worker1 = root / "results" / "sfuzz" / "workers" / "worker-001" / "results.csv"
+            output = root / "results" / "sfuzz" / "results.csv"
+            worker0.parent.mkdir(parents=True)
+            worker1.parent.mkdir(parents=True)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            header = "exec_index,mutation_kind,accumulated_covered_bits,common_coverage_total\n"
+            worker0.write_text(header + "0,semantic,3,10\n", encoding="utf-8")
+            worker1.write_text(header + "0,semantic,5,10\n", encoding="utf-8")
+
+            merge_worker_csvs("sfuzz", [worker0, worker1], output)
+
+            with output.open(newline="", encoding="utf-8") as input_file:
+                rows = list(csv.DictReader(input_file))
+
+        self.assertEqual([row["worker_id"] for row in rows], ["000", "001"])
+        self.assertEqual([row["accumulated_covered_bits"] for row in rows], ["3", "5"])
 
 
 if __name__ == "__main__":
