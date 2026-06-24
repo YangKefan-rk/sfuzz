@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -15,13 +16,14 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from linknan.common import require_file, slugify, write_table  # noqa: E402
+from linknan.common import require_file, write_table  # noqa: E402
 from linknan.config import DEFAULT_CONFIG, SFUZZ_HOME  # noqa: E402
 
 
 CAMPAIGN_FIELDS = [
     "method",
     "command",
+    "env",
     "work_dir",
     "output_csv",
     "output_json",
@@ -185,7 +187,9 @@ def build_common_args(args: argparse.Namespace, work_dir: Path, output_csv: Path
         "--output-json",
         str(output_json),
     ]
-    if args.build_mode == "build":
+    if args.build_mode == "auto":
+        pass
+    elif args.build_mode == "build":
         common.append("--build")
     elif args.build_mode == "rebuild":
         common.extend(["--build", "--rebuild-comp"])
@@ -206,7 +210,7 @@ def campaign_commands(args: argparse.Namespace, paths: CampaignPaths, sfuzz_list
     surge_manifest = args.surge_target_manifest.expanduser().resolve()
     commands: list[dict[str, Any]] = []
 
-    def add(method: str, coverage: str, formal_guard: str, tail: list[str]) -> None:
+    def add(method: str, coverage: str, formal_guard: str, tail: list[str], env: dict[str, str] | None = None) -> None:
         work_dir = paths.results / method / "work"
         output_csv = paths.results / method / "results.csv"
         output_json = paths.results / method / "results.json"
@@ -217,6 +221,7 @@ def campaign_commands(args: argparse.Namespace, paths: CampaignPaths, sfuzz_list
             {
                 "method": method,
                 "command": command,
+                "env": env or {},
                 "work_dir": work_dir,
                 "output_csv": output_csv,
                 "output_json": output_json,
@@ -242,6 +247,7 @@ def campaign_commands(args: argparse.Namespace, paths: CampaignPaths, sfuzz_list
             str(args.target_min_wall_time_sec),
             "--enable-core1-handoff",
         ],
+        {"NUM_CORES": str(args.sfuzz_num_cores)},
     )
     add(
         "rfuzz",
@@ -317,6 +323,7 @@ def write_campaign_manifest(paths: CampaignPaths, testcases: list[Testcase], com
         {
             "method": item["method"],
             "command": command_to_text(item["command"]),
+            "env": ";".join(f"{key}={value}" for key, value in sorted(item.get("env", {}).items())),
             "work_dir": str(item["work_dir"]),
             "output_csv": str(item["output_csv"]),
             "output_json": str(item["output_json"]),
@@ -339,17 +346,17 @@ def write_campaign_manifest(paths: CampaignPaths, testcases: list[Testcase], com
         "target_min_wall_time_sec": args.target_min_wall_time_sec,
         "rng_seed": args.rng_seed,
         "build_mode": args.build_mode,
+        "sfuzz_num_cores": args.sfuzz_num_cores,
         "commands": rows,
     }
     json_path = paths.manifests / "campaign_manifest.json"
     json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     shell_path = paths.scripts / "run_all.sh"
-    shell_path.write_text(
-        "#!/usr/bin/env bash\nset -euo pipefail\n\n"
-        + "\n".join(command_to_text(item["command"]) for item in commands)
-        + "\n",
-        encoding="utf-8",
-    )
+    shell_lines = ["#!/usr/bin/env bash", "set -euo pipefail", ""]
+    for item in commands:
+        env_prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in sorted(item.get("env", {}).items()))
+        shell_lines.append(f"{env_prefix + ' ' if env_prefix else ''}{command_to_text(item['command'])}")
+    shell_path.write_text("\n".join(shell_lines) + "\n", encoding="utf-8")
     shell_path.chmod(0o755)
     return json_path
 
@@ -375,8 +382,10 @@ def run_commands(commands: list[dict[str, Any]], stop_on_failure: bool) -> int:
         log_path = Path(item["work_dir"]).parent / "driver.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"[campaign] running {method}: {command_to_text(command)}", flush=True)
+        env = os.environ.copy()
+        env.update(item.get("env", {}))
         with log_path.open("w", encoding="utf-8") as log_file:
-            result = subprocess.run(command, cwd=SFUZZ_HOME, text=True, stdout=log_file, stderr=subprocess.STDOUT)
+            result = subprocess.run(command, cwd=SFUZZ_HOME, text=True, stdout=log_file, stderr=subprocess.STDOUT, env=env)
         if result.returncode != 0:
             overall = result.returncode or 1
             print(f"[campaign] {method} failed, see {log_path}", flush=True)
@@ -535,10 +544,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rng-seed", type=int, default=20260605)
     parser.add_argument("--sfuzz-scheduler", choices=["weighted-innovation", "semantic-bandit"], default="semantic-bandit")
     parser.add_argument("--surge-initial-seed-count", type=int, default=1)
-    parser.add_argument("--build-mode", choices=["skip", "build", "rebuild"], default="skip")
+    parser.add_argument(
+        "--build-mode",
+        choices=["auto", "skip", "build", "rebuild"],
+        default="auto",
+        help="auto lets each runner rebuild simv when the requested coverage ABI does not match the current build",
+    )
     parser.add_argument("--build-chisel", action="store_true")
     parser.add_argument("--build-timeout-sec", type=int, default=3600)
     parser.add_argument("--simv-args", default="")
+    parser.add_argument("--sfuzz-num-cores", type=int, default=2)
     parser.add_argument("--keep-going", action="store_true")
     return parser.parse_args()
 
@@ -566,6 +581,9 @@ def main() -> int:
                     {
                         "method": row["method"],
                         "command": shlex.split(row["command"]),
+                        "env": dict(
+                            item.split("=", 1) for item in row.get("env", "").split(";") if item and "=" in item
+                        ),
                         "work_dir": Path(row["work_dir"]),
                         "output_csv": Path(row["output_csv"]),
                         "output_json": Path(row["output_json"]),

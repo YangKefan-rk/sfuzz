@@ -56,7 +56,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
                 config=root / "sfuzz.toml",
                 linknan_root=root / "LinkNan",
                 timeout_sec=120,
-                build_mode="skip",
+                build_mode="auto",
                 build_chisel=False,
                 build_timeout_sec=3600,
                 simv_args="",
@@ -69,6 +69,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
                 surge_target_manifest=surge_manifest,
                 surge_target="t",
                 surge_initial_seed_count=1,
+                sfuzz_num_cores=2,
             )
 
             commands = campaign_commands(args, paths, sfuzz_list, workload_list)
@@ -79,7 +80,9 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             self.assertIn("--no-cycle-limit", command_text)
             self.assertIn("--timeout-sec 120", command_text)
             self.assertNotIn("--cycles=", command_text)
+            self.assertNotIn("--skip-build", command_text)
         self.assertIn("--campaign-runs 1000", " ".join(commands[0]["command"]))
+        self.assertEqual(commands[0]["env"], {"NUM_CORES": "2"})
         self.assertIn("--rfuzz-rounds 1000", " ".join(commands[1]["command"]))
         self.assertIn("--require-paper-native", " ".join(commands[2]["command"]))
         self.assertIn("--require-paper-native", " ".join(commands[3]["command"]))
