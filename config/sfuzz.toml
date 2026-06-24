@@ -3,7 +3,7 @@ work_dir = "/tmp/sfuzz-linknan-abi-smoke"
 vcs_work_dir = "/tmp/sfuzz-linknan-vcs-smoke"
 
 [linknan]
-root = "~/SFUZZ/LinkNan"
+root = "~/SFUZZ-PLAN-MODE/LinkNan"
 src_root = "."
 real_model_root = "."
 build_dir = "build"
