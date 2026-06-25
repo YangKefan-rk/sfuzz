@@ -158,10 +158,13 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             self.assertEqual(item["env"], {"NUM_CORES": "2"})
         self.assertIn("--campaign-runs 500", " ".join(commands[0]["command"]))
         self.assertIn("--rfuzz-rounds 500", " ".join(commands[1]["command"]))
+        self.assertIn("--formal-campaign-total-execs 1000", " ".join(commands[1]["command"]))
         self.assertIn("--max-execs 500", " ".join(commands[2]["command"]))
         self.assertIn("--mutations 500", " ".join(commands[2]["command"]))
+        self.assertIn("--formal-campaign-total-execs 1000", " ".join(commands[2]["command"]))
         self.assertIn("--max-execs 500", " ".join(commands[3]["command"]))
         self.assertIn("--mutations 500", " ".join(commands[3]["command"]))
+        self.assertIn("--formal-campaign-total-execs 1000", " ".join(commands[3]["command"]))
 
     def test_t2_campaign_merges_worker_csvs(self) -> None:
         import csv

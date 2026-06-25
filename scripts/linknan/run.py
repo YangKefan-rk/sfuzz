@@ -171,6 +171,12 @@ def main() -> int:
     rfuzz.add_argument("--case-name", default="rfuzz-smoke")
     rfuzz.add_argument("--rfuzz-rounds", type=int, default=1, help="number of RFuzz campaign iterations")
     rfuzz.add_argument(
+        "--formal-campaign-total-execs",
+        type=int,
+        default=0,
+        help="total executions across all parallel workers for formal campaign guards",
+    )
+    rfuzz.add_argument(
         "--require-formal-feedback",
         action="store_true",
         help="reject RFuzz runs that do not meet the LinkNan workload formal campaign checks",
@@ -230,6 +236,12 @@ def main() -> int:
     direct.add_argument("--metadata", type=Path, required=True, help="DirectFuzz metadata CSV")
     direct.add_argument("--max-execs", type=int, default=0, help="maximum VCS executions; 0 means seeds plus --mutations")
     direct.add_argument("--mutations", type=int, default=8, help="number of feedback-guided DirectFuzz mutation attempts")
+    direct.add_argument(
+        "--formal-campaign-total-execs",
+        type=int,
+        default=0,
+        help="total executions across all parallel workers for formal campaign guards",
+    )
     direct.add_argument(
         "--require-paper-native",
         action="store_true",
@@ -299,6 +311,12 @@ def main() -> int:
     surge.add_argument("--limit", type=int, default=0, help="import at most this many initial inputs; 0 means all")
     surge.add_argument("--max-execs", type=int, default=0, help="maximum VCS executions; 0 means seeds plus --mutations")
     surge.add_argument("--mutations", type=int, default=8, help="number of score-guided SurgeFuzz mutation attempts")
+    surge.add_argument(
+        "--formal-campaign-total-execs",
+        type=int,
+        default=0,
+        help="total executions across all parallel workers for formal campaign guards",
+    )
     surge.add_argument(
         "--require-paper-native",
         action="store_true",

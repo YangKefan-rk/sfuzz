@@ -1023,7 +1023,9 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
             raise ValueError("formal SurgeFuzz campaigns require VCS-native trace feedback")
         if args.rotation_mode != "none" or getattr(args, "rotation_manifest", None):
             raise ValueError("formal SurgeFuzz paper-native campaigns are single-target; rotation is an extension")
-        exec_budget = args.max_execs if args.max_execs > 0 else args.initial_seed_count + args.mutations
+        exec_budget = getattr(args, "formal_campaign_total_execs", 0) or (
+            args.max_execs if args.max_execs > 0 else args.initial_seed_count + args.mutations
+        )
         if exec_budget < 1000:
             raise ValueError("formal SurgeFuzz campaigns require at least 1000 executions")
     if not getattr(args, "firrtl_cov", None):
