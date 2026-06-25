@@ -327,7 +327,7 @@ def random_operand(inst_type: str, index: int, rnd: random.Random, config: Progr
 def random_register(rnd: random.Random) -> str:
     while True:
         reg = rnd.randrange(32)
-        if reg not in {1, 2}:
+        if reg not in {0, 1, 2}:
             return f"x{reg}"
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import sys
 import tempfile
 import unittest
@@ -23,6 +24,7 @@ from linknan.methods.surgefuzz import (  # noqa: E402
 )
 from linknan.surgefuzz_ancestors import AncestorCandidate  # noqa: E402
 from linknan.surgefuzz_ancestors import target_distance_candidates  # noqa: E402
+from linknan.surgefuzz_program import ProgramConfig, random_operands  # noqa: E402
 from linknan.surgefuzz_profile import (  # noqa: E402
     RtlModule,
     RtlSignal,
@@ -33,6 +35,27 @@ from linknan.surgefuzz_profile import (  # noqa: E402
 
 
 class SurgeFuzzTraceTests(unittest.TestCase):
+    def test_artifact_operand_generation_never_writes_x0(self) -> None:
+        config = ProgramConfig(enable_rv64a=True, enable_rv64im=True)
+        writable_indices = {
+            "IntRegImm": (0,),
+            "IntRegImmShift": (0,),
+            "IntRegImmShiftW": (0,),
+            "IntRegReg": (0,),
+            "Memory": (0, 1),
+            "PseudoLi": (0,),
+            "PseudoLoadAddress": (0,),
+            "AtomicArg2": (0, 1),
+            "AtomicArg3": (0, 1, 2),
+        }
+        rnd = random.Random(20260605)
+
+        for inst_type, indices in writable_indices.items():
+            for _ in range(256):
+                operands = random_operands(inst_type, rnd, config)
+                for index in indices:
+                    self.assertNotEqual(operands[index], "x0", f"{inst_type} generated x0 at operand {index}")
+
     def test_load_surge_trace_filters_indexed_multi_target_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             trace = Path(tmp) / "surgefuzz_trace.csv"
