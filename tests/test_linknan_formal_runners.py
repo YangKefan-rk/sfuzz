@@ -16,6 +16,7 @@ from linknan.t2_four_fuzzer_campaign import (  # noqa: E402
     campaign_commands,
     load_testcases,
     merge_worker_csvs,
+    per_worker_budget,
     prepare_isolated_build_dirs,
     write_seed_shards,
     write_seed_lists,
@@ -32,6 +33,12 @@ class FormalRunnerBudgetTests(unittest.TestCase):
         self.assertEqual(surgefuzz_mutation_limit(1000, 3, 8), 997)
         self.assertEqual(surgefuzz_mutation_limit(1000, 1001, 8), 0)
         self.assertEqual(surgefuzz_mutation_limit(0, 3, 8), 8)
+
+    def test_t2_campaign_splits_total_budget_across_workers(self) -> None:
+        self.assertEqual(per_worker_budget(1000, 4), 250)
+        self.assertEqual(per_worker_budget(1001, 4), 251)
+        self.assertEqual(per_worker_budget(1, 4), 1)
+        self.assertEqual(per_worker_budget(1000, 0), 1000)
 
     def test_t2_campaign_prepare_builds_formal_four_fuzzer_commands(self) -> None:
         import tempfile
@@ -149,8 +156,12 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             self.assertIn("--timeout-sec 600", command_text)
             self.assertNotIn("--worker-id", command_text)
             self.assertEqual(item["env"], {"NUM_CORES": "2"})
-        self.assertIn("--campaign-runs 1000", " ".join(commands[0]["command"]))
-        self.assertIn("--rfuzz-rounds 1000", " ".join(commands[1]["command"]))
+        self.assertIn("--campaign-runs 500", " ".join(commands[0]["command"]))
+        self.assertIn("--rfuzz-rounds 500", " ".join(commands[1]["command"]))
+        self.assertIn("--max-execs 500", " ".join(commands[2]["command"]))
+        self.assertIn("--mutations 500", " ".join(commands[2]["command"]))
+        self.assertIn("--max-execs 500", " ".join(commands[3]["command"]))
+        self.assertIn("--mutations 500", " ".join(commands[3]["command"]))
 
     def test_t2_campaign_merges_worker_csvs(self) -> None:
         import csv

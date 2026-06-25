@@ -388,7 +388,8 @@ def filter_commands(commands: list[dict[str, Any]], args: argparse.Namespace) ->
 
 
 def per_worker_budget(total_budget: int, worker_count: int) -> int:
-    return max(1, total_budget)
+    workers = max(1, worker_count)
+    return max(1, (max(0, total_budget) + workers - 1) // workers)
 
 
 def worker_paths(paths: CampaignPaths, method: str, worker_id: int, worker_count: int) -> tuple[Path, Path, Path]:
