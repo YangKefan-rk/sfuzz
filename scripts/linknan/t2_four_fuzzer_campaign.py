@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import os
+import shutil
 import shlex
 import subprocess
 import sys
@@ -249,6 +250,127 @@ def method_sim_dir(args: argparse.Namespace, method: str, paths: CampaignPaths, 
     return paths.results / method / "linknan-sim"
 
 
+def copy_or_link_file(source: Path, dest: Path) -> None:
+    try:
+        os.link(source, dest)
+    except OSError:
+        shutil.copy2(source, dest)
+
+
+def command_option_path(command: list[str], option: str) -> Path | None:
+    try:
+        index = command.index(option)
+    except ValueError:
+        return None
+    if index + 1 >= len(command):
+        return None
+    return Path(command[index + 1]).expanduser().resolve()
+
+
+def copy_prepared_build_dir(source: Path, dest: Path) -> None:
+    if source == dest:
+        return
+    if dest.exists():
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, dest, symlinks=True, copy_function=copy_or_link_file)
+
+
+def generate_isolated_firrtl_coverage(
+    *,
+    args: argparse.Namespace,
+    paths: CampaignPaths,
+    method: str,
+    coverage: str,
+    build_dir: Path,
+    source_rtl: Path,
+    source_generated: Path,
+    generator: Path,
+) -> None:
+    build_dir.mkdir(parents=True, exist_ok=True)
+    rtl_dir = build_dir / "rtl"
+    if rtl_dir.is_symlink():
+        rtl_dir.unlink()
+    if not rtl_dir.exists():
+        shutil.copytree(source_rtl, rtl_dir, symlinks=True, copy_function=copy_or_link_file)
+    elif not rtl_dir.is_dir():
+        raise FileExistsError(f"isolated build RTL path exists but is not a directory: {rtl_dir}")
+    bind_path = rtl_dir / "verification" / "cover" / "sfuzz_firrtl_cover_bind.sv"
+    if bind_path.exists() or bind_path.is_symlink():
+        bind_path.unlink()
+    generated_dir = build_dir / "generated-src"
+    generated_dir.mkdir(parents=True, exist_ok=True)
+    if source_generated.is_dir():
+        for item in source_generated.iterdir():
+            dest = generated_dir / item.name
+            if dest.exists():
+                continue
+            if item.is_dir():
+                shutil.copytree(item, dest, symlinks=True, copy_function=copy_or_link_file)
+            else:
+                copy_or_link_file(item, dest)
+    log_path = paths.logs / f"prepare-{method}-firrtl-coverage.log"
+    command = [
+        run_py(),
+        str(generator),
+        str(rtl_dir),
+        "--generated-src-dir",
+        str(generated_dir),
+        "--groups",
+        coverage,
+    ]
+    with log_path.open("w", encoding="utf-8") as log_file:
+        result = subprocess.run(
+            command,
+            cwd=args.linknan_root.expanduser().resolve(),
+            text=True,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    if result.returncode != 0:
+        raise RuntimeError(f"failed to prepare {method} FIRRTL coverage artifacts; see {log_path}")
+
+
+def prepare_isolated_build_dirs(args: argparse.Namespace, paths: CampaignPaths, commands: list[dict[str, Any]]) -> None:
+    if not getattr(args, "isolated_sim_dirs", True):
+        return
+    if getattr(args, "build_chisel", False):
+        return
+    source_build = args.linknan_root.expanduser().resolve() / "build"
+    source_rtl = source_build / "rtl"
+    source_generated = source_build / "generated-src"
+    if not source_rtl.is_dir():
+        raise FileNotFoundError(f"missing source LinkNan RTL directory for isolated campaign builds: {source_rtl}")
+    generator = args.linknan_root.expanduser().resolve() / "scripts" / "linknan" / "sfuzz_firrtl_cov.py"
+    if not generator.is_file():
+        raise FileNotFoundError(f"missing LinkNan FIRRTL coverage generator: {generator}")
+    prepared: set[Path] = set()
+    template_by_coverage: dict[str, Path] = {}
+    for item in commands:
+        method = str(item["method"])
+        coverage = str(item["coverage_name"])
+        build_dir = command_option_path(list(item["command"]), "--build-dir")
+        if build_dir is None or build_dir in prepared:
+            continue
+        prepared.add(build_dir)
+        template = template_by_coverage.get(coverage)
+        if template is not None:
+            copy_prepared_build_dir(template, build_dir)
+            continue
+        generate_isolated_firrtl_coverage(
+            args=args,
+            paths=paths,
+            method=method,
+            coverage=coverage,
+            build_dir=build_dir,
+            source_rtl=source_rtl,
+            source_generated=source_generated,
+            generator=generator,
+        )
+        template_by_coverage[coverage] = build_dir
+
+
 def selected_methods(args: argparse.Namespace) -> set[str]:
     values = getattr(args, "method", None) or []
     return {str(value).lower() for value in values}
@@ -291,6 +413,7 @@ def campaign_commands(
     worker_count = max(1, int(getattr(args, "workers_per_fuzzer", 1) or 1))
     worker_count = min(worker_count, max(len(sfuzz_shards), len(workload_shards)))
     worker_budget = per_worker_budget(args.exec_budget, worker_count)
+    linknan_env = {"NUM_CORES": str(args.sfuzz_num_cores)}
 
     def add(
         method: str,
@@ -347,7 +470,7 @@ def campaign_commands(
                 str(args.target_min_wall_time_sec),
                 "--enable-core1-handoff",
             ],
-            {"NUM_CORES": str(args.sfuzz_num_cores)},
+            linknan_env,
             worker_id,
             sfuzz_seed_list,
         )
@@ -366,6 +489,7 @@ def campaign_commands(
                 "vcs-native-abi",
                 "--require-formal-feedback",
             ],
+            env=linknan_env,
             worker_id=worker_id,
             seed_list=workload_seed_list,
         )
@@ -394,6 +518,7 @@ def campaign_commands(
                 str(rng_seed),
                 "--require-paper-native",
             ],
+            env=linknan_env,
             worker_id=worker_id,
             seed_list=workload_seed_list,
         )
@@ -420,6 +545,7 @@ def campaign_commands(
                 "vcs-native-abi",
                 "--require-paper-native",
             ],
+            env=linknan_env,
             worker_id=worker_id,
         )
     return commands
@@ -785,6 +911,7 @@ def main() -> int:
         sfuzz_list, workload_list, selected_manifest = write_seed_lists(paths, testcases)
         sfuzz_shards, workload_shards = write_seed_shards(paths, testcases, args.workers_per_fuzzer)
         commands = filter_commands(campaign_commands(args, paths, sfuzz_shards, workload_shards), args)
+        prepare_isolated_build_dirs(args, paths, commands)
         manifest_json = write_campaign_manifest(paths, testcases, commands, args)
         print(f"prepared {len(testcases)} testcases")
         print(f"selected manifest: {selected_manifest}")

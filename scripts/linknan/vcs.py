@@ -436,6 +436,16 @@ def ensure_firrtl_coverage_artifacts(firrtl_cov: str, ctx: VcsContext, work_dir:
         require_file(path)
 
 
+def firrtl_coverage_artifacts_ready(build_dir: Path, firrtl_cov: str) -> bool:
+    generated_src = build_dir / "generated-src"
+    required = [
+        generated_src / "firrtl-cover.h",
+        generated_src / "firrtl-cover.cpp",
+        build_dir / "rtl" / "verification" / "cover" / "sfuzz_firrtl_cover_bind.sv",
+    ]
+    return all(path.is_file() for path in required) and generated_firrtl_metadata_matches(build_dir, firrtl_cov)
+
+
 def build_timeout_sec(args: Any) -> int:
     explicit = int(getattr(args, "build_timeout_sec", 0) or 0)
     return explicit if explicit > 0 else int(getattr(args, "timeout_sec", 0) or 0)
@@ -556,7 +566,11 @@ def build_simv_if_needed(args: Any, ctx: VcsContext, work_dir: Path) -> None:
         raise FileNotFoundError("missing required tool: xmake")
     if shutil.which("vcs") is None:
         raise FileNotFoundError("missing required tool: vcs")
-    if firrtl_cov and not getattr(args, "build_chisel", False):
+    if (
+        firrtl_cov
+        and not getattr(args, "build_chisel", False)
+        and not firrtl_coverage_artifacts_ready(ctx.build_dir, firrtl_cov)
+    ):
         ensure_firrtl_coverage_artifacts(firrtl_cov, ctx, work_dir, build_timeout_sec(args))
 
     command = [

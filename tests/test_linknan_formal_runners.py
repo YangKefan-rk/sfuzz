@@ -16,6 +16,7 @@ from linknan.t2_four_fuzzer_campaign import (  # noqa: E402
     campaign_commands,
     load_testcases,
     merge_worker_csvs,
+    prepare_isolated_build_dirs,
     write_seed_shards,
     write_seed_lists,
 )
@@ -88,7 +89,8 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             self.assertNotIn("--cycles=", command_text)
             self.assertNotIn("--skip-build", command_text)
         self.assertIn("--campaign-runs 1000", " ".join(commands[0]["command"]))
-        self.assertEqual(commands[0]["env"], {"NUM_CORES": "2"})
+        for item in commands:
+            self.assertEqual(item["env"], {"NUM_CORES": "2"})
         self.assertIn("--rfuzz-rounds 1000", " ".join(commands[1]["command"]))
         self.assertIn("--require-paper-native", " ".join(commands[2]["command"]))
         self.assertIn("--require-paper-native", " ".join(commands[3]["command"]))
@@ -146,6 +148,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             self.assertIn("workers/worker-", command_text)
             self.assertIn("--timeout-sec 600", command_text)
             self.assertNotIn("--worker-id", command_text)
+            self.assertEqual(item["env"], {"NUM_CORES": "2"})
         self.assertIn("--campaign-runs 1000", " ".join(commands[0]["command"]))
         self.assertIn("--rfuzz-rounds 1000", " ".join(commands[1]["command"]))
 
@@ -172,6 +175,68 @@ class FormalRunnerBudgetTests(unittest.TestCase):
 
         self.assertEqual([row["worker_id"] for row in rows], ["000", "001"])
         self.assertEqual([row["accumulated_covered_bits"] for row in rows], ["3", "5"])
+
+    def test_prepare_isolated_build_dirs_copies_rtl_per_worker(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            linknan = root / "LinkNan"
+            rtl_cover = linknan / "build" / "rtl" / "verification" / "cover"
+            generated = linknan / "build" / "generated-src"
+            scripts = linknan / "scripts" / "linknan"
+            rtl_cover.mkdir(parents=True)
+            generated.mkdir(parents=True)
+            scripts.mkdir(parents=True)
+            (linknan / "build" / "rtl" / "SimTop.sv").write_text("module SimTop; endmodule\n", encoding="utf-8")
+            (rtl_cover / "old.sv").write_text("module old; endmodule\n", encoding="utf-8")
+            (generated / "soc.lua").write_text("return {}\n", encoding="utf-8")
+            generator = scripts / "sfuzz_firrtl_cov.py"
+            generator.write_text(
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                "import sys\n"
+                "rtl = Path(sys.argv[1])\n"
+                "out = Path(sys.argv[sys.argv.index('--generated-src-dir') + 1])\n"
+                "out.mkdir(parents=True, exist_ok=True)\n"
+                "(out / 'firrtl-cover.h').write_text('h')\n"
+                "(out / 'firrtl-cover.cpp').write_text('cpp')\n"
+                "(out / 'sfuzz_firrtl_cover.json').write_text('{\\\"backend\\\":\\\"sfuzz_firrtl_sv_bind\\\",\\\"enabled_groups\\\":[\\\"sfuzz_native\\\"]}')\n"
+                "cover = rtl / 'verification' / 'cover'\n"
+                "cover.mkdir(parents=True, exist_ok=True)\n"
+                "(cover / 'sfuzz_firrtl_cover_bind.sv').write_text('bind')\n",
+                encoding="utf-8",
+            )
+            generator.chmod(0o755)
+            paths = CampaignPaths.create(root / "campaign")
+            args = SimpleNamespace(
+                isolated_sim_dirs=True,
+                build_chisel=False,
+                linknan_root=linknan,
+            )
+            commands = [
+                {
+                    "method": "sfuzz",
+                    "coverage_name": "SFUZZ.native",
+                    "command": ["python3", "run.py", "sfuzz", "--build-dir", str(paths.results / "sfuzz" / "workers" / "worker-000" / "linknan-build")],
+                },
+                {
+                    "method": "sfuzz",
+                    "coverage_name": "SFUZZ.native",
+                    "command": ["python3", "run.py", "sfuzz", "--build-dir", str(paths.results / "sfuzz" / "workers" / "worker-001" / "linknan-build")],
+                },
+            ]
+
+            prepare_isolated_build_dirs(args, paths, commands)
+
+            build0 = paths.results / "sfuzz" / "workers" / "worker-000" / "linknan-build"
+            build1 = paths.results / "sfuzz" / "workers" / "worker-001" / "linknan-build"
+            self.assertTrue((build0 / "rtl" / "SimTop.sv").is_file())
+            self.assertTrue((build1 / "rtl" / "SimTop.sv").is_file())
+            self.assertTrue((build0 / "generated-src" / "firrtl-cover.h").is_file())
+            self.assertTrue((build1 / "generated-src" / "firrtl-cover.cpp").is_file())
+            self.assertTrue((build0 / "rtl" / "verification" / "cover" / "sfuzz_firrtl_cover_bind.sv").is_file())
+            self.assertTrue((build1 / "rtl" / "verification" / "cover" / "sfuzz_firrtl_cover_bind.sv").is_file())
 
 
 if __name__ == "__main__":
