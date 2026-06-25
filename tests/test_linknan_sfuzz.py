@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from linknan.methods.sfuzz import (  # noqa: E402
     BASELINE_SCHEDULER_POLICY,
     DEFAULT_CORE0_PROG,
+    SFUZZ_FIELDS,
     CorpusEntry,
     SchedulerRuntime,
     apply_sfuz_mutation_operator,
@@ -37,6 +38,7 @@ from linknan.methods.sfuzz import (  # noqa: E402
     select_parent,
     select_semantic_bandit_parent,
     select_weighted_parent,
+    semantic_operator_name,
     scheduler_weight,
     update_runtime_feedback,
 )
@@ -304,6 +306,19 @@ class SfuzzMutationTests(unittest.TestCase):
             )
 
         self.assertEqual(summary.operators, ("semantic.insert_fence_rw_rw",))
+
+    def test_sfuzz_csv_exposes_semantic_operator_column(self) -> None:
+        entry = CorpusEntry(
+            1,
+            Path("mut.sfuz"),
+            "mut",
+            "cat",
+            energy=1,
+            mutation_operators="byte.flip;semantic.insert_lrsc_pair",
+        )
+
+        self.assertIn("semantic_operator", SFUZZ_FIELDS)
+        self.assertEqual(semantic_operator_name(entry), "insert_lrsc_pair")
 
     def test_infer_seed_semantic_fields_reads_scenario_tags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
