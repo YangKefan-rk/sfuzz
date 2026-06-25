@@ -4,7 +4,9 @@ import random
 import sys
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +57,7 @@ from linknan.vcs import (  # noqa: E402
     scan_vcs_logs,
     simv_compiled_without_difftest,
 )
+from linknan.config import context_from_config  # noqa: E402
 
 
 class FixedTicketRng:
@@ -756,6 +759,40 @@ class SfuzzSchedulerTests(unittest.TestCase):
             append_simv_arg("+foo=1", "+sfuzz_enable_all_cores=1"),
             "+foo=1 +sfuzz_enable_all_cores=1",
         )
+
+    def test_core1_handoff_defaults_to_dual_core_build(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = Namespace(
+                config=str(root / "missing.toml"),
+                linknan_root=str(root / "LinkNan"),
+                build_dir=root / "build",
+                sim_dir=root / "sim",
+                no_cycle_limit=True,
+                cycles=None,
+                enable_core1_handoff=True,
+            )
+
+            ctx = context_from_config(args)
+
+        self.assertEqual(ctx.num_cores, "2")
+
+    def test_core1_handoff_rejects_explicit_single_core_build(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = Namespace(
+                config=str(root / "missing.toml"),
+                linknan_root=str(root / "LinkNan"),
+                build_dir=root / "build",
+                sim_dir=root / "sim",
+                no_cycle_limit=True,
+                cycles=None,
+                enable_core1_handoff=True,
+            )
+
+            with mock.patch.dict("os.environ", {"NUM_CORES": "1"}):
+                with self.assertRaisesRegex(ValueError, "NUM_CORES>=2"):
+                    context_from_config(args)
 
     def test_vcs_log_parser_records_core1_handoff_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

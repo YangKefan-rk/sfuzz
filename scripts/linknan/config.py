@@ -133,7 +133,13 @@ def context_from_config(args: Any) -> VcsContext:
     else:
         configured_cycles = cfg(config, "vcs", "cycles", 0)
         cycles = int(configured_cycles) if configured_cycles not in {None, "", 0, "0"} else None
-    num_cores = str(os.environ.get("NUM_CORES", cfg(config, "vcs", "num_cores", cfg(config, "emu", "num_cores", 1))))
+    configured_num_cores = cfg(config, "vcs", "num_cores", cfg(config, "emu", "num_cores", 1))
+    num_cores = str(os.environ.get("NUM_CORES", configured_num_cores))
+    if bool(getattr(args, "enable_core1_handoff", False)):
+        if "NUM_CORES" in os.environ and num_cores == "1":
+            raise ValueError("--enable-core1-handoff requires NUM_CORES>=2; got explicit NUM_CORES=1")
+        if "NUM_CORES" not in os.environ and num_cores == "1":
+            num_cores = "2"
     return VcsContext(
         linknan_root=linknan_root,
         build_dir=build_dir,
