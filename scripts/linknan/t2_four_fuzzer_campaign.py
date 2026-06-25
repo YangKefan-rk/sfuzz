@@ -257,6 +257,10 @@ def copy_or_link_file(source: Path, dest: Path) -> None:
         shutil.copy2(source, dest)
 
 
+def copy_file(source: Path, dest: Path) -> None:
+    shutil.copy2(source, dest)
+
+
 def command_option_path(command: list[str], option: str) -> Path | None:
     try:
         index = command.index(option)
@@ -273,7 +277,7 @@ def copy_prepared_build_dir(source: Path, dest: Path) -> None:
     if dest.exists():
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, dest, symlinks=True, copy_function=copy_or_link_file)
+    shutil.copytree(source, dest, symlinks=True, copy_function=copy_file)
 
 
 def generate_isolated_firrtl_coverage(
@@ -308,7 +312,7 @@ def generate_isolated_firrtl_coverage(
             if item.is_dir():
                 shutil.copytree(item, dest, symlinks=True, copy_function=copy_or_link_file)
             else:
-                copy_or_link_file(item, dest)
+                copy_file(item, dest)
     log_path = paths.logs / f"prepare-{method}-firrtl-coverage.log"
     command = [
         run_py(),

@@ -251,6 +251,10 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             self.assertTrue((build1 / "generated-src" / "firrtl-cover.cpp").is_file())
             self.assertTrue((build0 / "rtl" / "verification" / "cover" / "sfuzz_firrtl_cover_bind.sv").is_file())
             self.assertTrue((build1 / "rtl" / "verification" / "cover" / "sfuzz_firrtl_cover_bind.sv").is_file())
+            (build1 / "generated-src" / "sfuzz_firrtl_cover.json").write_text("worker1", encoding="utf-8")
+            (build1 / "generated-src" / "firrtl-cover.cpp").write_text("worker1", encoding="utf-8")
+            self.assertNotEqual((build0 / "generated-src" / "sfuzz_firrtl_cover.json").read_text(encoding="utf-8"), "worker1")
+            self.assertEqual((build0 / "generated-src" / "firrtl-cover.cpp").read_text(encoding="utf-8"), "cpp")
 
 
 if __name__ == "__main__":
