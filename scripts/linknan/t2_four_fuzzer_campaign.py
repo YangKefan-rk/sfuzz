@@ -53,6 +53,7 @@ SUMMARY_FIELDS = [
     "notes",
 ]
 DEFAULT_DIRECT_TARGET = "SimTop.soc.cc_0.tile.core.memBlock"
+DEFAULT_BUILD_TIMEOUT_SEC = 14400
 ACTIVE_PROCESS_GROUPS: set[int] = set()
 ACTIVE_PROCESS_GROUPS_LOCK = threading.Lock()
 
@@ -592,6 +593,7 @@ def write_campaign_manifest(paths: CampaignPaths, testcases: list[Testcase], com
         "target_min_wall_time_sec": args.target_min_wall_time_sec,
         "rng_seed": args.rng_seed,
         "build_mode": args.build_mode,
+        "build_timeout_sec": args.build_timeout_sec,
         "sfuzz_num_cores": args.sfuzz_num_cores,
         "workers_per_fuzzer": args.workers_per_fuzzer,
         "parallel_jobs": args.parallel_jobs,
@@ -901,7 +903,7 @@ def parse_args() -> argparse.Namespace:
         help="auto lets each runner rebuild simv when the requested coverage ABI does not match the current build",
     )
     parser.add_argument("--build-chisel", action="store_true")
-    parser.add_argument("--build-timeout-sec", type=int, default=3600)
+    parser.add_argument("--build-timeout-sec", type=int, default=DEFAULT_BUILD_TIMEOUT_SEC)
     parser.add_argument("--simv-args", default="")
     parser.add_argument("--sfuzz-num-cores", type=int, default=2)
     parser.add_argument("--workers-per-fuzzer", type=int, default=4)

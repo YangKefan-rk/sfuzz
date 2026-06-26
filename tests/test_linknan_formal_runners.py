@@ -13,6 +13,7 @@ from linknan.methods.directfuzz import directfuzz_mutation_limit  # noqa: E402
 from linknan.methods.surgefuzz import surgefuzz_mutation_limit  # noqa: E402
 from linknan.t2_four_fuzzer_campaign import (  # noqa: E402
     CampaignPaths,
+    DEFAULT_BUILD_TIMEOUT_SEC,
     campaign_commands,
     load_testcases,
     merge_worker_csvs,
@@ -68,7 +69,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
                 timeout_sec=600,
                 build_mode="auto",
                 build_chisel=False,
-                build_timeout_sec=3600,
+                build_timeout_sec=DEFAULT_BUILD_TIMEOUT_SEC,
                 simv_args="",
                 exec_budget=1000,
                 rng_seed=20260605,
@@ -91,6 +92,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             command_text = " ".join(item["command"])
             self.assertIn("--no-cycle-limit", command_text)
             self.assertIn("--timeout-sec 600", command_text)
+            self.assertIn(f"--build-timeout-sec {DEFAULT_BUILD_TIMEOUT_SEC}", command_text)
             self.assertIn("--build-dir", command_text)
             self.assertIn("--sim-dir", command_text)
             self.assertNotIn("--cycles=", command_text)
@@ -129,7 +131,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
                 timeout_sec=600,
                 build_mode="auto",
                 build_chisel=False,
-                build_timeout_sec=3600,
+                build_timeout_sec=DEFAULT_BUILD_TIMEOUT_SEC,
                 simv_args="",
                 exec_budget=1000,
                 rng_seed=20260605,
@@ -154,6 +156,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             command_text = " ".join(item["command"])
             self.assertIn("workers/worker-", command_text)
             self.assertIn("--timeout-sec 600", command_text)
+            self.assertIn(f"--build-timeout-sec {DEFAULT_BUILD_TIMEOUT_SEC}", command_text)
             self.assertNotIn("--worker-id", command_text)
             self.assertEqual(item["env"], {"NUM_CORES": "2"})
         self.assertIn("--campaign-runs 500", " ".join(commands[0]["command"]))
