@@ -143,11 +143,21 @@ class ScheduledEntry:
 
 
 class DirectFuzzQueue:
+    """Persistent DirectFuzz corpus queue.
+
+    Entries are scheduled round-robin and stay in the queue (the corpus is
+    never consumed), matching the AFL/RFuzz-derived DirectFuzz model where
+    seeds are repeatedly selected under a power schedule. ``next()`` therefore
+    does not pop; it advances a cursor over the live corpus.
+    """
+
     def __init__(self, escape_interval: int) -> None:
         self.target: list[CorpusEntry] = []
         self.regular: list[CorpusEntry] = []
         self.no_target_progress = 0
         self.escape_interval = max(0, escape_interval)
+        self._target_cursor = 0
+        self._regular_cursor = 0
 
     def push(self, entry: CorpusEntry) -> None:
         if entry.covered_target:
@@ -158,14 +168,23 @@ class DirectFuzzQueue:
             self.no_target_progress = 0
 
     def next(self) -> ScheduledEntry | None:
-        scheduled: ScheduledEntry | None = None
         if self._should_escape() and self.regular:
             idx = min(range(len(self.regular)), key=lambda pos: self.regular[pos].energy)
-            scheduled = ScheduledEntry(self.regular.pop(idx), "regular-escape", True)
-        elif self.target:
-            scheduled = ScheduledEntry(self.target.pop(0), "target", False)
+            # Reset the stall counter and return immediately so escapes fire on a
+            # clean period of escape_interval picks (the queue is persistent, so
+            # the escape entry is not consumed and must not re-arm the counter).
+            self.no_target_progress = 0
+            return ScheduledEntry(self.regular[idx], "regular-escape", True)
+
+        scheduled: ScheduledEntry | None = None
+        if self.target:
+            entry = self.target[self._target_cursor % len(self.target)]
+            self._target_cursor += 1
+            scheduled = ScheduledEntry(entry, "target", False)
         elif self.regular:
-            scheduled = ScheduledEntry(self.regular.pop(0), "regular", False)
+            entry = self.regular[self._regular_cursor % len(self.regular)]
+            self._regular_cursor += 1
+            scheduled = ScheduledEntry(entry, "regular", False)
 
         if scheduled is None:
             return None
@@ -594,7 +613,15 @@ def mutate_workload(parent: Path, output: Path, rng: random.Random, budget: int)
     output.write_bytes(bytes(data))
 
 
-def mutation_budget(feedback: dict[str, Any], default_energy: bool) -> int:
+def directfuzz_power(feedback: dict[str, Any], default_energy: bool) -> int:
+    """DirectFuzz power schedule: how many children to spawn from a seed.
+
+    Distance-derived ``energy`` (higher == closer to the target) maps directly
+    to the number of mutated children produced in one scheduling round. This is
+    the directed mechanism from the DirectFuzz paper: near-target seeds receive
+    more of the execution budget. ``default_energy`` (escape selections) and a
+    missing energy value fall back to a single child.
+    """
     if default_energy:
         return 1
     value = feedback.get("energy")
@@ -638,7 +665,7 @@ def direct_notes(args: Any, backend: str, common_backend: str, dynamic_native_co
     notes = [
         "真实 LinkNan VCS 已运行",
         "DirectFuzz 输入为 LinkNan workload .bin/ELF，不使用 .sfuz",
-        "DirectFuzz campaign 由 target-priority/regular corpus queue、distance energy 和 new coverage retention 驱动",
+        "DirectFuzz campaign 由 target-priority/regular 持久 corpus queue、distance energy power schedule（energy 决定每轮子代数）和 new coverage retention 驱动",
         "使用 --no-cycle-limit 时 xmake 未收到 --cycles；当前 LinkNan 生成的 simv 命令不追加 +max-cycles，外部终止由 --timeout-sec 控制",
     ]
     if args.coverage_backend == "native-file":
@@ -890,20 +917,28 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
         scheduled = queue.next()
         if scheduled is None:
             break
-        budget = mutation_budget(scheduled.entry.feedback, scheduled.use_default_energy)
-        mutation_path = mutations_dir / f"mut-{mutation_idx:04d}-parent-{scheduled.entry.corpus_id}.bin"
-        mutate_workload(scheduled.entry.path, mutation_path, rng, budget)
-        run_one(
-            input_path=mutation_path,
-            exec_idx=exec_idx,
-            parent_id=scheduled.entry.corpus_id,
-            mutation_index=mutation_idx,
-            scheduler_queue=scheduled.queue_name,
-            initial_seed=False,
-            default_energy=scheduled.use_default_energy,
-        )
-        exec_idx += 1
-        mutation_idx += 1
+        # Power schedule: distance-derived energy decides how many children this
+        # seed gets this round. Per-child havoc strength is an independent
+        # dimension (stacked random edits), so the directed signal lives in the
+        # child count, not in mutation aggressiveness.
+        power = directfuzz_power(scheduled.entry.feedback, scheduled.use_default_energy)
+        for _ in range(power):
+            if exec_idx >= exec_budget or mutation_idx >= mutation_limit:
+                break
+            steps = rng.randint(1, 16)
+            mutation_path = mutations_dir / f"mut-{mutation_idx:04d}-parent-{scheduled.entry.corpus_id}.bin"
+            mutate_workload(scheduled.entry.path, mutation_path, rng, steps)
+            run_one(
+                input_path=mutation_path,
+                exec_idx=exec_idx,
+                parent_id=scheduled.entry.corpus_id,
+                mutation_index=mutation_idx,
+                scheduler_queue=scheduled.queue_name,
+                initial_seed=False,
+                default_energy=scheduled.use_default_energy,
+            )
+            exec_idx += 1
+            mutation_idx += 1
 
     all_paper_faithful = all(str(row.get("paper_faithful")) == "True" for row in rows) if rows else False
     write_table(

@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+import csv
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from linknan.methods.directfuzz import directfuzz_mutation_limit  # noqa: E402
+from linknan.methods.directfuzz import (  # noqa: E402
+    CorpusEntry,
+    DirectFuzzQueue,
+    directfuzz_mutation_limit,
+    directfuzz_power,
+    run_directfuzz,
+)
 from linknan.methods.surgefuzz import surgefuzz_mutation_limit  # noqa: E402
 from linknan.t2_four_fuzzer_campaign import (  # noqa: E402
     CampaignPaths,
@@ -22,6 +31,167 @@ from linknan.t2_four_fuzzer_campaign import (  # noqa: E402
     write_seed_shards,
     write_seed_lists,
 )
+
+
+def _entry(corpus_id: int, *, energy: float, target: bool, progress: bool) -> CorpusEntry:
+    feedback = {
+        "energy": energy,
+        "target_covered_bits": 4 if target else 0,
+        "target_progress": progress,
+    }
+    return CorpusEntry(corpus_id, Path(f"/tmp/seed-{corpus_id}.bin"), feedback)
+
+
+class DirectFuzzPowerScheduleTests(unittest.TestCase):
+    def test_power_maps_energy_to_child_count(self) -> None:
+        # energy (distance-derived, higher == closer) -> children = round(e)+1, clamped 1..64.
+        self.assertEqual(directfuzz_power({"energy": 0.0}, False), 1)
+        self.assertEqual(directfuzz_power({"energy": 24.0}, False), 25)
+        self.assertEqual(directfuzz_power({"energy": 1000.0}, False), 64)
+
+    def test_power_defaults_to_single_child(self) -> None:
+        self.assertEqual(directfuzz_power({"energy": 7.0}, True), 1)  # escape selection
+        self.assertEqual(directfuzz_power({"energy": ""}, False), 1)
+        self.assertEqual(directfuzz_power({}, False), 1)
+
+
+class DirectFuzzQueuePersistenceTests(unittest.TestCase):
+    def test_queue_is_persistent_round_robin(self) -> None:
+        queue = DirectFuzzQueue(escape_interval=0)
+        a = _entry(0, energy=1.0, target=False, progress=False)
+        b = _entry(1, energy=2.0, target=False, progress=False)
+        queue.push(a)
+        queue.push(b)
+
+        picked = [queue.next().entry.corpus_id for _ in range(4)]
+        self.assertEqual(picked, [0, 1, 0, 1])  # cycles, never consumed
+        self.assertTrue(bool(queue))  # corpus persists across scheduling
+
+    def test_target_entries_take_priority(self) -> None:
+        queue = DirectFuzzQueue(escape_interval=0)
+        queue.push(_entry(0, energy=1.0, target=False, progress=False))
+        queue.push(_entry(1, energy=20.0, target=True, progress=False))
+        scheduled = queue.next()
+        self.assertEqual(scheduled.queue_name, "target")
+        self.assertEqual(scheduled.entry.corpus_id, 1)
+
+    def test_escape_fires_periodically(self) -> None:
+        queue = DirectFuzzQueue(escape_interval=3)
+        queue.push(_entry(0, energy=20.0, target=True, progress=False))
+        queue.push(_entry(1, energy=1.0, target=False, progress=False))
+
+        names = [queue.next().queue_name for _ in range(7)]
+        # target stalls for escape_interval picks, then a regular-escape fires,
+        # and the cycle repeats deterministically.
+        self.assertEqual(
+            names,
+            ["target", "target", "target", "regular-escape", "target", "target", "target"],
+        )
+
+    def test_escape_uses_default_energy(self) -> None:
+        queue = DirectFuzzQueue(escape_interval=1)
+        queue.push(_entry(0, energy=20.0, target=True, progress=False))
+        queue.push(_entry(1, energy=1.0, target=False, progress=False))
+        queue.next()  # target, bumps stall counter to 1
+        escape = queue.next()
+        self.assertEqual(escape.queue_name, "regular-escape")
+        self.assertTrue(escape.use_default_energy)
+
+
+class DirectFuzzBudgetExhaustionTests(unittest.TestCase):
+    """Regression guard: the persistent corpus must consume the full exec budget.
+
+    Before the persistent-queue fix the destructive queue drained once mutations
+    stopped finding new coverage, so campaigns stopped far short of --max-execs.
+    """
+
+    def _run(self, tmp: Path, *, max_execs: int, seeds: int) -> list[dict[str, str]]:
+        from linknan.vcs import CommandResult, CoverageResult, VcsLogInfo
+
+        work = tmp / "work"
+        work.mkdir(parents=True, exist_ok=True)
+        metadata = tmp / "direct.csv"
+        metadata.write_text(
+            "instance_name,coverage_signal_name,width,distance\n"
+            "SimTop.target,cov_target,8,0\n"
+            "SimTop.near,cov_near,8,1\n"
+            "SimTop.far,cov_far,8,3\n",
+            encoding="utf-8",
+        )
+        seed_paths = []
+        for i in range(seeds):
+            p = tmp / f"seed-{i}.bin"
+            p.write_bytes(b"\x73\x00\x10\x00" + bytes([i, i + 7, i + 13]))
+            seed_paths.append(str(p))
+
+        out_csv = tmp / "results.csv"
+        args = SimpleNamespace(
+            work_dir=work,
+            firrtl_cov=None,
+            require_paper_native=False,
+            seed=seed_paths,
+            seed_list=None,
+            seed_dir=None,
+            limit=0,
+            metadata=metadata,
+            target_instance="SimTop.target",
+            coverage_backend="dev-mock",
+            native_coverage=None,
+            native_coverage_source="dev-generated",
+            native_coverage_pattern=None,
+            metadata_source="dev-generated",
+            max_execs=max_execs,
+            mutations=8,
+            formal_campaign_total_execs=0,
+            escape_interval=10,
+            rng_seed=1234,
+            case_prefix="directfuzz",
+            cov=False,
+            simv_args=None,
+            timeout_sec=600,
+            output_csv=out_csv,
+            output_json=tmp / "results.json",
+        )
+        ctx = SimpleNamespace(cycles=None, sim_dir=tmp / "sim")
+
+        def fake_run_vcs_seed(**kwargs):
+            runs_dir = kwargs["runs_dir"]
+            case_dir = runs_dir / kwargs["case_name"]
+            case_dir.mkdir(parents=True, exist_ok=True)
+            run_log = case_dir / "run.log"
+            assert_log = case_dir / "assert.log"
+            run_log.touch()
+            assert_log.touch()
+            result = CommandResult(
+                command=[],
+                returncode=0,
+                command_log_path=str(case_dir / "cmd.log"),
+                wall_time_sec=0.01,
+                timed_out=False,
+            )
+            return result, case_dir, run_log, assert_log
+
+        module = "linknan.methods.directfuzz"
+        with mock.patch(f"{module}.build_simv_if_needed"), \
+            mock.patch(f"{module}.run_vcs_seed", side_effect=fake_run_vcs_seed), \
+            mock.patch(f"{module}.scan_vcs_logs", return_value=VcsLogInfo()), \
+            mock.patch(f"{module}.collect_vcs_coverage", return_value=CoverageResult()), \
+            mock.patch(f"{module}.classify_infrastructure_error", return_value=""):
+            rc = run_directfuzz(args, ctx)
+        self.assertEqual(rc, 0)
+        with out_csv.open(encoding="utf-8") as handle:
+            return list(csv.DictReader(handle))
+
+    def test_campaign_exhausts_exec_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = self._run(Path(tmp), max_execs=24, seeds=3)
+        # The whole point: budget is consumed instead of draining early.
+        self.assertEqual(len(rows), 24)
+        initial = [r for r in rows if r["scheduler_queue"] == "initial"]
+        self.assertEqual(len(initial), 3)
+        # 24 execs from only 3 seeds proves the corpus is cycled, not consumed.
+        mutations = [r for r in rows if r["scheduler_queue"] != "initial"]
+        self.assertEqual(len(mutations), 21)
 
 
 class FormalRunnerBudgetTests(unittest.TestCase):
