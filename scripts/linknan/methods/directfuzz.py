@@ -24,6 +24,7 @@ from ..vcs import (
     common_coverage_backend,
     design_bug,
     design_bug_reasons,
+    resolve_tohost_addr,
     run_vcs_seed,
     scan_vcs_logs,
     wall_timeout,
@@ -80,6 +81,8 @@ DIRECTFUZZ_FIELDS = [
     "case_name",
     "timed_out",
     "wall_timeout",
+    "tohost_exit_seen",
+    "tohost_exit_code",
     "design_bug",
     "assertion_failure",
     "design_bug_reasons",
@@ -729,6 +732,9 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
     corpus: list[CorpusEntry] = []
     rng = random.Random(args.rng_seed)
     build_simv_if_needed(args, ctx, work_dir)
+    # Resolve the HTIF tohost monitor address once from the ELF seeds; mutations
+    # are raw .bin derivatives of these seeds and inherit the same address.
+    tohost_addr = resolve_tohost_addr(getattr(args, "tohost_addr", "auto"), seeds)
     rows: list[dict[str, Any]] = []
     campaign_start = time.monotonic()
     exec_budget = args.max_execs if args.max_execs > 0 else len(seeds) + args.mutations
@@ -753,6 +759,7 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
             timeout_sec=args.timeout_sec,
             cov=args.cov,
             simv_args=args.simv_args,
+            tohost_addr=tohost_addr,
         )
         info = scan_vcs_logs(run_log, assert_log, ctx.cycles)
         common_coverage = collect_vcs_coverage(args, case_dir, ctx.sim_dir)
@@ -871,6 +878,8 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
                 "case_name": case_name,
                 "timed_out": result.timed_out,
                 "wall_timeout": wall_timeout(result),
+                "tohost_exit_seen": info.tohost_exit_seen,
+                "tohost_exit_code": info.tohost_exit_code if info.tohost_exit_code is not None else "",
                 "design_bug": design_bug(info),
                 "assertion_failure": assertion_failure(info),
                 "design_bug_reasons": design_bug_reasons(info),

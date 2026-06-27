@@ -22,6 +22,10 @@ VCS_REPORT_NORMALIZED = "VCSSimulationReport"
 SFUZ_EXPANSION_TOKEN = "SFuzz structured seed detected. Expanding image into RAM"
 GOOD_TRAP_TOKEN = "HIT GOOD TRAP"
 FINISH_TOKEN = "$finish"
+TOHOST_EXIT_TOKEN = "SFUZZ_TOHOST_EXIT"
+# riscv-tests place tohost in a dedicated .tohost section at this fixed address;
+# used as the fallback when --tohost-addr=auto and a seed has no symbol table.
+DEFAULT_TOHOST_ADDR = 0x80001000
 SFUZZ_FIRRTL_COV_ENV = "SFUZZ_FIRRTL_COV"
 SFUZZ_FIRRTL_COV_OUT_ENV = "SFUZZ_FIRRTL_COV_OUT"
 SFUZZ_FIRRTL_COV_PREFIX = "sfuzz_firrtl_coverage"
@@ -74,6 +78,8 @@ class VcsLogInfo:
     sfuzz_core1_handoff_reason: str = ""
     sfuzz_core1_entry: str = ""
     sfuzz_core1_payload_size: int | None = None
+    tohost_exit_seen: bool = False
+    tohost_exit_code: int | None = None
 
 
 ASSERTION_REASONS = {"assert_log_nonempty", "assertion_failed"}
@@ -605,6 +611,92 @@ def build_simv_if_needed(args: Any, ctx: VcsContext, work_dir: Path) -> None:
     require_file(simv)
 
 
+def read_elf_symbol(path: Path, name: str) -> int | None:
+    """Return the value of ELF symbol ``name``, or None if absent/not an ELF.
+
+    Minimal ELF32/ELF64 (little/big-endian) symbol-table reader; no external
+    dependency. Used to locate ``tohost`` in riscv-test workloads so the HTIF
+    completion monitor knows which address to watch.
+    """
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if len(data) < 64 or data[:4] != b"\x7fELF":
+        return None
+    is64 = data[4] == 2
+    endian = "<" if data[5] == 1 else ">"
+    import struct
+
+    def u(fmt: str, off: int) -> int:
+        return struct.unpack_from(endian + fmt, data, off)[0]
+
+    try:
+        if is64:
+            e_shoff = u("Q", 0x28)
+            e_shentsize = u("H", 0x3A)
+            e_shnum = u("H", 0x3C)
+        else:
+            e_shoff = u("I", 0x20)
+            e_shentsize = u("H", 0x2E)
+            e_shnum = u("H", 0x30)
+        if e_shoff == 0 or e_shnum == 0:
+            return None
+        target = name.encode("utf-8")
+        for i in range(e_shnum):
+            sh = e_shoff + i * e_shentsize
+            sh_type = u("I", sh + 4)
+            if sh_type != 2:  # SHT_SYMTAB
+                continue
+            sh_offset = u("Q", sh + 0x18) if is64 else u("I", sh + 0x10)
+            sh_size = u("Q", sh + 0x20) if is64 else u("I", sh + 0x14)
+            sh_link = u("I", sh + 0x28) if is64 else u("I", sh + 0x18)
+            sh_entsize = u("Q", sh + 0x38) if is64 else u("I", sh + 0x24)
+            if sh_entsize == 0:
+                continue
+            str_sh = e_shoff + sh_link * e_shentsize
+            str_off = u("Q", str_sh + 0x18) if is64 else u("I", str_sh + 0x10)
+            for s in range(sh_offset, sh_offset + sh_size, sh_entsize):
+                st_name = u("I", s)
+                if is64:
+                    st_value = u("Q", s + 8)
+                else:
+                    st_value = u("I", s + 4)
+                end = data.index(b"\x00", str_off + st_name)
+                if data[str_off + st_name : end] == target:
+                    return st_value
+    except (struct.error, ValueError, IndexError):
+        return None
+    return None
+
+
+def resolve_tohost_addr(spec: str | None, seeds: list[Path]) -> int:
+    """Resolve the HTIF tohost monitor address from a CLI spec.
+
+    spec: "off"/"none"/"0" disables (returns 0); a hex/decimal literal sets it
+    explicitly; "auto" (default) reads ``tohost`` from the first ELF seed and
+    falls back to DEFAULT_TOHOST_ADDR if a seed is an ELF but lacks the symbol.
+    Returns 0 when no seed is an ELF (monitor stays off, behavior unchanged).
+    """
+    text = (spec or "auto").strip().lower()
+    if text in {"off", "none", "0", ""}:
+        return 0
+    if text != "auto":
+        return int(text, 0)
+    saw_elf = False
+    for seed in seeds:
+        try:
+            if seed.read_bytes()[:4] != b"\x7fELF":
+                continue
+        except OSError:
+            continue
+        saw_elf = True
+        addr = read_elf_symbol(seed, "tohost")
+        if addr:
+            return addr
+    return DEFAULT_TOHOST_ADDR if saw_elf else 0
+
+
 def run_vcs_seed(
     *,
     seed: Path,
@@ -616,6 +708,7 @@ def run_vcs_seed(
     cov: bool = False,
     simv_args: str | None = None,
     extra_env: dict[str, str] | None = None,
+    tohost_addr: int = 0,
 ) -> tuple[CommandResult, Path, Path, Path]:
     case_dir = runs_dir / case_name
     if case_dir.exists():
@@ -638,6 +731,11 @@ def run_vcs_seed(
         command.append("--no_fgp")
     if cov:
         command.append("--cov")
+    # HTIF tohost completion monitor: a single +plusarg passed through simv_args.
+    # 0 keeps it off, so existing workloads are unaffected.
+    if tohost_addr > 0:
+        plusarg = f"+tohost-addr={tohost_addr}"
+        simv_args = f"{simv_args} {plusarg}".strip() if simv_args else plusarg
     if simv_args:
         command.append(f"--simv_args={simv_args}")
     result = run_command(command, ctx.linknan_root, logs_dir / f"{case_name}.command.log", timeout_sec, extra_env)
@@ -664,6 +762,11 @@ def scan_vcs_logs(run_log: Path, assert_log: Path, requested_cycles: int | None)
             info.good_trap_seen = True
         if FINISH_TOKEN in line:
             info.finish_seen = True
+        if TOHOST_EXIT_TOKEN in line:
+            info.tohost_exit_seen = True
+            code_match = re.search(r"SFUZZ_TOHOST_EXIT:\s+core=\d+\s+code=(-?\d+)", line)
+            if code_match:
+                info.tohost_exit_code = int(code_match.group(1))
         for reason, pattern in BUG_PATTERNS:
             if pattern.search(line) and reason not in info.bug_reasons:
                 info.bug_reasons.append(reason)

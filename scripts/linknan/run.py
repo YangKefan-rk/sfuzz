@@ -44,6 +44,15 @@ def add_common_vcs_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="do not pass --cycles to xmake simv-run; rely on workload natural finish and --timeout-sec",
     )
+    parser.add_argument(
+        "--tohost-addr",
+        default="auto",
+        help=(
+            "HTIF tohost completion monitor address for bare riscv-test workloads. "
+            "'auto' (default) reads the tohost symbol from ELF seeds; a hex/decimal "
+            "literal sets it explicitly; 'off' disables the monitor."
+        ),
+    )
     parser.add_argument("--case-prefix", default=None)
     parser.add_argument("--timeout-sec", type=int, default=0, help="per-command timeout; 0 disables")
     parser.add_argument(
