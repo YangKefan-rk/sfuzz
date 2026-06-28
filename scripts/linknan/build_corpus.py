@@ -22,6 +22,13 @@ DEFAULT_LINKNAN_READY = WORKSPACE_ROOT / "LinkNan" / "ready-to-run"
 DEFAULT_MANIFEST = SFUZZ_HOME / "benchmarks" / "linknan" / "phase1_corpus_manifest.csv"
 DEFAULT_SFUZ_DIR = SFUZZ_HOME / "work" / "bench" / "linknan-corpus" / "sfuz"
 
+# riscv-tests whose ISA features the LinkNan/Nanhu core does not implement.
+# The hypervisor (H) extension is unsupported, so hypervisor-* tests trap early
+# and report a spurious HTIF failure code; exclude them from the corpus.
+# NOTE: rv64*-v-* are virtual-memory (Sv39) variants, NOT H-extension, and are
+# kept on purpose (the core supports Sv39).
+UNSUPPORTED_ISA_PREFIXES = ("hypervisor",)
+
 CATEGORIES = (
     "ISA basic instructions",
     "CSR/exception",
@@ -112,6 +119,8 @@ def collect_riscv_isa(root: Path) -> list[Candidate]:
     candidates: list[Candidate] = []
     for path in sorted(root.iterdir()):
         if not path.is_file() or path.name.startswith(".") or path.suffix == ".dump":
+            continue
+        if path.name.startswith(UNSUPPORTED_ISA_PREFIXES):
             continue
         fmt = file_format(path)
         if fmt != "elf":
