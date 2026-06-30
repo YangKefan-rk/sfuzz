@@ -298,6 +298,19 @@ def load_trace_meta(trace: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def trace_counter_fallback(values: list[int], meta: dict[str, Any]) -> tuple[Any, Any, str]:
+    call_count = meta.get("call_count", "")
+    target_hit_count = meta.get("target_hit_count", "")
+    notes: list[str] = []
+    if call_count in {None, ""}:
+        call_count = len(values)
+        notes.append("trace_call_count_recoverable_from_csv_samples")
+    if target_hit_count in {None, ""}:
+        target_hit_count = sum(1 for value in values if value != 0)
+        notes.append("trace_target_hit_count_recoverable_from_csv_samples")
+    return call_count, target_hit_count, "; ".join(notes)
+
+
 def trace_meta_notes(meta: dict[str, Any]) -> str:
     if not meta:
         return ""
@@ -662,6 +675,7 @@ def evaluate_feedback(
     if trace is not None:
         values, dependents = load_surge_trace(trace, args.score_column, active_target_index, active_target_id)
         meta = load_trace_meta(trace)
+        _trace_call_count, _trace_target_hit_count, counter_fallback_note = trace_counter_fallback(values, meta)
         best_score = max(score_series(*annotation, values, args.freq_window), default=0)
         if active_target_index is None:
             ancestor_states = set(dependents)
@@ -681,6 +695,10 @@ def evaluate_feedback(
         meta_note = trace_meta_notes(meta)
         if meta_note:
             notes += f"; {meta_note}"
+        elif args.trace_source == "vcs-native-abi":
+            notes += "; trace_meta_missing"
+        if counter_fallback_note:
+            notes += f"; {counter_fallback_note}"
         if not values:
             notes += "; trace has no per-cycle samples, so native SurgeFuzz feedback is not usable yet"
         if not paper_faithful:

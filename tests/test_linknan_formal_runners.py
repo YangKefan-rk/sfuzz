@@ -32,6 +32,7 @@ from linknan.t2_four_fuzzer_campaign import (  # noqa: E402
     prebuild_commands,
     prebuilt_run_commands,
     prepare_isolated_build_dirs,
+    row_uses_no_cycle_limit,
     row_is_mutation,
     write_seed_shards,
     write_seed_lists,
@@ -557,6 +558,17 @@ class FormalRunnerBudgetTests(unittest.TestCase):
         self.assertTrue(row_is_mutation({"fuzzer": "rfuzz", "mutation": "arith8+1[4]"}))
         self.assertFalse(row_is_mutation({"fuzzer": "surgefuzz", "round": "bootstrap", "mutation_kind": "initial-artifact-program"}))
         self.assertTrue(row_is_mutation({"fuzzer": "surgefuzz", "round": "0", "mutation_kind": "artifact-program-mutation"}))
+
+    def test_t2_no_cycle_limit_summary_falls_back_to_command_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "cmd.log"
+            log.write_text("COMMAND: xmake simv-run --no_diff --timeout-sec 600\n", encoding="utf-8")
+
+            self.assertTrue(row_uses_no_cycle_limit({"command_log_path": str(log)}))
+
+            log.write_text("COMMAND: xmake simv-run --cycles=5000\n", encoding="utf-8")
+
+            self.assertFalse(row_uses_no_cycle_limit({"command_log_path": str(log)}))
 
     def test_t2_campaign_can_disable_shared_simv_builds(self) -> None:
         import tempfile

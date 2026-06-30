@@ -885,6 +885,19 @@ def command_log_cycle_violation(row: dict[str, str]) -> bool:
     return "--cycles=" in text or "+max-cycles=5000" in text
 
 
+def row_uses_no_cycle_limit(row: dict[str, str]) -> bool:
+    if "no_max_cycle_limit" in row:
+        return bool_text(row.get("no_max_cycle_limit"))
+    command_log = row.get("command_log_path") or ""
+    if not command_log:
+        return False
+    path = Path(command_log)
+    if not path.is_file():
+        return False
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return "--cycles=" not in text and "+max-cycles=5000" not in text
+
+
 def summarize_csv(method: str, csv_path: Path) -> dict[str, Any]:
     if not csv_path.is_file():
         return {
@@ -933,7 +946,7 @@ def summarize_csv(method: str, csv_path: Path) -> dict[str, Any]:
         "paper_faithful_rows": sum(1 for row in rows if bool_text(row.get("paper_faithful"))),
         "timed_out_rows": sum(1 for row in rows if bool_text(row.get("timed_out"))),
         "bug_rows": bug_rows,
-        "no_cycle_limit_rows": sum(1 for row in rows if bool_text(row.get("no_max_cycle_limit"))),
+        "no_cycle_limit_rows": sum(1 for row in rows if row_uses_no_cycle_limit(row)),
         "command_cycle_violations": sum(1 for row in rows if command_log_cycle_violation(row)),
         "final_covered": int(final_covered) if final_covered is not None and float(final_covered).is_integer() else final_covered or "",
         "final_total": int(final_total) if final_total is not None and float(final_total).is_integer() else final_total or "",

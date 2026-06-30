@@ -21,6 +21,7 @@ from linknan.methods.surgefuzz import (  # noqa: E402
     parse_annotation,
     score_series,
     trace_backend,
+    trace_counter_fallback,
     write_instrumentation_target_config,
 )
 from linknan.surgefuzz_ancestors import AncestorCandidate  # noqa: E402
@@ -82,6 +83,23 @@ class SurgeFuzzTraceTests(unittest.TestCase):
         self.assertEqual(backend, "surgefuzz_vcs_native_abi_trace")
         self.assertTrue(paper_faithful)
         self.assertEqual(required, "")
+
+    def test_trace_counter_fallback_marks_timeout_csv_as_recoverable(self) -> None:
+        call_count, target_hit_count, note = trace_counter_fallback([0, 1, 0, 1, 1], {})
+
+        self.assertEqual(call_count, 5)
+        self.assertEqual(target_hit_count, 3)
+        self.assertIn("trace_call_count_recoverable_from_csv_samples", note)
+        self.assertIn("trace_target_hit_count_recoverable_from_csv_samples", note)
+
+    def test_trace_counter_fallback_prefers_native_meta(self) -> None:
+        call_count, target_hit_count, note = trace_counter_fallback(
+            [0, 1, 1], {"call_count": 100, "target_hit_count": 7}
+        )
+
+        self.assertEqual(call_count, 100)
+        self.assertEqual(target_hit_count, 7)
+        self.assertEqual(note, "")
 
     def test_nmi_report_uses_paired_profile_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -310,6 +328,81 @@ class SurgeFuzzRotationTests(unittest.TestCase):
         self.assertEqual(rows[0]["paper_based"], True)
         self.assertEqual(rows[0]["paper_faithful"], False)
         self.assertEqual(rows[0]["active_target_id"], "t0")
+
+    def test_append_row_leaves_missing_meta_summary_empty(self) -> None:
+        args = SimpleNamespace(
+            input_mode="artifact-program",
+            rotation_mode="none",
+            annotation_type="SURGE_FREQ=1",
+            target_signal_or_group="target_sig",
+            ancestor_selector="distance-nmi",
+            ancestor_profile="profile.csv",
+            score_column="coverage_target",
+            disable_mi=False,
+            disable_power_scheduling=False,
+        )
+        result = SimpleNamespace(wall_time_sec=600.1, returncode=-15, command_log_path="cmd.log", timed_out=True)
+        info = SimpleNamespace(
+            cycles=None,
+            max_cycle_exceeded=False,
+            vcs_report_seen=True,
+            sfuz_expansion_seen=False,
+            good_trap_seen=False,
+            bug_triggered=False,
+            bug_reasons=[],
+            vcs_cpu_time_sec=None,
+            vcs_sim_time_ps=None,
+        )
+        coverage = SimpleNamespace(
+            coverage_name="sfuzz_firrtl",
+            coverage_value="",
+            coverage_source="",
+            coverage_status="unavailable",
+        )
+        feedback = Feedback(
+            1,
+            1.0,
+            {(0,), (1,)},
+            1,
+            "surgefuzz_vcs_native_abi_trace",
+            "surgefuzz_vcs_native_abi_trace",
+            "vcs-native-abi",
+            "trace.csv",
+            5,
+            "T2_processor_workload_native_feedback",
+            True,
+            "",
+            "trace_meta_missing; trace_call_count_recoverable_from_csv_samples",
+        )
+        rows: list[dict[str, object]] = []
+
+        append_row(
+            rows,
+            args=args,
+            seed=Path("seed.bin"),
+            seed_id=0,
+            parent_seed_id=0,
+            round_name=0,
+            case_name="case",
+            input_format="generated",
+            input_size_bytes=4,
+            mutation_kind="artifact-program-mutation",
+            result=result,
+            case_dir=Path("case"),
+            run_log=Path("run.log"),
+            assert_log=Path("assert.log"),
+            info=info,
+            common_coverage=coverage,
+            common_backend="sfuzz_firrtl",
+            infrastructure_error="",
+            feedback=feedback,
+            global_ancestor_states={(0,), (1,)},
+            corpus_size=2,
+        )
+
+        self.assertEqual(rows[0]["trace_call_count"], "")
+        self.assertEqual(rows[0]["trace_target_hit_count"], "")
+        self.assertIn("trace_call_count_recoverable_from_csv_samples", rows[0]["notes"])
 
     def _manifest(self, entries: list[tuple[str, str]]) -> Path:
         tmp = tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8", suffix=".json")

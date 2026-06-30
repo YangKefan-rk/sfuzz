@@ -103,6 +103,49 @@ def nonempty(row: dict[str, str], key: str) -> bool:
     return str(row.get(key, "")).strip() != ""
 
 
+def surgefuzz_trace_summary_from_csv(row: dict[str, str]) -> tuple[int, int] | None:
+    trace_path = str(row.get("trace_path", "")).strip()
+    if not trace_path:
+        return None
+    path = Path(trace_path)
+    if not path.is_file():
+        return None
+    try:
+        with path.open(newline="", encoding="utf-8") as input_file:
+            reader = csv.DictReader(input_file)
+            if reader.fieldnames is None or "coverage_target" not in reader.fieldnames:
+                return None
+            rows = 0
+            target_hits = 0
+            for trace_row in reader:
+                rows += 1
+                raw_value = str(trace_row.get("coverage_target", "") or "0")
+                try:
+                    if int(raw_value, 0) != 0:
+                        target_hits += 1
+                except ValueError:
+                    return None
+    except OSError:
+        return None
+    return rows, target_hits
+
+
+def surgefuzz_trace_summary_available(row: dict[str, str]) -> bool:
+    if nonempty(row, "trace_rows") and nonempty(row, "trace_call_count") and nonempty(row, "trace_target_hit_count"):
+        return True
+    recovered = surgefuzz_trace_summary_from_csv(row)
+    if recovered is None:
+        return False
+    rows, _target_hits = recovered
+    raw_trace_rows = str(row.get("trace_rows", "")).strip()
+    if raw_trace_rows:
+        try:
+            return int(raw_trace_rows, 0) == rows
+        except ValueError:
+            return False
+    return rows > 0
+
+
 def add_common_checks(audit: MethodAudit, rows: list[dict[str, str]], expected_rows: int, complete: bool) -> None:
     if complete and audit.rows != expected_rows:
         audit.issues.append(f"rows {audit.rows} != expected {expected_rows}")
@@ -203,10 +246,20 @@ def audit_method(root: Path, method: str, expected_rows: int, complete: bool) ->
             audit.issues.append(f"SurgeFuzz trace_source mismatch: {dict(counter(rows, 'trace_source'))}")
         if any(row.get("coverage_backend") != "surgefuzz_vcs_native_abi_trace" for row in rows):
             audit.issues.append(f"SurgeFuzz coverage backend mismatch: {dict(counter(rows, 'coverage_backend'))}")
-        for key in ("trace_rows", "trace_call_count", "trace_target_hit_count"):
-            if any(not nonempty(row, key) for row in rows):
-                audit.issues.append(f"SurgeFuzz has rows without {key}")
-                break
+        missing_trace_summary = [
+            row
+            for row in rows
+            if not (
+                nonempty(row, "trace_rows")
+                and nonempty(row, "trace_call_count")
+                and nonempty(row, "trace_target_hit_count")
+            )
+        ]
+        unrecoverable = [row for row in missing_trace_summary if not surgefuzz_trace_summary_available(row)]
+        if unrecoverable:
+            audit.issues.append(f"SurgeFuzz has rows without recoverable trace summary: {len(unrecoverable)}")
+        if missing_trace_summary and not unrecoverable:
+            audit.counters["trace_summary_fallback"] = Counter({"csv_samples": len(missing_trace_summary)})
 
     return audit
 
