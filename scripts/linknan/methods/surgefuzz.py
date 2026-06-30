@@ -920,6 +920,9 @@ def append_row(
     ancestor_profile = target.ancestor_profile if isinstance(target, RotationTarget) else str(getattr(args, "ancestor_profile", "") or "")
     trace_meta = load_trace_meta(Path(feedback.trace_path)) if feedback.trace_path else {}
     trace_truncated = bool(trace_meta.get("trace_dropped", False))
+    trace_sample_limit = trace_meta.get("sample_limit", trace_meta.get("max_samples", ""))
+    if trace_sample_limit == "" and trace_truncated and feedback.trace_rows:
+        trace_sample_limit = feedback.trace_rows
     rows.append(
         {
             "fuzzer": "surgefuzz",
@@ -963,7 +966,7 @@ def append_row(
             "trace_path": feedback.trace_path,
             "trace_rows": feedback.trace_rows,
             "trace_truncated": trace_truncated,
-            "trace_sample_limit": trace_meta.get("sample_limit", trace_meta.get("max_samples", "")),
+            "trace_sample_limit": trace_sample_limit,
             "trace_call_count": trace_meta.get("call_count", ""),
             "trace_target_hit_count": trace_meta.get("target_hit_count", ""),
             "score_column": args.score_column,
