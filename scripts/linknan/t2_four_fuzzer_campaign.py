@@ -238,6 +238,8 @@ def build_common_args(args: argparse.Namespace, work_dir: Path, output_csv: Path
 def method_build_dir(args: argparse.Namespace, method: str, paths: CampaignPaths, worker_id: int | None = None) -> Path | None:
     if not getattr(args, "isolated_sim_dirs", True):
         return None
+    if getattr(args, "shared_simv_builds", True):
+        return paths.results / method / "linknan-build"
     if worker_id is not None:
         return paths.results / method / "workers" / f"worker-{worker_id:03d}" / "linknan-build"
     return paths.results / method / "linknan-build"
@@ -246,6 +248,8 @@ def method_build_dir(args: argparse.Namespace, method: str, paths: CampaignPaths
 def method_sim_dir(args: argparse.Namespace, method: str, paths: CampaignPaths, worker_id: int | None = None) -> Path | None:
     if not getattr(args, "isolated_sim_dirs", True):
         return None
+    if getattr(args, "shared_simv_builds", True):
+        return paths.results / method / "linknan-sim"
     if worker_id is not None:
         return paths.results / method / "workers" / f"worker-{worker_id:03d}" / "linknan-sim"
     return paths.results / method / "linknan-sim"
@@ -598,6 +602,7 @@ def write_campaign_manifest(paths: CampaignPaths, testcases: list[Testcase], com
         "workers_per_fuzzer": args.workers_per_fuzzer,
         "parallel_jobs": args.parallel_jobs,
         "isolated_sim_dirs": args.isolated_sim_dirs,
+        "shared_simv_builds": getattr(args, "shared_simv_builds", True),
         "commands": rows,
     }
     json_path = paths.manifests / "campaign_manifest.json"
@@ -916,6 +921,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--parallel-jobs", type=int, default=16)
     parser.add_argument("--method", action="append", default=[], help="run only selected method; repeatable")
     parser.add_argument("--isolated-sim-dirs", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--shared-simv-builds",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "share one compiled LinkNan simv per fuzzer/coverage backend while keeping each worker's run_dir "
+            "and result files isolated; avoids recompiling the same VCS image for every worker"
+        ),
+    )
     parser.add_argument("--keep-going", action="store_true")
     return parser.parse_args()
 

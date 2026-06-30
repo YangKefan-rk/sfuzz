@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import hashlib
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -457,6 +458,36 @@ def build_timeout_sec(args: Any) -> int:
     return explicit if explicit > 0 else int(getattr(args, "timeout_sec", 0) or 0)
 
 
+@contextmanager
+def file_lock(lock_path: Path, timeout_sec: int = 0):
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = lock_path.open("w", encoding="utf-8")
+    start = time.monotonic()
+    try:
+        import fcntl
+
+        while True:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if timeout_sec > 0 and time.monotonic() - start > timeout_sec:
+                    raise TimeoutError(f"timeout waiting for build lock: {lock_path}")
+                time.sleep(1.0)
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.write(f"pid={os.getpid()} acquired_at={now_iso()}\n")
+        lock_file.flush()
+        yield
+    finally:
+        try:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_file.close()
+
+
 def run_command(
     command: list[str],
     cwd: Path,
@@ -542,6 +573,12 @@ def run_command(
 
 
 def build_simv_if_needed(args: Any, ctx: VcsContext, work_dir: Path) -> None:
+    timeout = build_timeout_sec(args)
+    with file_lock(ctx.sim_dir / "simv" / "comp" / ".sfuzz_build.lock", timeout):
+        build_simv_if_needed_locked(args, ctx, work_dir)
+
+
+def build_simv_if_needed_locked(args: Any, ctx: VcsContext, work_dir: Path) -> None:
     comp_dir = ctx.sim_dir / "simv" / "comp"
     simv = comp_dir / "simv"
     firrtl_cov = requested_firrtl_coverage(args)
