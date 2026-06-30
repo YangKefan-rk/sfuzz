@@ -30,6 +30,7 @@ from linknan.t2_four_fuzzer_campaign import (  # noqa: E402
     merge_worker_csvs,
     per_worker_budget,
     prebuild_commands,
+    prebuilt_run_commands,
     prepare_isolated_build_dirs,
     row_is_mutation,
     write_seed_shards,
@@ -458,6 +459,61 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             self.assertIn("/prebuild/work", command_text)
             self.assertNotIn("--skip-build", command_text)
             self.assertNotIn("workers/worker-001", command_text)
+
+    def test_t2_campaign_shared_run_commands_skip_build(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            metadata = root / "direct.csv"
+            surge_manifest = root / "surge.toml"
+            manifest = root / "manifest.csv"
+            metadata.write_text("instance_name,coverage_signal_name,width,distance\ntarget,cov,1,0\n", encoding="utf-8")
+            surge_manifest.write_text("[[targets]]\nid='t'\n", encoding="utf-8")
+            rows = ["testcase_id,source,category,input_path,input_format,file_size,sfuzz_seed_path,rfuzz_workload_path"]
+            for index in range(2):
+                seed = root / f"seed{index}.sfuz"
+                workload = root / f"seed{index}.bin"
+                seed.write_bytes(b"SFUZ")
+                workload.write_bytes(b"\x73\x00\x10\x00")
+                rows.append(f"tc{index},unit,ISA,{workload},bin,4,{seed},{workload}")
+            manifest.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            testcases = load_testcases(manifest, limit=2)
+            paths = CampaignPaths.create(root / "campaign")
+            sfuzz_lists, workload_lists = write_seed_shards(paths, testcases, workers=2)
+            args = SimpleNamespace(
+                config=root / "sfuzz.toml",
+                linknan_root=root / "LinkNan",
+                timeout_sec=600,
+                build_mode="auto",
+                build_chisel=False,
+                build_timeout_sec=DEFAULT_BUILD_TIMEOUT_SEC,
+                simv_args="",
+                exec_budget=1000,
+                rng_seed=20260605,
+                target_min_wall_time_sec=60,
+                sfuzz_scheduler="semantic-bandit",
+                direct_metadata=metadata,
+                direct_target_instance="target",
+                surge_target_manifest=surge_manifest,
+                surge_target="t",
+                surge_initial_seed_count=1,
+                sfuzz_num_cores=2,
+                workers_per_fuzzer=2,
+                isolated_sim_dirs=True,
+                shared_simv_builds=True,
+            )
+
+            commands = campaign_commands(args, paths, sfuzz_lists, workload_lists)
+            run_items = prebuilt_run_commands(commands)
+
+        self.assertEqual(len(run_items), len(commands))
+        for item in run_items:
+            command_text = " ".join(item["command"])
+            self.assertIn("--skip-build", command_text)
+            self.assertNotIn("--build ", command_text)
+            self.assertNotIn("--build-only", command_text)
+            self.assertNotIn("--rebuild-comp", command_text)
 
     def test_t2_campaign_mutation_row_classifier_is_method_aware(self) -> None:
         self.assertFalse(row_is_mutation({"fuzzer": "sfuzz", "mutation_index": "", "semantic_operator": ""}))

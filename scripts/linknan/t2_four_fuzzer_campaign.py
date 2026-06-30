@@ -464,6 +464,23 @@ def prebuild_commands(commands: list[dict[str, Any]], paths: CampaignPaths) -> l
     return selected
 
 
+def prebuilt_run_commands(commands: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return worker commands that must reuse the shared prebuilt simv.
+
+    In shared-build campaigns, ``prebuild`` is the only phase allowed to run
+    ``xmake simv``.  The formal ``run`` phase should fail fast if the requested
+    ABI is not already present instead of silently rebuilding from a worker.
+    """
+    updated_items: list[dict[str, Any]] = []
+    for item in commands:
+        command = remove_flags(list(item["command"]), {"--build", "--build-only", "--rebuild-comp", "--skip-build"})
+        command = add_flag(command, "--skip-build")
+        updated = dict(item)
+        updated["command"] = command
+        updated_items.append(updated)
+    return updated_items
+
+
 def per_worker_budget(total_budget: int, worker_count: int) -> int:
     workers = max(1, worker_count)
     return max(1, (max(0, total_budget) + workers - 1) // workers)
@@ -1056,7 +1073,8 @@ def main() -> int:
         if status != 0:
             return status
     if args.phase in {"run", "all"}:
-        status = run_commands_parallel(commands, args.parallel_jobs, stop_on_failure=not args.keep_going)
+        run_items = prebuilt_run_commands(commands) if getattr(args, "shared_simv_builds", True) else commands
+        status = run_commands_parallel(run_items, args.parallel_jobs, stop_on_failure=not args.keep_going)
         if status != 0:
             return status
     if args.phase in {"aggregate", "all"}:
