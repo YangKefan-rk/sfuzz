@@ -21,6 +21,7 @@ if __package__ in {None, ""}:
 
 from linknan.common import require_file, write_table  # noqa: E402
 from linknan.config import DEFAULT_CONFIG, SFUZZ_HOME  # noqa: E402
+from linknan.surgefuzz_targets import select_target, target_env  # noqa: E402
 
 
 CAMPAIGN_FIELDS = [
@@ -320,6 +321,7 @@ def generate_isolated_firrtl_coverage(
     source_rtl: Path,
     source_generated: Path,
     generator: Path,
+    env: dict[str, str] | None = None,
 ) -> None:
     build_dir.mkdir(parents=True, exist_ok=True)
     rtl_dir = build_dir / "rtl"
@@ -354,12 +356,15 @@ def generate_isolated_firrtl_coverage(
         coverage,
     ]
     with log_path.open("w", encoding="utf-8") as log_file:
+        generator_env = os.environ.copy()
+        generator_env.update(env or {})
         result = subprocess.run(
             command,
             cwd=args.linknan_root.expanduser().resolve(),
             text=True,
             stdout=log_file,
             stderr=subprocess.STDOUT,
+            env=generator_env,
             check=False,
         )
     if result.returncode != 0:
@@ -380,15 +385,17 @@ def prepare_isolated_build_dirs(args: argparse.Namespace, paths: CampaignPaths, 
     if not generator.is_file():
         raise FileNotFoundError(f"missing LinkNan FIRRTL coverage generator: {generator}")
     prepared: set[Path] = set()
-    template_by_coverage: dict[str, Path] = {}
+    template_by_coverage: dict[tuple[str, tuple[tuple[str, str], ...]], Path] = {}
     for item in commands:
         method = str(item["method"])
         coverage = str(item["coverage_name"])
+        item_env = {str(key): str(value) for key, value in dict(item.get("env", {})).items()}
         build_dir = command_option_path(list(item["command"]), "--build-dir")
         if build_dir is None or build_dir in prepared:
             continue
         prepared.add(build_dir)
-        template = template_by_coverage.get(coverage)
+        template_key = (coverage, tuple(sorted(item_env.items())))
+        template = template_by_coverage.get(template_key)
         if template is not None:
             copy_prepared_build_dir(template, build_dir)
             continue
@@ -401,8 +408,9 @@ def prepare_isolated_build_dirs(args: argparse.Namespace, paths: CampaignPaths, 
             source_rtl=source_rtl,
             source_generated=source_generated,
             generator=generator,
+            env=item_env,
         )
-        template_by_coverage[coverage] = build_dir
+        template_by_coverage[template_key] = build_dir
 
 
 def selected_methods(args: argparse.Namespace) -> set[str]:
@@ -509,6 +517,8 @@ def campaign_commands(
     worker_count = min(worker_count, max(len(sfuzz_shards), len(workload_shards)))
     worker_budget = per_worker_budget(args.exec_budget, worker_count)
     linknan_env = {"NUM_CORES": str(args.sfuzz_num_cores)}
+    surge_target = select_target(surge_manifest, args.surge_target)
+    surge_env = {**linknan_env, **target_env(surge_target)}
 
     def add(
         method: str,
@@ -646,7 +656,7 @@ def campaign_commands(
                 "vcs-native-abi",
                 "--require-paper-native",
             ],
-            env=linknan_env,
+            env=surge_env,
             worker_id=worker_id,
         )
     return commands

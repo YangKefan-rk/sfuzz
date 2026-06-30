@@ -48,6 +48,41 @@ def _entry(corpus_id: int, *, energy: float, target: bool, progress: bool) -> Co
     return CorpusEntry(corpus_id, Path(f"/tmp/seed-{corpus_id}.bin"), feedback)
 
 
+def _write_surge_manifest(path: Path) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                "[[targets]]",
+                'id = "t"',
+                'category = "unit"',
+                'module = "MemBlock"',
+                'instance = "SimTop.soc.cc_0.tile.core.memBlock"',
+                'signal = "io_unit_target"',
+                'annotation = "SURGE_FREQ=1"',
+                'ancestor_selector = "distance-nmi"',
+                "max_ancestor_width = 64",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _assert_campaign_env(testcase: unittest.TestCase, item: dict[str, object]) -> None:
+    env = item["env"]
+    testcase.assertIsInstance(env, dict)
+    env_dict = env  # type: ignore[assignment]
+    testcase.assertEqual(env_dict["NUM_CORES"], "2")
+    if item["method"] == "surgefuzz":
+        testcase.assertEqual(env_dict["SFUZZ_SURGEFUZZ_MODULE"], "MemBlock")
+        testcase.assertEqual(env_dict["SFUZZ_SURGEFUZZ_TARGET_INSTANCE"], "SimTop.soc.cc_0.tile.core.memBlock")
+        testcase.assertEqual(env_dict["SFUZZ_SURGEFUZZ_TARGET"], "io_unit_target")
+        testcase.assertEqual(env_dict["SFUZZ_SURGEFUZZ_ANCESTOR_SELECTOR"], "distance-nmi")
+        testcase.assertEqual(env_dict["SFUZZ_SURGEFUZZ_MAX_ANCESTOR_WIDTH"], "64")
+    else:
+        testcase.assertEqual(env_dict, {"NUM_CORES": "2"})
+
+
 class DirectFuzzPowerScheduleTests(unittest.TestCase):
     def test_power_maps_energy_to_child_count(self) -> None:
         # energy (distance-derived, higher == closer) -> children = round(e)+1, clamped 1..64.
@@ -283,7 +318,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             seed.write_bytes(b"SFUZ")
             workload.write_bytes(b"\x73\x00\x10\x00")
             metadata.write_text("instance_name,coverage_signal_name,width,distance\ntarget,cov,1,0\n", encoding="utf-8")
-            surge_manifest.write_text("[[targets]]\nid='t'\n", encoding="utf-8")
+            _write_surge_manifest(surge_manifest)
             manifest.write_text(
                 "testcase_id,source,category,input_path,input_format,file_size,sfuzz_seed_path,rfuzz_workload_path\n"
                 f"tc0,unit,ISA,{workload},bin,4,{seed},{workload}\n",
@@ -328,7 +363,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             self.assertNotIn("--skip-build", command_text)
         self.assertIn("--campaign-runs 1000", " ".join(commands[0]["command"]))
         for item in commands:
-            self.assertEqual(item["env"], {"NUM_CORES": "2"})
+            _assert_campaign_env(self, item)
         self.assertIn("--rfuzz-rounds 1000", " ".join(commands[1]["command"]))
         self.assertIn("--require-paper-native", " ".join(commands[2]["command"]))
         self.assertIn("--require-paper-native", " ".join(commands[3]["command"]))
@@ -342,7 +377,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             surge_manifest = root / "surge.toml"
             manifest = root / "manifest.csv"
             metadata.write_text("instance_name,coverage_signal_name,width,distance\ntarget,cov,1,0\n", encoding="utf-8")
-            surge_manifest.write_text("[[targets]]\nid='t'\n", encoding="utf-8")
+            _write_surge_manifest(surge_manifest)
             rows = ["testcase_id,source,category,input_path,input_format,file_size,sfuzz_seed_path,rfuzz_workload_path"]
             for index in range(4):
                 seed = root / f"seed{index}.sfuz"
@@ -388,7 +423,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             self.assertIn("--timeout-sec 600", command_text)
             self.assertIn(f"--build-timeout-sec {DEFAULT_BUILD_TIMEOUT_SEC}", command_text)
             self.assertNotIn("--worker-id", command_text)
-            self.assertEqual(item["env"], {"NUM_CORES": "2"})
+            _assert_campaign_env(self, item)
             if item["method"] == "sfuzz":
                 self.assertIn(str(paths.results / "sfuzz" / "linknan-build"), command_text)
                 self.assertIn(str(paths.results / "sfuzz" / "linknan-sim"), command_text)
@@ -412,7 +447,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             surge_manifest = root / "surge.toml"
             manifest = root / "manifest.csv"
             metadata.write_text("instance_name,coverage_signal_name,width,distance\ntarget,cov,1,0\n", encoding="utf-8")
-            surge_manifest.write_text("[[targets]]\nid='t'\n", encoding="utf-8")
+            _write_surge_manifest(surge_manifest)
             rows = ["testcase_id,source,category,input_path,input_format,file_size,sfuzz_seed_path,rfuzz_workload_path"]
             for index in range(4):
                 seed = root / f"seed{index}.sfuz"
@@ -469,7 +504,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             surge_manifest = root / "surge.toml"
             manifest = root / "manifest.csv"
             metadata.write_text("instance_name,coverage_signal_name,width,distance\ntarget,cov,1,0\n", encoding="utf-8")
-            surge_manifest.write_text("[[targets]]\nid='t'\n", encoding="utf-8")
+            _write_surge_manifest(surge_manifest)
             rows = ["testcase_id,source,category,input_path,input_format,file_size,sfuzz_seed_path,rfuzz_workload_path"]
             for index in range(2):
                 seed = root / f"seed{index}.sfuz"
@@ -532,7 +567,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             surge_manifest = root / "surge.toml"
             manifest = root / "manifest.csv"
             metadata.write_text("instance_name,coverage_signal_name,width,distance\ntarget,cov,1,0\n", encoding="utf-8")
-            surge_manifest.write_text("[[targets]]\nid='t'\n", encoding="utf-8")
+            _write_surge_manifest(surge_manifest)
             rows = ["testcase_id,source,category,input_path,input_format,file_size,sfuzz_seed_path,rfuzz_workload_path"]
             for index in range(2):
                 seed = root / f"seed{index}.sfuz"
@@ -663,6 +698,73 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             (build1 / "generated-src" / "firrtl-cover.cpp").write_text("worker1", encoding="utf-8")
             self.assertNotEqual((build0 / "generated-src" / "sfuzz_firrtl_cover.json").read_text(encoding="utf-8"), "worker1")
             self.assertEqual((build0 / "generated-src" / "firrtl-cover.cpp").read_text(encoding="utf-8"), "cpp")
+
+    def test_prepare_isolated_build_dirs_passes_surge_target_env(self) -> None:
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            linknan = root / "LinkNan"
+            rtl_cover = linknan / "build" / "rtl" / "verification" / "cover"
+            generated = linknan / "build" / "generated-src"
+            scripts = linknan / "scripts" / "linknan"
+            rtl_cover.mkdir(parents=True)
+            generated.mkdir(parents=True)
+            scripts.mkdir(parents=True)
+            (linknan / "build" / "rtl" / "SimTop.sv").write_text("module SimTop; endmodule\n", encoding="utf-8")
+            generator = scripts / "sfuzz_firrtl_cov.py"
+            generator.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "from pathlib import Path\n"
+                "rtl = Path(sys.argv[1])\n"
+                "out = Path(sys.argv[sys.argv.index('--generated-src-dir') + 1])\n"
+                "out.mkdir(parents=True, exist_ok=True)\n"
+                "(out / 'firrtl-cover.h').write_text('h')\n"
+                "(out / 'firrtl-cover.cpp').write_text('cpp')\n"
+                "payload = {\n"
+                "  'backend': 'sfuzz_firrtl_sv_bind',\n"
+                "  'groups': {'surgefuzz_trace': 1},\n"
+                "  'surgefuzz': {\n"
+                "    'module': os.environ.get('SFUZZ_SURGEFUZZ_MODULE', ''),\n"
+                "    'target_instance': os.environ.get('SFUZZ_SURGEFUZZ_TARGET_INSTANCE', ''),\n"
+                "    'target_signal': os.environ.get('SFUZZ_SURGEFUZZ_TARGET', ''),\n"
+                "    'ancestor_selector': os.environ.get('SFUZZ_SURGEFUZZ_ANCESTOR_SELECTOR', ''),\n"
+                "  },\n"
+                "}\n"
+                "(out / 'sfuzz_firrtl_cover.json').write_text(json.dumps(payload))\n"
+                "cover = rtl / 'verification' / 'cover'\n"
+                "cover.mkdir(parents=True, exist_ok=True)\n"
+                "(cover / 'sfuzz_firrtl_cover_bind.sv').write_text('bind')\n",
+                encoding="utf-8",
+            )
+            generator.chmod(0o755)
+            paths = CampaignPaths.create(root / "campaign")
+            build_dir = paths.results / "surgefuzz" / "linknan-build"
+            args = SimpleNamespace(isolated_sim_dirs=True, build_chisel=False, linknan_root=linknan)
+            commands = [
+                {
+                    "method": "surgefuzz",
+                    "coverage_name": "SurgeFuzz.trace",
+                    "env": {
+                        "NUM_CORES": "2",
+                        "SFUZZ_SURGEFUZZ_MODULE": "MemBlock",
+                        "SFUZZ_SURGEFUZZ_TARGET_INSTANCE": "SimTop.soc.cc_0.tile.core.memBlock",
+                        "SFUZZ_SURGEFUZZ_TARGET": "io_unit_target",
+                        "SFUZZ_SURGEFUZZ_ANCESTOR_SELECTOR": "distance-nmi",
+                    },
+                    "command": ["python3", "run.py", "surgefuzz", "--build-dir", str(build_dir)],
+                }
+            ]
+
+            prepare_isolated_build_dirs(args, paths, commands)
+
+            metadata = json.loads((build_dir / "generated-src" / "sfuzz_firrtl_cover.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["surgefuzz"]["module"], "MemBlock")
+        self.assertEqual(metadata["surgefuzz"]["target_instance"], "SimTop.soc.cc_0.tile.core.memBlock")
+        self.assertEqual(metadata["surgefuzz"]["target_signal"], "io_unit_target")
+        self.assertEqual(metadata["surgefuzz"]["ancestor_selector"], "distance-nmi")
 
 
 if __name__ == "__main__":
