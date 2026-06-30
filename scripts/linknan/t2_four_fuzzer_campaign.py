@@ -276,6 +276,31 @@ def command_option_path(command: list[str], option: str) -> Path | None:
     return Path(command[index + 1]).expanduser().resolve()
 
 
+def replace_option(command: list[str], option: str, value: str) -> list[str]:
+    updated = list(command)
+    try:
+        index = updated.index(option)
+    except ValueError:
+        updated.extend([option, value])
+        return updated
+    if index + 1 >= len(updated):
+        updated.append(value)
+    else:
+        updated[index + 1] = value
+    return updated
+
+
+def remove_flags(command: list[str], flags: set[str]) -> list[str]:
+    return [item for item in command if item not in flags]
+
+
+def add_flag(command: list[str], flag: str) -> list[str]:
+    updated = list(command)
+    if flag not in updated:
+        updated.append(flag)
+    return updated
+
+
 def copy_prepared_build_dir(source: Path, dest: Path) -> None:
     if source == dest:
         return
@@ -394,6 +419,49 @@ def filter_commands(commands: list[dict[str, Any]], args: argparse.Namespace) ->
     if missing:
         raise ValueError(f"unknown campaign method(s): {', '.join(missing)}")
     return filtered
+
+
+def prebuild_commands(commands: list[dict[str, Any]], paths: CampaignPaths) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for item in commands:
+        command = list(item["command"])
+        build_dir = command_option_path(command, "--build-dir")
+        sim_dir = command_option_path(command, "--sim-dir")
+        key = (
+            str(item.get("method", "")),
+            str(item.get("coverage_name", "")),
+            str(build_dir or ""),
+            str(sim_dir or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        method = str(item["method"])
+        prebuild_root = paths.results / method / "prebuild"
+        prebuild_work = prebuild_root / "work"
+        prebuild_csv = prebuild_root / "results.csv"
+        prebuild_json = prebuild_root / "results.json"
+        command = remove_flags(command, {"--skip-build"})
+        command = add_flag(command, "--build")
+        command = add_flag(command, "--build-only")
+        command = replace_option(command, "--work-dir", str(prebuild_work))
+        command = replace_option(command, "--output-csv", str(prebuild_csv))
+        command = replace_option(command, "--output-json", str(prebuild_json))
+        prebuild_item = dict(item)
+        prebuild_item.update(
+            {
+                "worker_id": "prebuild",
+                "command": command,
+                "work_dir": prebuild_work,
+                "output_csv": prebuild_csv,
+                "output_json": prebuild_json,
+                "formal_guard": f"prebuild shared simv for {item['coverage_name']}",
+                "seed_list": "",
+            }
+        )
+        selected.append(prebuild_item)
+    return selected
 
 
 def per_worker_budget(total_budget: int, worker_count: int) -> int:
@@ -758,14 +826,23 @@ def coverage_pair(row: dict[str, str]) -> tuple[float | None, float | None]:
 
 
 def row_is_mutation(row: dict[str, str]) -> bool:
-    markers = [
-        row.get("mutation_index", ""),
-        row.get("mutation", ""),
-        row.get("mutation_kind", ""),
-        row.get("round", ""),
-    ]
-    text = ";".join(str(item) for item in markers).lower()
-    return bool(text) and not any(token in text for token in ["initial", "bootstrap", "seed", "initial-workload"])
+    fuzzer = str(row.get("fuzzer", "")).strip().lower()
+    if fuzzer == "sfuzz":
+        return bool(str(row.get("mutation_index", "")).strip() or str(row.get("semantic_operator", "")).strip())
+    if fuzzer == "rfuzz":
+        mutation = str(row.get("mutation", "")).strip().lower()
+        return bool(mutation) and mutation != "initial-workload"
+    if fuzzer == "directfuzz":
+        mutation = str(row.get("mutation", "")).strip().lower()
+        index = str(row.get("mutation_index", "")).strip()
+        return bool(index) or (bool(mutation) and mutation not in {"initial", "initial-workload"})
+    if fuzzer == "surgefuzz":
+        round_name = str(row.get("round", "")).strip().lower()
+        mutation_kind = str(row.get("mutation_kind", "")).strip().lower()
+        return round_name not in {"", "bootstrap"} and "initial" not in mutation_kind
+    markers = [row.get("mutation_index", ""), row.get("mutation", ""), row.get("mutation_kind", "")]
+    text = ";".join(str(item) for item in markers if str(item).strip()).lower()
+    return bool(text) and not any(token in text for token in ["initial", "bootstrap", "initial-workload"])
 
 
 def command_log_cycle_violation(row: dict[str, str]) -> bool:
@@ -890,7 +967,7 @@ def merge_worker_csvs(method: str, worker_csvs: list[Path], output_csv: Path) ->
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare, run, and aggregate a formal T2 four-fuzzer LinkNan campaign")
-    parser.add_argument("--phase", choices=["prepare", "run", "aggregate", "all"], default="prepare")
+    parser.add_argument("--phase", choices=["prepare", "prebuild", "run", "aggregate", "all"], default="prepare")
     parser.add_argument("--campaign-root", type=Path, default=None)
     parser.add_argument("--manifest", type=Path, default=SFUZZ_HOME / "benchmarks" / "linknan" / "phase1_corpus_manifest.csv")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -972,6 +1049,12 @@ def main() -> int:
                     }
                 )
         commands = filter_commands(commands, args)
+    if args.phase in {"prebuild", "all"}:
+        items = prebuild_commands(commands, paths)
+        print(f"[campaign] prebuilding {len(items)} shared simv backend(s)", flush=True)
+        status = run_commands(items, stop_on_failure=not args.keep_going)
+        if status != 0:
+            return status
     if args.phase in {"run", "all"}:
         status = run_commands_parallel(commands, args.parallel_jobs, stop_on_failure=not args.keep_going)
         if status != 0:

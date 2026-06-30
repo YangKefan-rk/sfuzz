@@ -14,6 +14,7 @@ from linknan.methods.directfuzz import generate_direct_metadata, run_directfuzz
 from linknan.methods.profuzz import run_profuzz
 from linknan.methods.rfuzz import run_rfuzz
 from linknan.methods.sfuzz import run_sfuzz
+from linknan.vcs import build_simv_if_needed
 
 try:
     from linknan.methods.surgefuzz import run_surgefuzz, write_dev_surge_profile
@@ -62,6 +63,7 @@ def add_common_vcs_args(parser: argparse.ArgumentParser) -> None:
         help="VCS build timeout; 0 reuses --timeout-sec, so run-time wall timeout semantics stay compatible",
     )
     parser.add_argument("--build", action="store_true", help="run xmake simv before executing seeds")
+    parser.add_argument("--build-only", action="store_true", help="build LinkNan simv and exit without executing seeds")
     parser.add_argument("--skip-build", action="store_true", help="require an existing simv")
     parser.add_argument(
         "--build-chisel",
@@ -94,6 +96,8 @@ def add_seed_batch_args(parser: argparse.ArgumentParser) -> None:
 def validate_common(args: argparse.Namespace) -> None:
     if args.build and args.skip_build:
         raise SystemExit("--build and --skip-build cannot both be set")
+    if args.build_only and args.skip_build:
+        raise SystemExit("--build-only and --skip-build cannot both be set")
 
 
 def main() -> int:
@@ -550,6 +554,9 @@ def main() -> int:
     if args.case_prefix is None:
         args.case_prefix = args.command
     ctx = context_from_config(args)
+    if args.build_only:
+        build_simv_if_needed(args, ctx, args.work_dir.expanduser().resolve())
+        return 0
     return args.handler(args, ctx)
 
 
