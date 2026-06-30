@@ -16,6 +16,7 @@ from ..common import (
 from ..config import VcsContext
 from ..rfuzz_abi import audit_linknan_rfuzz_abi
 from ..seeds import parse_hex_blob
+from ..workload_mutation import ELF_MAGIC, is_elf_bytes, linknan_loader_assertion, mutate_linknan_workload
 from ..vcs import (
     assertion_failure,
     build_simv_if_needed,
@@ -38,6 +39,7 @@ RFUZZ_FIELDS = [
     "input_path",
     "input_size_bytes",
     "mutation",
+    "mutation_model",
     "runner_abi",
     "requested_input_model",
     "actual_input_abi",
@@ -62,6 +64,8 @@ RFUZZ_FIELDS = [
     "max_cycle_exceeded",
     "bug_triggered",
     "bug_reasons",
+    "invalid_input",
+    "invalid_input_reason",
     "coverage_backend",
     "coverage_value",
     "covered",
@@ -106,7 +110,6 @@ MISSING_MUX_TOGGLE = "rfuzz_vcs_mux_select_toggle_bitmap_abi"
 MISSING_VALID = "rfuzz_validity_abi_or_unconstrained_proof"
 MISSING_WORKLOAD_RUNNER = "rfuzz_linknan_workload_runner_abi"
 
-ELF_MAGIC = b"\x7fELF"
 SFUZ_MAGIC = b"SFUZ"
 WORKLOAD_SUFFIXES = {".bin", ".elf", ".gz", ".zst", ".zstd", ""}
 INTERESTING_BYTES = [0x00, 0x01, 0x10, 0x20, 0x40, 0x7F, 0x80, 0xFF]
@@ -249,7 +252,7 @@ def reject_sfuz_workload(path: Path, data: bytes) -> None:
 
 
 def workload_input_model(path: Path, data: bytes) -> str:
-    if data.startswith(ELF_MAGIC):
+    if is_elf_bytes(data):
         return "elf-workload"
     suffix = path.suffix.lower()
     if suffix == ".gz":
@@ -358,6 +361,17 @@ def mutate_bytes(parent: bytes, rng: random.Random, round_index: int, max_input_
         del candidate[max_input_bytes:]
         mutation += f";truncate={max_input_bytes}"
     return bytes(candidate), mutation
+
+
+def mutate_rfuzz_workload(parent: bytes, rng: random.Random, round_index: int, max_input_bytes: int = 0) -> tuple[bytes, str, str]:
+    if is_elf_bytes(parent):
+        return mutate_linknan_workload(parent, rng, max(1, round_index % 16), max_input_bytes=0)
+    child, mutation = mutate_bytes(parent, rng, round_index, max_input_bytes)
+    return child, mutation, "binary-workload-raw-bytes"
+
+
+def invalid_workload_reason(assert_log: Path) -> str:
+    return "linknan_workload_loader_assert" if linknan_loader_assertion(assert_log) else ""
 
 
 def rfuzz_bitmap_total_from_json(bitmap: Path) -> int:
@@ -471,6 +485,7 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
         if round_index <= len(initial):
             source_path, candidate_bytes, input_model = initial[round_index - 1]
             mutation = "initial-workload"
+            mutation_model = "none"
             parent_seed = ""
         else:
             if corpus:
@@ -481,7 +496,12 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
             else:
                 source_path, parent_bytes, parent_model = initial[(round_index - 1) % len(initial)]
                 parent_seed = hashlib.sha256(parent_bytes).hexdigest()[:16]
-            candidate_bytes, mutation = mutate_bytes(parent_bytes, rng, round_index, args.rfuzz_max_input_bytes)
+            candidate_bytes, mutation, mutation_model = mutate_rfuzz_workload(
+                parent_bytes,
+                rng,
+                round_index,
+                args.rfuzz_max_input_bytes,
+            )
             input_model = parent_model
             source_path = inputs_dir / f"{slugify(args.case_name)}-{round_index:04d}.bin"
 
@@ -503,6 +523,8 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
             simv_args=args.simv_args,
         )
         info = scan_vcs_logs(run_log, assert_log, ctx.cycles)
+        invalid_reason = invalid_workload_reason(assert_log)
+        invalid_input = bool(invalid_reason)
 
         infrastructure_error = classify_infrastructure_error(result, info, run_log)
 
@@ -523,15 +545,16 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
         }
 
         retention_reasons: list[str] = []
-        if round_index <= len(initial):
+        if not invalid_input and round_index <= len(initial):
             retention_reasons.append("initial_seed")
-        if coverage_delta["new_total"]:
+        if not invalid_input and coverage_delta["new_total"]:
             retention_reasons.append("new_total_coverage")
-        if coverage_delta["new_valid"]:
+        if not invalid_input and coverage_delta["new_valid"]:
             retention_reasons.append("new_valid_coverage")
-        if info.bug_triggered:
+        if info.bug_triggered and not invalid_input:
             retention_reasons.append("design_bug")
         retained = bool(retention_reasons)
+        retention_reason = ";".join(retention_reasons) if retention_reasons else ("invalid_input" if invalid_input else "")
         if retained:
             corpus_path = corpus_dir / candidate_path.name
             copy_candidate(corpus_path, candidate_bytes)
@@ -569,6 +592,8 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
             notes.append("no RFuzz native mux-select bitmap was exported for this run")
         if info.sfuz_expansion_seen:
             notes.append("unexpected SFUZ expansion was seen; this row must be treated as invalid RFuzz data")
+        if invalid_input:
+            notes.append(f"invalid_input={invalid_reason}; excluded from RFuzz design-bug retention")
         if common_backend != "none":
             notes.append("common_coverage_* is diagnostic/common-backend data, not RFuzz paper-native feedback")
 
@@ -583,6 +608,7 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
                 "input_path": str(candidate_path),
                 "input_size_bytes": len(candidate_bytes),
                 "mutation": mutation,
+                "mutation_model": mutation_model,
                 "runner_abi": abi_audit.runner_abi,
                 "requested_input_model": args.rfuzz_input_model,
                 "actual_input_abi": actual_input_abi,
@@ -607,6 +633,8 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
                 "max_cycle_exceeded": info.max_cycle_exceeded,
                 "bug_triggered": info.bug_triggered,
                 "bug_reasons": info.bug_reasons,
+                "invalid_input": invalid_input,
+                "invalid_input_reason": invalid_reason,
                 "coverage_backend": coverage_backend,
                 "coverage_value": coverage_value,
                 "covered": covered,
@@ -621,7 +649,7 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
                 "coverage_growth": coverage_delta["growth"],
                 "corpus_size": len(corpus),
                 "retained": retained,
-                "retention_reason": ";".join(retention_reasons),
+                "retention_reason": retention_reason,
                 "toggle_bits": bitmap.hex(),
                 "common_coverage_backend": common_backend,
                 "common_coverage_name": common_coverage.coverage_name,
@@ -637,9 +665,9 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
                 "case_name": case_name,
                 "timed_out": result.timed_out,
                 "wall_timeout": wall_timeout(result),
-                "design_bug": design_bug(info),
-                "assertion_failure": assertion_failure(info),
-                "design_bug_reasons": design_bug_reasons(info),
+                "design_bug": False if invalid_input else design_bug(info),
+                "assertion_failure": False if invalid_input else assertion_failure(info),
+                "design_bug_reasons": [] if invalid_input else design_bug_reasons(info),
                 "infrastructure_error": infrastructure_error,
                 "paper_faithful": paper_faithful,
                 "paper_faithful_scope": "linknan-processor-workload",

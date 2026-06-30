@@ -809,6 +809,12 @@ def summarize_csv(method: str, csv_path: Path) -> dict[str, Any]:
     auc = sum(coverage_percent) / len(coverage_percent) if coverage_percent else ""
     final_percent = 100.0 * final_covered / final_total if final_covered is not None and final_total else ""
     mutation_rows = sum(1 for row in rows if row_is_mutation(row))
+    bug_rows = sum(
+        1
+        for row in rows
+        if not bool_text(row.get("invalid_input"))
+        and (bool_text(row.get("bug_triggered")) or bool_text(row.get("design_bug")))
+    )
     return {
         "method": method,
         "result_csv": str(csv_path),
@@ -817,7 +823,7 @@ def summarize_csv(method: str, csv_path: Path) -> dict[str, Any]:
         "mutation_ratio": round(mutation_rows / len(rows), 6) if rows else 0.0,
         "paper_faithful_rows": sum(1 for row in rows if bool_text(row.get("paper_faithful"))),
         "timed_out_rows": sum(1 for row in rows if bool_text(row.get("timed_out"))),
-        "bug_rows": sum(1 for row in rows if bool_text(row.get("bug_triggered")) or bool_text(row.get("design_bug"))),
+        "bug_rows": bug_rows,
         "no_cycle_limit_rows": sum(1 for row in rows if bool_text(row.get("no_max_cycle_limit"))),
         "command_cycle_violations": sum(1 for row in rows if command_log_cycle_violation(row)),
         "final_covered": int(final_covered) if final_covered is not None and float(final_covered).is_integer() else final_covered or "",

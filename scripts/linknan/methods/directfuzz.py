@@ -16,6 +16,7 @@ from ..common import (
     write_table,
 )
 from ..config import VcsContext
+from ..workload_mutation import linknan_loader_assertion, mutate_linknan_workload_file
 from ..vcs import (
     assertion_failure,
     build_simv_if_needed,
@@ -41,6 +42,8 @@ DIRECTFUZZ_FIELDS = [
     "corpus_id",
     "parent_corpus_id",
     "mutation_index",
+    "mutation",
+    "mutation_model",
     "scheduler_queue",
     "retained",
     "retention_reason",
@@ -55,6 +58,8 @@ DIRECTFUZZ_FIELDS = [
     "max_cycle_exceeded",
     "bug_triggered",
     "bug_reasons",
+    "invalid_input",
+    "invalid_input_reason",
     "vcs_cpu_time_sec",
     "vcs_sim_time_ps",
     "coverage_backend",
@@ -582,38 +587,12 @@ def describe_missing_native_coverage(case_dir: Path) -> str:
     return f"summary={summary_path}; expected_csv={expected_csv}; directfuzz_csv_written={csv_written}"
 
 
-def mutate_workload(parent: Path, output: Path, rng: random.Random, budget: int) -> None:
-    data = bytearray(parent.read_bytes())
-    if not data:
-        data.append(0)
-    steps = max(1, budget)
-    for _ in range(steps):
-        op = rng.randrange(6)
-        if op == 0:
-            idx = rng.randrange(len(data))
-            data[idx] ^= 1 << rng.randrange(8)
-        elif op == 1:
-            idx = rng.randrange(len(data))
-            data[idx] = rng.randrange(256)
-        elif op == 2 and len(data) > 1:
-            del data[rng.randrange(len(data))]
-        elif op == 3 and len(data) < 1 << 20:
-            idx = rng.randrange(len(data) + 1)
-            data[idx:idx] = bytes([rng.randrange(256)])
-        elif op == 4 and len(data) > 4:
-            start = rng.randrange(len(data))
-            end = min(len(data), start + rng.randrange(1, min(16, len(data) - start) + 1))
-            chunk = data[start:end]
-            insert_at = rng.randrange(len(data) + 1)
-            data[insert_at:insert_at] = chunk
-        else:
-            width = min(4, len(data))
-            idx = rng.randrange(len(data) - width + 1)
-            value = int.from_bytes(data[idx : idx + width], "little")
-            value = (value + rng.choice([-35, -16, -1, 1, 16, 35])) % (1 << (8 * width))
-            data[idx : idx + width] = value.to_bytes(width, "little")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_bytes(bytes(data))
+def mutate_workload(parent: Path, output: Path, rng: random.Random, budget: int) -> tuple[str, str]:
+    return mutate_linknan_workload_file(parent, output, rng, budget)
+
+
+def invalid_workload_reason(assert_log: Path) -> str:
+    return "linknan_workload_loader_assert" if linknan_loader_assertion(assert_log) else ""
 
 
 def directfuzz_power(feedback: dict[str, Any], default_energy: bool) -> int:
@@ -748,6 +727,8 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
         scheduler_queue: str,
         initial_seed: bool,
         default_energy: bool,
+        mutation_name: str = "initial-workload",
+        mutation_model: str = "none",
     ) -> CorpusEntry | None:
         case_name = f"{slugify(args.case_prefix)}-{exec_idx:04d}-{slugify(input_path.stem)}"
         result, case_dir, run_log, assert_log = run_vcs_seed(
@@ -762,6 +743,8 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
             tohost_addr=tohost_addr,
         )
         info = scan_vcs_logs(run_log, assert_log, ctx.cycles)
+        invalid_reason = invalid_workload_reason(assert_log)
+        invalid_input = bool(invalid_reason)
         common_coverage = collect_vcs_coverage(args, case_dir, ctx.sim_dir)
         common_backend = common_coverage_backend(common_coverage)
         infrastructure_error = classify_infrastructure_error(result, info, run_log)
@@ -809,9 +792,11 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
         missing_native_abi = required_native_abi(args, dynamic_native_coverage, backend)
 
         has_direct_feedback = args.coverage_backend in {"native-file", "dev-mock"}
-        retained = has_direct_feedback and (initial_seed or bool(feedback.get("new_coverage")))
+        retained = (not invalid_input) and has_direct_feedback and (initial_seed or bool(feedback.get("new_coverage")))
         if not has_direct_feedback:
             retention_reason = "no-directfuzz-feedback-stub"
+        elif invalid_input:
+            retention_reason = "invalid_input"
         elif initial_seed:
             retention_reason = "initial-seed"
         elif retained:
@@ -833,6 +818,8 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
             paper_faithful = False
         if default_energy:
             notes.append("scheduler_escape_default_energy=true")
+        if invalid_input:
+            notes.append(f"invalid_input={invalid_reason}; excluded from DirectFuzz design-bug accounting")
         if args.timeout_sec <= 0:
             notes.append("未设置外部 --timeout-sec，若 workload 不自然结束可能长期运行")
         rows.append(
@@ -846,6 +833,8 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
                 "corpus_id": corpus_id,
                 "parent_corpus_id": parent_id,
                 "mutation_index": mutation_index,
+                "mutation": mutation_name,
+                "mutation_model": mutation_model,
                 "scheduler_queue": scheduler_queue,
                 "retained": retained,
                 "retention_reason": retention_reason,
@@ -860,6 +849,8 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
                 "max_cycle_exceeded": info.max_cycle_exceeded,
                 "bug_triggered": info.bug_triggered,
                 "bug_reasons": info.bug_reasons,
+                "invalid_input": invalid_input,
+                "invalid_input_reason": invalid_reason,
                 "vcs_cpu_time_sec": info.vcs_cpu_time_sec,
                 "vcs_sim_time_ps": info.vcs_sim_time_ps,
                 "coverage_backend": backend,
@@ -880,9 +871,9 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
                 "wall_timeout": wall_timeout(result),
                 "tohost_exit_seen": info.tohost_exit_seen,
                 "tohost_exit_code": info.tohost_exit_code if info.tohost_exit_code is not None else "",
-                "design_bug": design_bug(info),
-                "assertion_failure": assertion_failure(info),
-                "design_bug_reasons": design_bug_reasons(info),
+                "design_bug": False if invalid_input else design_bug(info),
+                "assertion_failure": False if invalid_input else assertion_failure(info),
+                "design_bug_reasons": [] if invalid_input else design_bug_reasons(info),
                 "infrastructure_error": infrastructure_error,
                 "paper_faithful": paper_faithful,
                 "required_native_abi": missing_native_abi,
@@ -935,8 +926,9 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
             if exec_idx >= exec_budget or mutation_idx >= mutation_limit:
                 break
             steps = rng.randint(1, 16)
-            mutation_path = mutations_dir / f"mut-{mutation_idx:04d}-parent-{scheduled.entry.corpus_id}.bin"
-            mutate_workload(scheduled.entry.path, mutation_path, rng, steps)
+            suffix = ".elf" if detect_input_kind(scheduled.entry.path) == "elf" else ".bin"
+            mutation_path = mutations_dir / f"mut-{mutation_idx:04d}-parent-{scheduled.entry.corpus_id}{suffix}"
+            mutation_name, mutation_model = mutate_workload(scheduled.entry.path, mutation_path, rng, steps)
             run_one(
                 input_path=mutation_path,
                 exec_idx=exec_idx,
@@ -945,6 +937,8 @@ def run_directfuzz(args: Any, ctx: VcsContext) -> int:
                 scheduler_queue=scheduled.queue_name,
                 initial_seed=False,
                 default_energy=scheduled.use_default_energy,
+                mutation_name=mutation_name,
+                mutation_model=mutation_model,
             )
             exec_idx += 1
             mutation_idx += 1

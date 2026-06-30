@@ -78,6 +78,10 @@ SURGEFUZZ_FIELDS = [
     "trace_source",
     "trace_path",
     "trace_rows",
+    "trace_truncated",
+    "trace_sample_limit",
+    "trace_call_count",
+    "trace_target_hit_count",
     "score_column",
     "wall_time_sec",
     "cycles",
@@ -588,7 +592,7 @@ def collect_workloads(args: Any, work_dir: Path) -> list[Path]:
 
 def trace_backend(trace_source: str) -> tuple[str, bool, str]:
     if trace_source == "vcs-native-abi":
-        return "surgefuzz_vcs_native_abi_trace", True, REQUIRED_SURGE_NATIVE_ABI
+        return "surgefuzz_vcs_native_abi_trace", True, ""
     if trace_source == "dev-mock":
         return "dev_mock_score_trace", False, REQUIRED_SURGE_NATIVE_ABI
     return "surgefuzz_offline_trace_csv", False, REQUIRED_SURGE_NATIVE_ABI
@@ -914,6 +918,8 @@ def append_row(
     signal_or_group = target.signal if isinstance(target, RotationTarget) else args.target_signal_or_group
     ancestor_selector = target.ancestor_selector if isinstance(target, RotationTarget) else getattr(args, "ancestor_selector", "")
     ancestor_profile = target.ancestor_profile if isinstance(target, RotationTarget) else str(getattr(args, "ancestor_profile", "") or "")
+    trace_meta = load_trace_meta(Path(feedback.trace_path)) if feedback.trace_path else {}
+    trace_truncated = bool(trace_meta.get("trace_dropped", False))
     rows.append(
         {
             "fuzzer": "surgefuzz",
@@ -956,6 +962,10 @@ def append_row(
             "trace_source": feedback.trace_source,
             "trace_path": feedback.trace_path,
             "trace_rows": feedback.trace_rows,
+            "trace_truncated": trace_truncated,
+            "trace_sample_limit": trace_meta.get("sample_limit", trace_meta.get("max_samples", "")),
+            "trace_call_count": trace_meta.get("call_count", ""),
+            "trace_target_hit_count": trace_meta.get("target_hit_count", ""),
             "score_column": args.score_column,
             "wall_time_sec": round(result.wall_time_sec, 6),
             "cycles": info.cycles if info.cycles is not None else "",

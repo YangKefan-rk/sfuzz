@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import random
 import sys
 import tempfile
 import unittest
@@ -17,6 +18,7 @@ from linknan.methods.directfuzz import (  # noqa: E402
     DirectFuzzQueue,
     directfuzz_mutation_limit,
     directfuzz_power,
+    mutate_workload,
     run_directfuzz,
 )
 from linknan.methods.surgefuzz import surgefuzz_mutation_limit  # noqa: E402
@@ -31,6 +33,7 @@ from linknan.t2_four_fuzzer_campaign import (  # noqa: E402
     write_seed_shards,
     write_seed_lists,
 )
+from linknan.workload_mutation import elf_load_segments, mutate_linknan_workload  # noqa: E402
 
 
 def _entry(corpus_id: int, *, energy: float, target: bool, progress: bool) -> CorpusEntry:
@@ -192,6 +195,59 @@ class DirectFuzzBudgetExhaustionTests(unittest.TestCase):
         # 24 execs from only 3 seeds proves the corpus is cycled, not consumed.
         mutations = [r for r in rows if r["scheduler_queue"] != "initial"]
         self.assertEqual(len(mutations), 21)
+
+
+class WorkloadMutationTests(unittest.TestCase):
+    def _minimal_elf64(self) -> bytes:
+        import struct
+
+        data = bytearray(0x180)
+        data[:4] = b"\x7fELF"
+        data[4] = 2
+        data[5] = 1
+        struct.pack_into("<H", data, 0x10, 2)
+        struct.pack_into("<H", data, 0x12, 0xF3)
+        struct.pack_into("<I", data, 0x14, 1)
+        struct.pack_into("<Q", data, 0x18, 0x80000000)
+        struct.pack_into("<Q", data, 0x20, 0x40)
+        struct.pack_into("<H", data, 0x34, 64)
+        struct.pack_into("<H", data, 0x36, 56)
+        struct.pack_into("<H", data, 0x38, 1)
+        struct.pack_into("<I", data, 0x40, 1)  # PT_LOAD
+        struct.pack_into("<I", data, 0x44, 5)
+        struct.pack_into("<Q", data, 0x48, 0x100)
+        struct.pack_into("<Q", data, 0x50, 0x80000000)
+        struct.pack_into("<Q", data, 0x58, 0x80000000)
+        struct.pack_into("<Q", data, 0x60, 0x40)
+        struct.pack_into("<Q", data, 0x68, 0x40)
+        struct.pack_into("<Q", data, 0x70, 0x1000)
+        for i in range(0x40):
+            data[0x100 + i] = i & 0xFF
+        return bytes(data)
+
+    def test_linknan_workload_mutation_preserves_elf_load_headers(self) -> None:
+        parent = self._minimal_elf64()
+        child, mutation, model = mutate_linknan_workload(parent, random.Random(7), 32)
+
+        self.assertEqual(child[:0x100], parent[:0x100])
+        self.assertEqual(elf_load_segments(child), elf_load_segments(parent))
+        self.assertNotEqual(child[0x100:0x140], parent[0x100:0x140])
+        self.assertIn("elf-load", mutation)
+        self.assertEqual(model, "elf-workload-load-segment")
+
+    def test_directfuzz_file_mutation_preserves_elf_loader_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            parent = root / "seed.elf"
+            child = root / "mut.bin"
+            parent.write_bytes(self._minimal_elf64())
+
+            mutation, model = mutate_workload(parent, child, random.Random(11), 12)
+
+            self.assertTrue(child.is_file())
+            self.assertEqual(elf_load_segments(child.read_bytes()), elf_load_segments(parent.read_bytes()))
+            self.assertIn("elf-load", mutation)
+            self.assertEqual(model, "elf-workload-load-segment")
 
 
 class FormalRunnerBudgetTests(unittest.TestCase):

@@ -20,6 +20,7 @@ from linknan.methods.surgefuzz import (  # noqa: E402
     load_surge_trace,
     parse_annotation,
     score_series,
+    trace_backend,
     write_instrumentation_target_config,
 )
 from linknan.surgefuzz_ancestors import AncestorCandidate  # noqa: E402
@@ -74,6 +75,13 @@ class SurgeFuzzTraceTests(unittest.TestCase):
 
     def test_score_series_keeps_surge_freq_semantics(self) -> None:
         self.assertEqual(score_series(*parse_annotation("SURGE_FREQ=1"), [0, 1, 1, 0], window=3), [0, 1, 2, 2])
+
+    def test_native_trace_backend_has_no_missing_required_abi(self) -> None:
+        backend, paper_faithful, required = trace_backend("vcs-native-abi")
+
+        self.assertEqual(backend, "surgefuzz_vcs_native_abi_trace")
+        self.assertTrue(paper_faithful)
+        self.assertEqual(required, "")
 
     def test_nmi_report_uses_paired_profile_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
