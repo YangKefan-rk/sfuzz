@@ -95,7 +95,9 @@ SFUZZ_FIELDS = [
     "required_native_abi",
     "wall_time_sec",
     "target_min_wall_time_sec",
+    "target_max_wall_time_sec",
     "short_run",
+    "over_target_max_wall_time",
     "vcs_cycles",
     "vcs_cpu_time_sec",
     "vcs_sim_time_ps",
@@ -260,6 +262,7 @@ class CorpusEntry:
     requires_core1_handoff: bool = False
     core1_handoff_enabled: bool = False
     target_min_wall_time_sec: int = 0
+    target_max_wall_time_sec: int = 0
     total_new_coverage_bits: int = 0
     no_new_coverage_streak: int = 0
     execution_count: int = 0
@@ -350,6 +353,23 @@ def seed_bool_tag(seed: Path, key: str) -> bool:
         if tag.strip().lower() == f"{prefix}true":
             return True
     return False
+
+
+def seed_int_tag(seed: Path, key: str, default: int = 0) -> int:
+    try:
+        parsed = read_sfuz_seed(seed)
+    except Exception:
+        return default
+    prefix = f"{key}:"
+    for tag in parsed.tags:
+        text = tag.strip().lower()
+        if not text.startswith(prefix):
+            continue
+        try:
+            return int(text[len(prefix) :])
+        except ValueError:
+            return default
+    return default
 
 
 def read_bitmap(coverage: CoverageResult) -> bytes | None:
@@ -1396,7 +1416,11 @@ def row_from_run(
         "required_native_abi": "" if run["native_feedback"] else "SFUZZ.native",
         "wall_time_sec": round(run["result"].wall_time_sec, 3),
         "target_min_wall_time_sec": entry.target_min_wall_time_sec,
+        "target_max_wall_time_sec": entry.target_max_wall_time_sec,
         "short_run": bool(entry.target_min_wall_time_sec and run["result"].wall_time_sec < entry.target_min_wall_time_sec),
+        "over_target_max_wall_time": bool(
+            entry.target_max_wall_time_sec and run["result"].wall_time_sec > entry.target_max_wall_time_sec
+        ),
         "vcs_cycles": run["info"].cycles if run["info"].cycles is not None else "",
         "vcs_cpu_time_sec": run["info"].vcs_cpu_time_sec,
         "vcs_sim_time_ps": run["info"].vcs_sim_time_ps,
@@ -1501,6 +1525,7 @@ def initial_corpus(args: Any, work_dir: Path) -> list[CorpusEntry]:
                 requires_core1_handoff=seed_bool_tag(seed, "requires_core1_handoff"),
                 core1_handoff_enabled=getattr(args, "enable_core1_handoff", False),
                 target_min_wall_time_sec=getattr(args, "target_min_wall_time_sec", 0),
+                target_max_wall_time_sec=seed_int_tag(seed, "target_max_wall_time_sec"),
             )
         )
     return entries
@@ -1617,6 +1642,7 @@ def run_sfuzz(args: Any, ctx: VcsContext) -> int:
                 requires_core1_handoff=mutation.requires_core1_handoff,
                 core1_handoff_enabled=mutation.core1_handoff_enabled,
                 target_min_wall_time_sec=getattr(args, "target_min_wall_time_sec", 0),
+                target_max_wall_time_sec=seed_int_tag(mutated_path, "target_max_wall_time_sec"),
             )
             next_corpus_id += 1
 

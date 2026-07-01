@@ -717,8 +717,8 @@ def validate_prepare(args: argparse.Namespace, testcases: list[Testcase]) -> Non
         raise ValueError(f"need at least {args.min_testcases} runnable testcases, found {len(testcases)}")
     if args.exec_budget < 1000:
         raise ValueError("formal four-fuzzer campaign requires --exec-budget >= 1000")
-    if args.timeout_sec < 600:
-        raise ValueError("formal four-fuzzer campaign requires --timeout-sec >= 600")
+    if args.timeout_sec < 900:
+        raise ValueError("formal four-fuzzer campaign requires --timeout-sec >= 900")
     if args.target_min_wall_time_sec < 60:
         raise ValueError("formal SFuzz campaign requires --target-min-wall-time-sec >= 60")
     require_file(args.direct_metadata.expanduser())
@@ -1019,7 +1019,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=120, help="maximum testcase count selected from manifest")
     parser.add_argument("--min-testcases", type=int, default=100)
     parser.add_argument("--exec-budget", type=int, default=1000)
-    parser.add_argument("--timeout-sec", type=int, default=600)
+    parser.add_argument("--timeout-sec", type=int, default=900)
     parser.add_argument("--target-min-wall-time-sec", type=int, default=60)
     parser.add_argument("--rng-seed", type=int, default=20260605)
     parser.add_argument("--sfuzz-scheduler", choices=["weighted-innovation", "semantic-bandit"], default="semantic-bandit")

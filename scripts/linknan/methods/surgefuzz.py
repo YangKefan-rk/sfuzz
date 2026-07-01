@@ -1046,8 +1046,8 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
     if args.timeout_sec <= 0:
         raise ValueError("SurgeFuzz LinkNan loop requires --timeout-sec to bound natural-end VCS runs")
     if getattr(args, "require_paper_native", False):
-        if args.timeout_sec < 600:
-            raise ValueError("formal SurgeFuzz campaigns require --timeout-sec >= 600")
+        if args.timeout_sec < 900:
+            raise ValueError("formal SurgeFuzz campaigns require --timeout-sec >= 900")
         if args.input_mode != "artifact-program":
             raise ValueError("formal SurgeFuzz campaigns require artifact-program input generation")
         if args.trace_source != "vcs-native-abi" or args.trace_is_dev_mock:

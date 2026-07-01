@@ -457,8 +457,8 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
     if getattr(args, "require_formal_feedback", False):
         if ctx.cycles is not None:
             raise ValueError("formal RFuzz LinkNan campaigns require --no-cycle-limit")
-        if args.timeout_sec < 600:
-            raise ValueError("formal RFuzz LinkNan campaigns require --timeout-sec >= 600")
+        if args.timeout_sec < 900:
+            raise ValueError("formal RFuzz LinkNan campaigns require --timeout-sec >= 900")
         formal_total_execs = getattr(args, "formal_campaign_total_execs", 0) or args.rfuzz_rounds
         if formal_total_execs < 1000:
             raise ValueError("formal RFuzz LinkNan campaigns require --rfuzz-rounds >= 1000")

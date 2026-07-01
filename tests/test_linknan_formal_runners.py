@@ -331,7 +331,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             args = SimpleNamespace(
                 config=root / "sfuzz.toml",
                 linknan_root=root / "LinkNan",
-                timeout_sec=600,
+                timeout_sec=900,
                 build_mode="auto",
                 build_chisel=False,
                 build_timeout_sec=DEFAULT_BUILD_TIMEOUT_SEC,
@@ -356,7 +356,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
         for item in commands:
             command_text = " ".join(item["command"])
             self.assertIn("--no-cycle-limit", command_text)
-            self.assertIn("--timeout-sec 600", command_text)
+            self.assertIn("--timeout-sec 900", command_text)
             self.assertIn(f"--build-timeout-sec {DEFAULT_BUILD_TIMEOUT_SEC}", command_text)
             self.assertIn("--build-dir", command_text)
             self.assertIn("--sim-dir", command_text)
@@ -393,7 +393,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             args = SimpleNamespace(
                 config=root / "sfuzz.toml",
                 linknan_root=root / "LinkNan",
-                timeout_sec=600,
+                timeout_sec=900,
                 build_mode="auto",
                 build_chisel=False,
                 build_timeout_sec=DEFAULT_BUILD_TIMEOUT_SEC,
@@ -421,7 +421,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
         for item in commands:
             command_text = " ".join(item["command"])
             self.assertIn("workers/worker-", command_text)
-            self.assertIn("--timeout-sec 600", command_text)
+            self.assertIn("--timeout-sec 900", command_text)
             self.assertIn(f"--build-timeout-sec {DEFAULT_BUILD_TIMEOUT_SEC}", command_text)
             self.assertNotIn("--worker-id", command_text)
             _assert_campaign_env(self, item)
@@ -463,7 +463,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             args = SimpleNamespace(
                 config=root / "sfuzz.toml",
                 linknan_root=root / "LinkNan",
-                timeout_sec=600,
+                timeout_sec=900,
                 build_mode="auto",
                 build_chisel=False,
                 build_timeout_sec=DEFAULT_BUILD_TIMEOUT_SEC,
@@ -520,7 +520,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             args = SimpleNamespace(
                 config=root / "sfuzz.toml",
                 linknan_root=root / "LinkNan",
-                timeout_sec=600,
+                timeout_sec=900,
                 build_mode="auto",
                 build_chisel=False,
                 build_timeout_sec=DEFAULT_BUILD_TIMEOUT_SEC,
@@ -594,7 +594,7 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             args = SimpleNamespace(
                 config=root / "sfuzz.toml",
                 linknan_root=root / "LinkNan",
-                timeout_sec=600,
+                timeout_sec=900,
                 build_mode="auto",
                 build_chisel=False,
                 build_timeout_sec=DEFAULT_BUILD_TIMEOUT_SEC,

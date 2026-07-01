@@ -46,8 +46,12 @@ from linknan.methods.sfuzz import (  # noqa: E402
 )
 from linknan.seeds import SfuzSeed, infer_seed_micro_ir, read_sfuz_seed, write_sfuz_seed  # noqa: E402
 from linknan.sfuzz_scenarios import (  # noqa: E402
+    LONG_STRESS_DEFAULT_MULTICORE_ITERATIONS,
+    LONG_STRESS_DEFAULT_SINGLE_CORE_ITERATIONS,
+    LONG_STRESS_TARGET_MAX_WALL_TIME_SEC,
     SCENARIO_FAMILIES,
     choose_semantic_operator,
+    default_long_stress_iterations,
     generate_scenario,
     generate_scenario_corpus,
     scenario_from_operator,
@@ -426,12 +430,15 @@ class SfuzzScenarioTests(unittest.TestCase):
         self.assertTrue(scenario.requires_core1_handoff)
         self.assertFalse(scenario.core1_handoff_enabled)
         self.assertFalse(scenario.formal_multicore_result)
-        self.assertGreater(len(seed.core1_prog), 0)
+        self.assertEqual(len(seed.core1_prog), 0)
         self.assertIn("single-core-fallback", seed.tags)
+        self.assertNotIn("target:sfuzz_coherence", seed.tags)
+        self.assertNotIn("event:cross_core_probe", seed.tags)
+        self.assertNotIn("event:probe_ack", seed.tags)
 
     def test_long_runtime_profile_tags_stress_loop(self) -> None:
         scenario = scenario_from_operator(
-            "insert_amo_sequence",
+            "insert_load_store_pair",
             variant=2,
             rng=random.Random(2),
             runtime_profile="long",
@@ -440,9 +447,29 @@ class SfuzzScenarioTests(unittest.TestCase):
         seed = seed_from_scenario(scenario)
 
         self.assertEqual(scenario.runtime_profile, "long")
-        self.assertEqual(scenario.stress_iterations, 512)
+        self.assertEqual(scenario.stress_iterations, LONG_STRESS_DEFAULT_SINGLE_CORE_ITERATIONS)
         self.assertIn("runtime_profile:long", seed.tags)
         self.assertIn("target_min_wall_time_sec:60", seed.tags)
+        self.assertIn("target_max_wall_time_sec:600", seed.tags)
+
+    def test_long_runtime_profile_uses_shorter_multicore_budget(self) -> None:
+        scenario = scenario_from_operator(
+            "insert_amo_sequence",
+            variant=2,
+            rng=random.Random(2),
+            core1_handoff_enabled=True,
+            runtime_profile="long",
+            target_min_wall_time_sec=60,
+        )
+
+        self.assertTrue(scenario.requires_core1_handoff)
+        self.assertEqual(scenario.stress_iterations, LONG_STRESS_DEFAULT_MULTICORE_ITERATIONS)
+        self.assertEqual(
+            default_long_stress_iterations("amo_contention", "insert_amo_sequence", requires_core1=True),
+            LONG_STRESS_DEFAULT_MULTICORE_ITERATIONS,
+        )
+        self.assertEqual(scenario.target_max_wall_time_sec, LONG_STRESS_TARGET_MAX_WALL_TIME_SEC)
+        self.assertEqual(LONG_STRESS_TARGET_MAX_WALL_TIME_SEC, 600)
 
     def test_long_multicore_profile_keeps_core1_running(self) -> None:
         scenario = scenario_from_operator(

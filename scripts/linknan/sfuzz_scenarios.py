@@ -22,7 +22,30 @@ DEFAULT_SHARED_BASE = PMEM_BASE + 0x4000
 DEFAULT_CACHELINE_BYTES = 64
 EXCEPTION_HANDLER_OFFSET = 0x100
 CORE1_DONE_OFFSET = 0x1F8
-LONG_STRESS_DEFAULT_ITERATIONS = 512
+LONG_STRESS_TARGET_MAX_WALL_TIME_SEC = 600
+LONG_STRESS_DEFAULT_SINGLE_CORE_ITERATIONS = 4096
+LONG_STRESS_DEFAULT_MULTICORE_ITERATIONS = 1536
+LONG_STRESS_HEAVY_SINGLE_CORE_ITERATIONS = 2048
+LONG_STRESS_ITERATIONS_BY_FAMILY = {
+    "memory_alias": LONG_STRESS_DEFAULT_SINGLE_CORE_ITERATIONS,
+    "cacheline_conflict": LONG_STRESS_DEFAULT_SINGLE_CORE_ITERATIONS,
+    "load_store_dependency": LONG_STRESS_DEFAULT_SINGLE_CORE_ITERATIONS,
+    "store_load_reordering": LONG_STRESS_DEFAULT_SINGLE_CORE_ITERATIONS,
+    "branch_flush_memory": LONG_STRESS_DEFAULT_SINGLE_CORE_ITERATIONS,
+    "queue_backpressure": 3072,
+    "amo_contention": 3072,
+    "lrsc_success_fail": 3072,
+    "fence_ordering": 3072,
+    "tlb_refill_memory": LONG_STRESS_HEAVY_SINGLE_CORE_ITERATIONS,
+    "mshr_pressure": LONG_STRESS_HEAVY_SINGLE_CORE_ITERATIONS,
+}
+MULTICORE_ONLY_EVENTS = {
+    "amo_conflict",
+    "sc_fail",
+    "cross_core_probe",
+    "probe_ack",
+    "release_fire",
+}
 
 SCENARIO_FAMILIES = (
     "memory_alias",
@@ -155,6 +178,7 @@ class ScenarioIR:
     runtime_profile: str = "short"
     stress_iterations: int = 0
     target_min_wall_time_sec: int = 0
+    target_max_wall_time_sec: int = 0
 
     @property
     def formal_multicore_result(self) -> bool:
@@ -200,6 +224,7 @@ class ScenarioIR:
             "runtime_profile": self.runtime_profile,
             "stress_iterations": self.stress_iterations,
             "target_min_wall_time_sec": self.target_min_wall_time_sec,
+            "target_max_wall_time_sec": self.target_max_wall_time_sec,
         }
 
 
@@ -477,6 +502,7 @@ def _scenario(
     runtime_profile: str = "short",
     stress_iterations: int = 0,
     target_min_wall_time_sec: int = 0,
+    target_max_wall_time_sec: int = 0,
 ) -> ScenarioIR:
     blocks = [_block(0, f"{family}_core0", core0)]
     cores = [0]
@@ -499,6 +525,7 @@ def _scenario(
         runtime_profile=runtime_profile,
         stress_iterations=stress_iterations,
         target_min_wall_time_sec=target_min_wall_time_sec,
+        target_max_wall_time_sec=target_max_wall_time_sec,
     )
 
 
@@ -518,6 +545,22 @@ def _memory_pressure_lines(variant: int) -> int:
     return 8 + (variant % 5) * 4
 
 
+def default_long_stress_iterations(family: str, operator: str, *, requires_core1: bool) -> int:
+    if requires_core1:
+        return LONG_STRESS_DEFAULT_MULTICORE_ITERATIONS
+    return LONG_STRESS_ITERATIONS_BY_FAMILY.get(family, LONG_STRESS_DEFAULT_SINGLE_CORE_ITERATIONS)
+
+
+def fallback_expected_events(expected: tuple[str, ...]) -> tuple[str, ...]:
+    filtered = tuple(event for event in expected if event not in MULTICORE_ONLY_EVENTS)
+    return filtered or ("single_core_fallback",)
+
+
+def fallback_target_groups(target_groups: tuple[str, ...]) -> tuple[str, ...]:
+    filtered = tuple(group for group in target_groups if group != "sfuzz_coherence")
+    return filtered or ("sfuzz_lsq",)
+
+
 def generate_scenario(
     family: str,
     *,
@@ -535,8 +578,6 @@ def generate_scenario(
     op = operator or family_default_operator(family)
     if runtime_profile not in {"short", "long"}:
         raise ValueError(f"unsupported SFuzz runtime profile: {runtime_profile}")
-    if runtime_profile == "long" and stress_iterations <= 0:
-        stress_iterations = LONG_STRESS_DEFAULT_ITERATIONS
     base = _base_for_variant(variant + rnd.randrange(16))
     alias_offset = 8 if op != "create_cross_cacheline_alias" else DEFAULT_CACHELINE_BYTES
     shared_size = 0x6000 if family == "tlb_refill_memory" else 512
@@ -672,13 +713,21 @@ def generate_scenario(
     else:
         raise AssertionError(f"unhandled family {family}")
 
+    effective_core1 = requires_core1 and core1_handoff_enabled
+    if requires_core1 and not core1_handoff_enabled:
+        core1 = []
+        sync = (*sync, "single_core_fallback")
+        target_groups = fallback_target_groups(target_groups)
+        expected = fallback_expected_events(expected)
+    if runtime_profile == "long" and stress_iterations <= 0 and not needs_exception_handler:
+        stress_iterations = default_long_stress_iterations(family, op, requires_core1=effective_core1)
     applied_stress_iterations = stress_iterations if runtime_profile == "long" and not needs_exception_handler else 0
     if core1 and applied_stress_iterations:
         _append_runtime_stress_loop(core1, applied_stress_iterations)
     if core1:
         _park_core1_after_done(core1, base)
     _append_runtime_stress_loop(core0, applied_stress_iterations)
-    if requires_core1:
+    if effective_core1:
         _wait_for_core1_done(core0, base)
     _finish(core0)
     if needs_exception_handler:
@@ -698,6 +747,7 @@ def generate_scenario(
         runtime_profile=runtime_profile if applied_stress_iterations else "short",
         stress_iterations=applied_stress_iterations,
         target_min_wall_time_sec=target_min_wall_time_sec if applied_stress_iterations else 0,
+        target_max_wall_time_sec=LONG_STRESS_TARGET_MAX_WALL_TIME_SEC if applied_stress_iterations else 0,
     )
 
 
@@ -788,6 +838,7 @@ def seed_from_scenario(scenario: ScenarioIR) -> SfuzSeed:
         f"runtime_profile:{scenario.runtime_profile}",
         f"stress_iterations:{scenario.stress_iterations}",
         f"target_min_wall_time_sec:{scenario.target_min_wall_time_sec}",
+        f"target_max_wall_time_sec:{scenario.target_max_wall_time_sec}",
     ]
     if scenario.requires_core1_handoff and not scenario.core1_handoff_enabled:
         tags.append("single-core-fallback")
