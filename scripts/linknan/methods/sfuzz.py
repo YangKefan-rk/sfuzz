@@ -25,6 +25,7 @@ from ..sfuzz_scenarios import (
 )
 from ..vcs import (
     CoverageResult,
+    DEFAULT_TOHOST_ADDR,
     assertion_failure,
     build_simv_if_needed,
     classify_infrastructure_error,
@@ -106,6 +107,8 @@ SFUZZ_FIELDS = [
     "t0_smoke_pass",
     "exit_code",
     "vcs_report_seen",
+    "tohost_exit_seen",
+    "tohost_exit_code",
     "sfuz_expansion_seen",
     "sfuzz_core0_staged",
     "sfuzz_core1_staged",
@@ -1287,6 +1290,17 @@ def seed_has_core1_payload(seed: Path) -> bool:
         return False
 
 
+def sfuz_seed_needs_tohost_monitor(seed: Path) -> bool:
+    try:
+        parsed = read_sfuz_seed(seed)
+    except Exception:
+        return False
+    tag_text = " ".join([parsed.name, parsed.description, *parsed.tags]).lower()
+    if "riscv-tests-isa" in tag_text:
+        return True
+    return parsed.name.startswith("rv64") or "-riscv-tests-isa-rv64" in parsed.name
+
+
 def run_one(args: Any, ctx: VcsContext, runs_dir: Path, logs_dir: Path, seed: Path, case_name: str) -> dict[str, Any]:
     extra_env = {}
     firrtl_cov = getattr(args, "firrtl_cov", None)
@@ -1296,6 +1310,10 @@ def run_one(args: Any, ctx: VcsContext, runs_dir: Path, logs_dir: Path, seed: Pa
     if getattr(args, "enable_core1_handoff", False) and seed_has_core1_payload(seed):
         simv_args = append_simv_arg(simv_args, "+sfuzz_enable_all_cores=1")
         simv_args = append_simv_arg(simv_args, "+sfuzz_secondary_reset_vector=2164260864")
+    tohost_addr = 0
+    tohost_spec = str(getattr(args, "tohost_addr", "auto") or "auto").strip().lower()
+    if tohost_spec not in {"off", "none", "0", ""} and sfuz_seed_needs_tohost_monitor(seed):
+        tohost_addr = int(tohost_spec, 0) if tohost_spec != "auto" else DEFAULT_TOHOST_ADDR
     result, case_dir, run_log, assert_log = run_vcs_seed(
         seed=seed,
         case_name=case_name,
@@ -1306,6 +1324,7 @@ def run_one(args: Any, ctx: VcsContext, runs_dir: Path, logs_dir: Path, seed: Pa
         cov=args.cov,
         simv_args=simv_args,
         extra_env=extra_env or None,
+        tohost_addr=tohost_addr,
     )
     info = scan_vcs_logs(run_log, assert_log, ctx.cycles)
 
@@ -1429,6 +1448,12 @@ def row_from_run(
         "t0_smoke_pass": run["t0_smoke_pass"],
         "exit_code": run["result"].returncode,
         "vcs_report_seen": run["info"].vcs_report_seen,
+        "tohost_exit_seen": getattr(run["info"], "tohost_exit_seen", False),
+        "tohost_exit_code": (
+            getattr(run["info"], "tohost_exit_code", None)
+            if getattr(run["info"], "tohost_exit_code", None) is not None
+            else ""
+        ),
         "sfuz_expansion_seen": run["info"].sfuz_expansion_seen,
         "sfuzz_core0_staged": run["info"].sfuzz_core0_staged,
         "sfuzz_core1_staged": run["info"].sfuzz_core1_staged,
@@ -1441,6 +1466,7 @@ def row_from_run(
             not entry.requires_core1_handoff
             or (
                 entry.core1_handoff_enabled
+                and run["info"].sfuzz_core1_staged
                 and run["info"].sfuzz_core1_executed
                 and run["info"].good_trap_seen
                 and not run["result"].timed_out

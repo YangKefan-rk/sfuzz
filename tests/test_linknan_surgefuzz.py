@@ -26,7 +26,7 @@ from linknan.methods.surgefuzz import (  # noqa: E402
 )
 from linknan.surgefuzz_ancestors import AncestorCandidate  # noqa: E402
 from linknan.surgefuzz_ancestors import target_distance_candidates  # noqa: E402
-from linknan.surgefuzz_program import ProgramConfig, random_operands  # noqa: E402
+from linknan.surgefuzz_program import Program, ProgramConfig, random_operands  # noqa: E402
 from linknan.surgefuzz_profile import (  # noqa: E402
     RtlModule,
     RtlSignal,
@@ -57,6 +57,26 @@ class SurgeFuzzTraceTests(unittest.TestCase):
                 operands = random_operands(inst_type, rnd, config)
                 for index in indices:
                     self.assertNotEqual(operands[index], "x0", f"{inst_type} generated x0 at operand {index}")
+
+    def test_artifact_programs_end_with_linknan_good_trap(self) -> None:
+        program = Program.random(random.Random(7), ProgramConfig(initial_seed_block_count=2, execution_guard_blocks=9))
+
+        asm = program.generate_assembly(ProgramConfig(initial_seed_block_count=2, execution_guard_blocks=9))
+
+        self.assertIn("li x1, 9", asm)
+        self.assertIn("la x5, test_memory", asm)
+        self.assertIn("beq x1, x0, surgefuzz_done", asm)
+        self.assertIn(".word 0x0005006b", asm)
+        self.assertNotIn("j surgefuzz_done", asm)
+
+    def test_random_memory_and_atomic_operands_use_initialized_base(self) -> None:
+        config = ProgramConfig(enable_rv64a=True, enable_rv64im=True)
+        rnd = random.Random(20260606)
+
+        for _ in range(128):
+            self.assertEqual(random_operands("Memory", rnd, config)[1], "x5")
+            self.assertEqual(random_operands("AtomicArg2", rnd, config)[1], "x5")
+            self.assertEqual(random_operands("AtomicArg3", rnd, config)[2], "x5")
 
     def test_load_surge_trace_filters_indexed_multi_target_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

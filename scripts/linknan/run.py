@@ -383,6 +383,12 @@ def main() -> int:
     surge.add_argument("--initial-seed-count", type=int, default=1)
     surge.add_argument("--initial-seed-block-count", type=int, default=4)
     surge.add_argument("--initial-seed-instructions-per-block", type=int, default=5)
+    surge.add_argument(
+        "--artifact-execution-guard-blocks",
+        type=int,
+        default=12288,
+        help="maximum artifact-program basic-block visits before jumping to the LinkNan good trap",
+    )
     surge.add_argument("--max-operation-count", type=int, default=3)
     surge.add_argument("--enable-rv64a", action="store_true", default=False)
     surge.add_argument("--disable-rv64a", dest="enable_rv64a", action="store_false")

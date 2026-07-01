@@ -35,6 +35,7 @@ from linknan.methods.sfuzz import (  # noqa: E402
     parse_coverage_group_snapshot,
     plan_sections_for_focus,
     seed_has_core1_payload,
+    sfuz_seed_needs_tohost_monitor,
     row_from_run,
     select_baseline_parent,
     select_parent,
@@ -704,6 +705,82 @@ class SfuzzCoverageTests(unittest.TestCase):
 
         self.assertFalse(row["formal_multicore_result"])
 
+    def test_formal_multicore_result_requires_core1_payload_staged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seed = root / "dual.sfuz"
+            write_sfuz_seed(
+                seed,
+                SfuzSeed(
+                    core0_prog=b"core0",
+                    core1_prog=b"core1",
+                    shared_mem_init=[],
+                    interrupt_plan_raw=[],
+                    name="dual",
+                    description="",
+                    tags=[],
+                ),
+            )
+            entry = CorpusEntry(
+                corpus_id=1,
+                path=seed,
+                seed_name="dual",
+                category="test",
+                energy=1,
+                requires_core1_handoff=True,
+                core1_handoff_enabled=True,
+            )
+            run = {
+                "coverage": CoverageResult(coverage_name="sfuzz_firrtl.sfuzz_native"),
+                "coverage_backend": "sfuzz_firrtl",
+                "comparison_tier": "T2_sfuzz_native_online",
+                "native_feedback": True,
+                "result": Namespace(wall_time_sec=60.0, returncode=0, timed_out=False, command_log_path="cmd.log"),
+                "info": Namespace(
+                    sfuzz_core0_staged=True,
+                    sfuzz_core1_staged=False,
+                    sfuzz_core1_entry="",
+                    sfuzz_core1_payload_size=None,
+                    sfuzz_core1_executed=True,
+                    sfuzz_core1_handoff_reason="core1_instr_count",
+                    good_trap_seen=True,
+                    bug_triggered=False,
+                    bug_reasons=[],
+                    cycles=None,
+                    vcs_cpu_time_sec=None,
+                    vcs_sim_time_ps=None,
+                    max_cycle_exceeded=False,
+                    vcs_report_seen=False,
+                    sfuz_expansion_seen=True,
+                ),
+                "t0_smoke_pass": True,
+                "run_outcome": "good_trap",
+                "run_log": root / "run.log",
+                "assert_log": root / "assert.log",
+                "case_dir": root,
+                "case_name": "dual",
+                "infrastructure_error": "",
+                "command_has_cycles_arg": False,
+                "command_has_max_cycles_plusarg": False,
+            }
+
+            row = row_from_run(
+                args=Namespace(),
+                ctx=Namespace(),
+                campaign_exec=1,
+                entry=entry,
+                run=run,
+                new_bits=0,
+                group_new_bits={},
+                group_accumulated_bits={},
+                accumulated=bytearray(),
+                retained=False,
+                retention_reason="not_interesting",
+                notes="",
+            )
+
+        self.assertFalse(row["formal_multicore_result"])
+
     def test_parse_coverage_group_snapshot_reads_sfuzz_native_groups(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             summary = Path(tmp) / "sfuzz_native_coverage.json"
@@ -936,6 +1013,39 @@ class SfuzzSchedulerTests(unittest.TestCase):
             append_simv_arg("+foo=1", "+sfuzz_enable_all_cores=1"),
             "+foo=1 +sfuzz_enable_all_cores=1",
         )
+
+    def test_sfuz_riscv_tests_seed_enables_tohost_monitor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            riscv = root / "rv64.sfuz"
+            scenario = root / "scenario.sfuz"
+            write_sfuz_seed(
+                riscv,
+                SfuzSeed(
+                    core0_prog=b"core0",
+                    core1_prog=b"",
+                    shared_mem_init=[],
+                    interrupt_plan_raw=[],
+                    name="tc0000-riscv-tests-isa-rv64mi-p-ma_addr",
+                    description="Phase corpus",
+                    tags=["riscv-tests-isa"],
+                ),
+            )
+            write_sfuz_seed(
+                scenario,
+                SfuzSeed(
+                    core0_prog=b"core0",
+                    core1_prog=b"",
+                    shared_mem_init=[],
+                    interrupt_plan_raw=[],
+                    name="memory_alias-insert_load_store_pair",
+                    description="generated",
+                    tags=["sfuzz-scenario"],
+                ),
+            )
+
+            self.assertTrue(sfuz_seed_needs_tohost_monitor(riscv))
+            self.assertFalse(sfuz_seed_needs_tohost_monitor(scenario))
 
     def test_core1_handoff_defaults_to_dual_core_build(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

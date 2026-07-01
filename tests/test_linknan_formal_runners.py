@@ -26,6 +26,7 @@ from linknan.t2_four_fuzzer_campaign import (  # noqa: E402
     CampaignPaths,
     DEFAULT_BUILD_TIMEOUT_SEC,
     campaign_commands,
+    load_quarantine_entries,
     load_testcases,
     merge_worker_csvs,
     per_worker_budget,
@@ -628,6 +629,32 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             self.assertNotIn("--build ", command_text)
             self.assertNotIn("--build-only", command_text)
             self.assertNotIn("--rebuild-comp", command_text)
+
+    def test_t2_campaign_can_quarantine_known_timeout_inputs(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "manifest.csv"
+            seed0 = root / "tc0.sfuz"
+            seed1 = root / "tc1.sfuz"
+            workload0 = root / "timeout.bin"
+            workload1 = root / "ok.bin"
+            for path in [seed0, seed1, workload0, workload1]:
+                path.write_bytes(b"SFUZ" if path.suffix == ".sfuz" else b"\x73\x00\x10\x00")
+            manifest.write_text(
+                "testcase_id,source,category,input_path,input_format,file_size,sfuzz_seed_path,rfuzz_workload_path,sha256\n"
+                f"tc-timeout,unit,ISA,{workload0},bin,4,{seed0},{workload0},deadbeef\n"
+                f"tc-ok,unit,ISA,{workload1},bin,4,{seed1},{workload1},cafef00d\n",
+                encoding="utf-8",
+            )
+            quarantine_file = root / "quarantine.txt"
+            quarantine_file.write_text("tc-timeout\n# comment\ndeadbeef\n", encoding="utf-8")
+
+            quarantine = load_quarantine_entries([quarantine_file])
+            testcases = load_testcases(manifest, limit=10, quarantine=quarantine)
+
+        self.assertEqual([case.testcase_id for case in testcases], ["tc-ok"])
 
     def test_t2_campaign_mutation_row_classifier_is_method_aware(self) -> None:
         self.assertFalse(row_is_mutation({"fuzzer": "sfuzz", "mutation_index": "", "semantic_operator": ""}))

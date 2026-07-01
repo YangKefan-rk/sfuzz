@@ -107,9 +107,44 @@ def resolve_manifest_path(raw: str, manifest: Path) -> Path:
     return (SFUZZ_HOME / path).resolve()
 
 
-def load_testcases(manifest: Path, limit: int) -> list[Testcase]:
+def load_quarantine_entries(paths: list[Path] | None) -> set[str]:
+    entries: set[str] = set()
+    for path in paths or []:
+        resolved = path.expanduser()
+        require_file(resolved)
+        for line in resolved.read_text(encoding="utf-8").splitlines():
+            item = line.split("#", 1)[0].strip()
+            if item:
+                entries.add(item)
+    return entries
+
+
+def testcase_quarantine_keys(row: dict[str, str], sfuzz_seed: Path, workload: Path) -> set[str]:
+    keys = {
+        str(row.get("testcase_id", "")),
+        str(row.get("sha256", "")),
+        str(row.get("input_path", "")),
+        str(row.get("rfuzz_workload_path", "")),
+        str(row.get("directfuzz_workload_path", "")),
+        str(row.get("sfuzz_seed_path", "")),
+        str(sfuzz_seed),
+        str(workload),
+        sfuzz_seed.name,
+        sfuzz_seed.stem,
+        workload.name,
+        workload.stem,
+    }
+    return {key for key in keys if key}
+
+
+def testcase_is_quarantined(row: dict[str, str], sfuzz_seed: Path, workload: Path, quarantine: set[str]) -> bool:
+    return bool(quarantine and testcase_quarantine_keys(row, sfuzz_seed, workload) & quarantine)
+
+
+def load_testcases(manifest: Path, limit: int, quarantine: set[str] | None = None) -> list[Testcase]:
     require_file(manifest)
     rows: list[Testcase] = []
+    quarantine = quarantine or set()
     with manifest.open(newline="", encoding="utf-8") as input_file:
         reader = csv.DictReader(input_file)
         required = {"testcase_id", "source", "category", "sfuzz_seed_path", "input_path", "input_format", "file_size"}
@@ -121,6 +156,8 @@ def load_testcases(manifest: Path, limit: int) -> list[Testcase]:
             workload_raw = row.get("rfuzz_workload_path") or row.get("input_path") or ""
             workload = resolve_manifest_path(workload_raw, manifest)
             if not sfuzz_seed.is_file() or not workload.is_file():
+                continue
+            if testcase_is_quarantined(row, sfuzz_seed, workload, quarantine):
                 continue
             rows.append(
                 Testcase(
@@ -136,7 +173,8 @@ def load_testcases(manifest: Path, limit: int) -> list[Testcase]:
             if limit > 0 and len(rows) >= limit:
                 break
     if not rows:
-        raise ValueError(f"{manifest}: no runnable testcase with both SFUZ seed and workload image")
+        suffix = " after applying timeout quarantine" if quarantine else ""
+        raise ValueError(f"{manifest}: no runnable testcase with both SFUZ seed and workload image{suffix}")
     return rows
 
 
@@ -665,6 +703,8 @@ def campaign_commands(
                 args.surge_target,
                 "--trace-source",
                 "vcs-native-abi",
+                "--artifact-execution-guard-blocks",
+                str(getattr(args, "surge_artifact_execution_guard_blocks", 12288)),
             ]
             + ([] if framework_smoke else ["--formal-campaign-total-execs", str(args.exec_budget), "--require-paper-native"]),
             env=surge_env,
@@ -704,6 +744,8 @@ def write_campaign_manifest(paths: CampaignPaths, testcases: list[Testcase], com
         "rng_seed": args.rng_seed,
         "build_mode": args.build_mode,
         "build_timeout_sec": args.build_timeout_sec,
+        "timeout_quarantine": [str(path) for path in getattr(args, "timeout_quarantine", [])],
+        "surge_artifact_execution_guard_blocks": getattr(args, "surge_artifact_execution_guard_blocks", 12288),
         "sfuzz_num_cores": args.sfuzz_num_cores,
         "workers_per_fuzzer": args.workers_per_fuzzer,
         "parallel_jobs": args.parallel_jobs,
@@ -1031,10 +1073,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-testcases", type=int, default=100)
     parser.add_argument("--exec-budget", type=int, default=1000)
     parser.add_argument("--timeout-sec", type=int, default=900)
+    parser.add_argument(
+        "--timeout-quarantine",
+        type=Path,
+        action="append",
+        default=[],
+        help="file with testcase ids, workload paths, seed paths, names, stems, or sha256 values to skip during prepare",
+    )
     parser.add_argument("--target-min-wall-time-sec", type=int, default=60)
     parser.add_argument("--rng-seed", type=int, default=20260605)
     parser.add_argument("--sfuzz-scheduler", choices=["weighted-innovation", "semantic-bandit"], default="semantic-bandit")
     parser.add_argument("--surge-initial-seed-count", type=int, default=1)
+    parser.add_argument("--surge-artifact-execution-guard-blocks", type=int, default=12288)
     parser.add_argument(
         "--build-mode",
         choices=["auto", "skip", "build", "rebuild"],
@@ -1072,7 +1122,8 @@ def main() -> int:
     campaign_root = args.campaign_root or (SFUZZ_HOME / "campaigns" / f"t2-long-four-fuzzer-{now_slug()}")
     paths = CampaignPaths.create(campaign_root.expanduser().resolve())
     if args.phase in {"prepare", "all"}:
-        testcases = load_testcases(args.manifest.expanduser(), args.limit)
+        quarantine = load_quarantine_entries(args.timeout_quarantine)
+        testcases = load_testcases(args.manifest.expanduser(), args.limit, quarantine)
         validate_prepare(args, testcases)
         sfuzz_list, workload_list, selected_manifest = write_seed_lists(paths, testcases)
         sfuzz_shards, workload_shards = write_seed_shards(paths, testcases, args.workers_per_fuzzer)

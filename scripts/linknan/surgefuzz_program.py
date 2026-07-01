@@ -23,6 +23,7 @@ class ProgramConfig:
     link_address: int = 0x80000000
     memory_bytes: int = 4096
     stack_bytes: int = 4096
+    execution_guard_blocks: int = 12288
 
 
 @dataclass
@@ -162,15 +163,27 @@ class Program:
             applied.extend(block.mutate(rnd, config))
         return applied
 
-    def generate_body(self) -> str:
-        return "\n".join(block.generate() for block in self.blocks)
+    def generate_body(self, config: ProgramConfig | None = None) -> str:
+        lines: list[str] = []
+        guard_enabled = config is not None and config.execution_guard_blocks > 0
+        for block in self.blocks:
+            lines.append(f"{block.label}:")
+            if guard_enabled:
+                lines.extend(
+                    [
+                        "    addi x1, x1, -1",
+                        "    beq x1, x0, surgefuzz_done",
+                    ]
+                )
+            lines.extend(f"    {instruction.generate()}" for instruction in block.instructions)
+        return "\n".join(lines) + "\n"
 
     def generate_assembly(self, config: ProgramConfig, header: str | None = None, footer: str | None = None) -> str:
         if header is None:
             header = default_header(config)
         if footer is None:
             footer = default_footer(config)
-        return header + self.generate_body() + footer
+        return header + self.generate_body(config) + footer
 
     def write_assembly(self, path: Path, config: ProgramConfig, header: str | None = None, footer: str | None = None) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -309,25 +322,29 @@ def random_operand(inst_type: str, index: int, rnd: random.Random, config: Progr
         return random_register(rnd) if index < 2 else str(rnd.randrange(64 if config.enable_rv64im else 32))
     if inst_type == "IntRegImmShiftW":
         return random_register(rnd) if index < 2 else str(rnd.randrange(32))
-    if inst_type in {"IntRegReg", "AtomicArg3"}:
+    if inst_type == "AtomicArg3":
+        return "x5" if index == 2 else random_register(rnd)
+    if inst_type == "IntRegReg":
         return random_register(rnd)
     if inst_type == "Branch":
         return random_register(rnd) if index < 2 else random_label(rnd, config)
     if inst_type == "Memory":
-        return random_register(rnd) if index < 2 else str(rnd.randrange(2**11))
+        if index == 1:
+            return "x5"
+        return random_register(rnd) if index == 0 else str(rnd.randrange(2**11))
     if inst_type == "PseudoLi":
         return random_register(rnd) if index == 0 else str(rnd.randrange(0, 32))
     if inst_type == "PseudoLoadAddress":
         return random_register(rnd) if index == 0 else f"test_memory + {rnd.randrange(2**11)}"
     if inst_type == "AtomicArg2":
-        return random_register(rnd)
+        return "x5" if index == 1 else random_register(rnd)
     raise ValueError(f"unsupported operand type: {inst_type}")
 
 
 def random_register(rnd: random.Random) -> str:
     while True:
         reg = rnd.randrange(32)
-        if reg not in {0, 1, 2}:
+        if reg not in {0, 1, 2, 5}:
             return f"x{reg}"
 
 
@@ -343,9 +360,10 @@ def default_header(config: ProgramConfig) -> str:
         "    .globl _start\n"
         "_start:\n"
         "    la sp, stack_top\n"
+        f"    li x1, {max(1, config.execution_guard_blocks)}\n"
         "    li x3, 0\n"
         "    li x4, 0\n"
-        "    li x5, 0\n"
+        "    la x5, test_memory\n"
         "    j label_0\n"
         "\n"
     )
@@ -354,7 +372,8 @@ def default_header(config: ProgramConfig) -> str:
 def default_footer(config: ProgramConfig) -> str:
     return (
         "surgefuzz_done:\n"
-        "    j surgefuzz_done\n"
+        "    addi x10, x0, 0\n"
+        "    .word 0x0005006b # xiangshan good trap\n"
         "\n"
         "    .section .data\n"
         "    .balign 8\n"

@@ -782,6 +782,7 @@ def program_config_from_args(args: Any) -> ProgramConfig:
         link_address=int(args.link_address, 0) if isinstance(args.link_address, str) else int(args.link_address),
         memory_bytes=args.test_memory_bytes,
         stack_bytes=args.stack_bytes,
+        execution_guard_blocks=getattr(args, "artifact_execution_guard_blocks", 12288),
     )
 
 
