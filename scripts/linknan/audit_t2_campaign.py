@@ -63,14 +63,16 @@ def load_worker_rows(root: Path, method: str) -> tuple[list[Path], list[dict[str
 def is_mutation_row(row: dict[str, str]) -> bool:
     fuzzer = str(row.get("fuzzer", "")).strip().lower()
     if fuzzer == "sfuzz":
-        return nonempty(row, "mutation_index") or nonempty(row, "semantic_operator")
+        return nonempty(row, "mutation_index")
     if fuzzer == "rfuzz":
         mutation = str(row.get("mutation", "")).strip().lower()
         return bool(mutation) and mutation != "initial-workload"
     if fuzzer == "directfuzz":
         mutation = str(row.get("mutation", "")).strip().lower()
         index = str(row.get("mutation_index", "")).strip()
-        return bool(index) or (bool(mutation) and mutation not in {"initial", "initial-workload"})
+        return (bool(index) and index.lower() not in {"seed", "initial"}) or (
+            bool(mutation) and mutation not in {"initial", "initial-workload"}
+        )
     if fuzzer == "surgefuzz":
         round_name = str(row.get("round", "")).strip().lower()
         mutation_kind = str(row.get("mutation_kind", "")).strip().lower()

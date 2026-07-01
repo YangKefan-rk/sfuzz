@@ -231,6 +231,9 @@ def row_passed(row: dict[str, str]) -> bool:
         return False
     if str(row.get("run_outcome", "")).strip() in {"good_trap", "tohost_exit"}:
         return True
+    exit_code = numeric(row.get("exit_code"))
+    if exit_code == 0:
+        return True
     return bool_text(row.get("good_trap_seen")) or bool_text(row.get("tohost_exit_seen"))
 
 
@@ -246,7 +249,7 @@ def row_core1_failed(row: dict[str, str]) -> bool:
 
 def row_is_initial_replay(method: str, row: dict[str, str]) -> bool:
     if method == "sfuzz":
-        return not str(row.get("mutation_index", "") or "").strip() and not str(row.get("semantic_operator", "") or "").strip()
+        return not str(row.get("mutation_index", "") or "").strip()
     if method == "rfuzz":
         return str(row.get("mutation", "") or "").strip().lower() == "initial-workload"
     if method == "directfuzz":
@@ -310,7 +313,7 @@ def classify_case(
         status = "partial_pass"
         missing = sorted(set(METHODS) - set(passed_methods))
         notes.append("missing_pass=" + ",".join(missing))
-    elif passed_walls and max(passed_walls) < min_wall:
+    elif passed_walls and min(passed_walls) < min_wall:
         status = "short_diagnostic"
     elif passed_walls and max(passed_walls) <= timeout_sec:
         status = "known_good"

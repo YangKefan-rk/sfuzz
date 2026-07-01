@@ -32,6 +32,7 @@ from linknan.known_good_gate import (  # noqa: E402
     load_selected_cases,
     map_row_to_case,
     row_is_initial_replay,
+    row_passed,
 )
 from linknan.build_semantic_workload_corpus import (  # noqa: E402
     build_common_rows,
@@ -843,8 +844,32 @@ class FormalRunnerBudgetTests(unittest.TestCase):
         self.assertEqual(row["status"], "known_good")
         self.assertEqual(row["methods_passed"], "directfuzz;rfuzz;sfuzz;surgefuzz")
 
+    def test_known_good_gate_rejects_if_any_method_is_short(self) -> None:
+        case = SelectedCase(
+            testcase_id="tc-short-one-method",
+            source="unit",
+            category="microbenchmark",
+            sfuzz_seed_path="/tmp/tc.sfuz",
+            input_path="/tmp/tc.bin",
+            input_format="bin",
+            file_size="4",
+        )
+        rows_by_case = {
+            "tc-short-one-method": [
+                (method, {"exit_code": "0", "timed_out": "False", "wall_time_sec": str(wall)})
+                for method, wall in zip(METHODS_FOR_GATE, [310, 320, 330, 250])
+            ]
+        }
+
+        row = classify_case(case, rows_by_case, min_wall=300, timeout_sec=900)
+
+        self.assertEqual(row["status"], "short_diagnostic")
+
+    def test_known_good_gate_accepts_zero_exit_rows(self) -> None:
+        self.assertTrue(row_passed({"exit_code": "0", "timed_out": "False", "wall_timeout": "False"}))
+
     def test_known_good_gate_initial_replay_scope_excludes_mutations(self) -> None:
-        self.assertTrue(row_is_initial_replay("sfuzz", {"mutation_index": "", "semantic_operator": ""}))
+        self.assertTrue(row_is_initial_replay("sfuzz", {"mutation_index": "", "semantic_operator": "insert_fence_rw_rw"}))
         self.assertFalse(row_is_initial_replay("sfuzz", {"mutation_index": "2", "semantic_operator": "insert_fence_rw_rw"}))
         self.assertTrue(row_is_initial_replay("rfuzz", {"mutation": "initial-workload"}))
         self.assertFalse(row_is_initial_replay("rfuzz", {"mutation": "guarded-bitflip[300:1]"}))
@@ -853,9 +878,12 @@ class FormalRunnerBudgetTests(unittest.TestCase):
 
     def test_t2_campaign_mutation_row_classifier_is_method_aware(self) -> None:
         self.assertFalse(row_is_mutation({"fuzzer": "sfuzz", "mutation_index": "", "semantic_operator": ""}))
+        self.assertFalse(row_is_mutation({"fuzzer": "sfuzz", "mutation_index": "", "semantic_operator": "insert_amo_sequence"}))
         self.assertTrue(row_is_mutation({"fuzzer": "sfuzz", "mutation_index": "1", "semantic_operator": "insert_amo_sequence"}))
         self.assertFalse(row_is_mutation({"fuzzer": "rfuzz", "mutation": "initial-workload"}))
         self.assertTrue(row_is_mutation({"fuzzer": "rfuzz", "mutation": "arith8+1[4]"}))
+        self.assertFalse(row_is_mutation({"fuzzer": "directfuzz", "mutation": "initial-workload", "mutation_index": "seed"}))
+        self.assertTrue(row_is_mutation({"fuzzer": "directfuzz", "mutation": "havoc", "mutation_index": "3"}))
         self.assertFalse(row_is_mutation({"fuzzer": "surgefuzz", "round": "bootstrap", "mutation_kind": "initial-artifact-program"}))
         self.assertTrue(row_is_mutation({"fuzzer": "surgefuzz", "round": "0", "mutation_kind": "artifact-program-mutation"}))
 

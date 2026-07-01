@@ -27,9 +27,12 @@ class T2CampaignAuditTests(unittest.TestCase):
                 }
             )
         )
+        self.assertFalse(is_mutation_row({"fuzzer": "sfuzz", "mutation_index": "", "semantic_operator": "insert_amo_sequence"}))
         self.assertTrue(is_mutation_row({"fuzzer": "sfuzz", "mutation_index": "1", "semantic_operator": "insert_amo_sequence"}))
         self.assertFalse(is_mutation_row({"fuzzer": "rfuzz", "mutation": "initial-workload", "round": "1"}))
         self.assertTrue(is_mutation_row({"fuzzer": "rfuzz", "mutation": "arith8+1[4]", "round": "2"}))
+        self.assertFalse(is_mutation_row({"fuzzer": "directfuzz", "mutation": "initial-workload", "mutation_index": "seed"}))
+        self.assertTrue(is_mutation_row({"fuzzer": "directfuzz", "mutation": "havoc", "mutation_index": "2"}))
         self.assertFalse(
             is_mutation_row(
                 {
