@@ -34,6 +34,7 @@ from linknan.t2_four_fuzzer_campaign import (  # noqa: E402
     prepare_isolated_build_dirs,
     row_uses_no_cycle_limit,
     row_is_mutation,
+    validate_prepare,
     write_seed_shards,
     write_seed_lists,
 )
@@ -368,6 +369,83 @@ class FormalRunnerBudgetTests(unittest.TestCase):
         self.assertIn("--rfuzz-rounds 1000", " ".join(commands[1]["command"]))
         self.assertIn("--require-paper-native", " ".join(commands[2]["command"]))
         self.assertIn("--require-paper-native", " ".join(commands[3]["command"]))
+
+    def test_t2_framework_smoke_allows_small_budget_without_formal_guards(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            metadata = root / "direct.csv"
+            surge_manifest = root / "surge.toml"
+            manifest = root / "manifest.csv"
+            metadata.write_text("instance_name,coverage_signal_name,width,distance\ntarget,cov,1,0\n", encoding="utf-8")
+            _write_surge_manifest(surge_manifest)
+            rows = ["testcase_id,source,category,input_path,input_format,file_size,sfuzz_seed_path,rfuzz_workload_path"]
+            for index in range(2):
+                seed = root / f"seed{index}.sfuz"
+                workload = root / f"seed{index}.bin"
+                seed.write_bytes(b"SFUZ")
+                workload.write_bytes(b"\x73\x00\x10\x00")
+                rows.append(f"tc{index},unit,ISA,{workload},bin,4,{seed},{workload}")
+            manifest.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            testcases = load_testcases(manifest, limit=2)
+            paths = CampaignPaths.create(root / "campaign")
+            sfuzz_lists, workload_lists = write_seed_shards(paths, testcases, workers=2)
+            args = SimpleNamespace(
+                config=root / "sfuzz.toml",
+                linknan_root=root / "LinkNan",
+                timeout_sec=900,
+                build_mode="auto",
+                build_chisel=False,
+                build_timeout_sec=DEFAULT_BUILD_TIMEOUT_SEC,
+                simv_args="",
+                exec_budget=40,
+                rng_seed=20260605,
+                target_min_wall_time_sec=60,
+                sfuzz_scheduler="semantic-bandit",
+                direct_metadata=metadata,
+                direct_target_instance="target",
+                surge_target_manifest=surge_manifest,
+                surge_target="t",
+                surge_initial_seed_count=1,
+                sfuzz_num_cores=2,
+                workers_per_fuzzer=2,
+                isolated_sim_dirs=True,
+                shared_simv_builds=True,
+                framework_smoke=True,
+                min_testcases=2,
+            )
+
+            validate_prepare(args, testcases)
+            commands = campaign_commands(args, paths, sfuzz_lists, workload_lists)
+
+        self.assertEqual(len(commands), 8)
+        for item in commands:
+            command_text = " ".join(item["command"])
+            self.assertIn("--timeout-sec 900", command_text)
+            self.assertIn("--no-cycle-limit", command_text)
+            self.assertNotIn("--formal-campaign-total-execs", command_text)
+            self.assertNotIn("--require-formal-feedback", command_text)
+            self.assertNotIn("--require-paper-native", command_text)
+            self.assertIn("framework-smoke", item["formal_guard"])
+        self.assertIn("--campaign-runs 20", " ".join(commands[0]["command"]))
+        self.assertIn("--rfuzz-rounds 20", " ".join(commands[1]["command"]))
+        self.assertIn("--max-execs 20", " ".join(commands[2]["command"]))
+        self.assertIn("--max-execs 20", " ".join(commands[3]["command"]))
+
+    def test_t2_formal_prepare_rejects_small_budget_without_framework_smoke(self) -> None:
+        args = SimpleNamespace(
+            min_testcases=1,
+            exec_budget=40,
+            timeout_sec=900,
+            target_min_wall_time_sec=60,
+            framework_smoke=False,
+            direct_metadata=Path("/tmp/direct.csv"),
+            surge_target_manifest=Path("/tmp/surge.toml"),
+        )
+
+        with self.assertRaisesRegex(ValueError, "exec-budget >= 1000"):
+            validate_prepare(args, [object()])
 
     def test_t2_campaign_shards_each_fuzzer_worker(self) -> None:
         import tempfile

@@ -519,6 +519,7 @@ def campaign_commands(
     linknan_env = {"NUM_CORES": str(args.sfuzz_num_cores)}
     surge_target = select_target(surge_manifest, args.surge_target)
     surge_env = {**linknan_env, **target_env(surge_target)}
+    framework_smoke = bool(getattr(args, "framework_smoke", False))
 
     def add(
         method: str,
@@ -561,7 +562,11 @@ def campaign_commands(
         add(
             "sfuzz",
             "SFUZZ.native",
-            "SFUZZ.native; semantic scheduler; short_run filtered by target_min_wall_time_sec",
+            (
+                "framework-smoke; SFUZZ.native; semantic scheduler; short_run filtered by target_min_wall_time_sec"
+                if framework_smoke
+                else "SFUZZ.native; semantic scheduler; short_run filtered by target_min_wall_time_sec"
+            ),
             [
                 "--seed-list",
                 str(sfuzz_seed_list),
@@ -582,20 +587,22 @@ def campaign_commands(
         add(
             "rfuzz",
             "RFuzz.mux-toggle",
-            "--require-formal-feedback; LinkNan workload scope; VCS native mux-toggle",
+            (
+                "framework-smoke; LinkNan workload scope; VCS native mux-toggle"
+                if framework_smoke
+                else "--require-formal-feedback; LinkNan workload scope; VCS native mux-toggle"
+            ),
             [
                 "--seed-list",
                 str(workload_seed_list),
                 "--rfuzz-rounds",
                 str(worker_budget),
-                "--formal-campaign-total-execs",
-                str(args.exec_budget),
                 "--rfuzz-random-seed",
                 str(rng_seed),
                 "--rfuzz-toggle-bitmap-source",
                 "vcs-native-abi",
-                "--require-formal-feedback",
-            ],
+            ]
+            + ([] if framework_smoke else ["--formal-campaign-total-execs", str(args.exec_budget), "--require-formal-feedback"]),
             env=linknan_env,
             worker_id=worker_id,
             seed_list=workload_seed_list,
@@ -603,7 +610,11 @@ def campaign_commands(
         add(
             "directfuzz",
             "DirectFuzz.mux-toggle",
-            "--require-paper-native; static metadata; dynamic per-instance VCS feedback",
+            (
+                "framework-smoke; static metadata; dynamic per-instance VCS feedback"
+                if framework_smoke
+                else "--require-paper-native; static metadata; dynamic per-instance VCS feedback"
+            ),
             [
                 "--seed-list",
                 str(workload_seed_list),
@@ -621,12 +632,10 @@ def campaign_commands(
                 str(worker_budget),
                 "--mutations",
                 str(worker_budget),
-                "--formal-campaign-total-execs",
-                str(args.exec_budget),
                 "--rng-seed",
                 str(rng_seed),
-                "--require-paper-native",
-            ],
+            ]
+            + ([] if framework_smoke else ["--formal-campaign-total-execs", str(args.exec_budget), "--require-paper-native"]),
             env=linknan_env,
             worker_id=worker_id,
             seed_list=workload_seed_list,
@@ -634,7 +643,11 @@ def campaign_commands(
         add(
             "surgefuzz",
             "SurgeFuzz.trace",
-            "--require-paper-native; single target; artifact Program mutation; no rotation",
+            (
+                "framework-smoke; single target; artifact Program mutation; no rotation"
+                if framework_smoke
+                else "--require-paper-native; single target; artifact Program mutation; no rotation"
+            ),
             [
                 "--input-mode",
                 "artifact-program",
@@ -642,8 +655,6 @@ def campaign_commands(
                 str(worker_budget),
                 "--mutations",
                 str(worker_budget),
-                "--formal-campaign-total-execs",
-                str(args.exec_budget),
                 "--initial-seed-count",
                 str(args.surge_initial_seed_count),
                 "--rng-seed",
@@ -654,8 +665,8 @@ def campaign_commands(
                 args.surge_target,
                 "--trace-source",
                 "vcs-native-abi",
-                "--require-paper-native",
-            ],
+            ]
+            + ([] if framework_smoke else ["--formal-campaign-total-execs", str(args.exec_budget), "--require-paper-native"]),
             env=surge_env,
             worker_id=worker_id,
         )
@@ -715,7 +726,7 @@ def write_campaign_manifest(paths: CampaignPaths, testcases: list[Testcase], com
 def validate_prepare(args: argparse.Namespace, testcases: list[Testcase]) -> None:
     if len(testcases) < args.min_testcases:
         raise ValueError(f"need at least {args.min_testcases} runnable testcases, found {len(testcases)}")
-    if args.exec_budget < 1000:
+    if not getattr(args, "framework_smoke", False) and args.exec_budget < 1000:
         raise ValueError("formal four-fuzzer campaign requires --exec-budget >= 1000")
     if args.timeout_sec < 900:
         raise ValueError("formal four-fuzzer campaign requires --timeout-sec >= 900")
@@ -1048,6 +1059,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--keep-going", action="store_true")
+    parser.add_argument(
+        "--framework-smoke",
+        action="store_true",
+        help="allow a small framework-validation campaign without formal 1000-exec paper-native guards",
+    )
     return parser.parse_args()
 
 
@@ -1092,7 +1108,7 @@ def main() -> int:
     if args.phase in {"prebuild", "all"}:
         items = prebuild_commands(commands, paths)
         print(f"[campaign] prebuilding {len(items)} shared simv backend(s)", flush=True)
-        status = run_commands(items, stop_on_failure=not args.keep_going)
+        status = run_commands_parallel(items, args.parallel_jobs, stop_on_failure=not args.keep_going)
         if status != 0:
             return status
     if args.phase in {"run", "all"}:
