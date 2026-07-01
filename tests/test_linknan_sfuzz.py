@@ -34,6 +34,8 @@ from linknan.methods.sfuzz import (  # noqa: E402
     normalize_mutation_sections,
     parse_coverage_group_snapshot,
     plan_sections_for_focus,
+    seed_has_core1_payload,
+    row_from_run,
     select_baseline_parent,
     select_parent,
     select_semantic_bandit_parent,
@@ -438,7 +440,7 @@ class SfuzzScenarioTests(unittest.TestCase):
         seed = seed_from_scenario(scenario)
 
         self.assertEqual(scenario.runtime_profile, "long")
-        self.assertGreaterEqual(scenario.stress_iterations, 60 * 4096)
+        self.assertEqual(scenario.stress_iterations, 512)
         self.assertIn("runtime_profile:long", seed.tags)
         self.assertIn("target_min_wall_time_sec:60", seed.tags)
 
@@ -458,7 +460,64 @@ class SfuzzScenarioTests(unittest.TestCase):
         ]
 
         self.assertGreaterEqual(core1_words.count(0x0330000F), 2)
-        self.assertEqual(core1_words[-1], 0x0005006B)
+        self.assertNotIn(0x0005006B, core1_words)
+        self.assertEqual(core1_words[-2], 0x10500073)
+        self.assertEqual(core1_words[-1], 0xFE000EE3)
+
+    def test_multicore_scenario_core0_waits_for_core1_done_before_good_trap(self) -> None:
+        scenario = scenario_from_operator(
+            "insert_multicore_pingpong",
+            variant=2,
+            rng=random.Random(2),
+            core1_handoff_enabled=True,
+        )
+        seed = seed_from_scenario(scenario)
+        core0_words = [
+            int.from_bytes(seed.core0_prog[index : index + 4], "little")
+            for index in range(0, len(seed.core0_prog), 4)
+        ]
+        core1_words = [
+            int.from_bytes(seed.core1_prog[index : index + 4], "little")
+            for index in range(0, len(seed.core1_prog), 4)
+        ]
+
+        self.assertIn(0xFE641EE3, core0_words)  # bne x8, x6, -4 waits for core1 done flag
+        self.assertEqual(core0_words[-1], 0x0005006B)
+        self.assertIn(0x10500073, core1_words)
+        self.assertNotIn(0x0005006B, core1_words)
+
+    def test_seed_has_core1_payload_reads_sfuz_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            single = root / "single.sfuz"
+            dual = root / "dual.sfuz"
+            write_sfuz_seed(
+                single,
+                SfuzSeed(
+                    core0_prog=b"core0",
+                    core1_prog=b"",
+                    shared_mem_init=[],
+                    interrupt_plan_raw=[],
+                    name="single",
+                    description="",
+                    tags=[],
+                ),
+            )
+            write_sfuz_seed(
+                dual,
+                SfuzSeed(
+                    core0_prog=b"core0",
+                    core1_prog=b"core1",
+                    shared_mem_init=[],
+                    interrupt_plan_raw=[],
+                    name="dual",
+                    description="",
+                    tags=[],
+                ),
+            )
+
+            self.assertFalse(seed_has_core1_payload(single))
+            self.assertTrue(seed_has_core1_payload(dual))
 
     def test_semantic_operator_selection_uses_native_group_deficit(self) -> None:
         atomic_operator = choose_semantic_operator("sfuzz_atomic", rng=random.Random(0))
@@ -541,6 +600,82 @@ class SfuzzCoverageTests(unittest.TestCase):
         self.assertEqual(requested_firrtl_groups("SFUZZ.native"), {"sfuzz_native"})
         self.assertEqual(requested_firrtl_groups("FIRRTL.SFUZZ.native"), {"sfuzz_native"})
         self.assertEqual(requested_firrtl_groups("sfuzz_atomic"), {"sfuzz_atomic"})
+
+    def test_formal_multicore_result_requires_natural_successful_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seed = root / "dual.sfuz"
+            write_sfuz_seed(
+                seed,
+                SfuzSeed(
+                    core0_prog=b"core0",
+                    core1_prog=b"core1",
+                    shared_mem_init=[],
+                    interrupt_plan_raw=[],
+                    name="dual",
+                    description="",
+                    tags=[],
+                ),
+            )
+            entry = CorpusEntry(
+                corpus_id=1,
+                path=seed,
+                seed_name="dual",
+                category="test",
+                energy=1,
+                requires_core1_handoff=True,
+                core1_handoff_enabled=True,
+            )
+            run = {
+                "coverage": CoverageResult(coverage_name="sfuzz_firrtl.sfuzz_native"),
+                "coverage_backend": "sfuzz_firrtl",
+                "comparison_tier": "T2_sfuzz_native_online",
+                "native_feedback": True,
+                "result": Namespace(wall_time_sec=600.0, returncode=-15, timed_out=True, command_log_path="cmd.log"),
+                "info": Namespace(
+                    sfuzz_core0_staged=True,
+                    sfuzz_core1_staged=True,
+                    sfuzz_core1_entry="0x81000000",
+                    sfuzz_core1_payload_size=16,
+                    sfuzz_core1_executed=True,
+                    sfuzz_core1_handoff_reason="core1_instr_count",
+                    good_trap_seen=False,
+                    bug_triggered=False,
+                    bug_reasons=[],
+                    cycles=None,
+                    vcs_cpu_time_sec=None,
+                    vcs_sim_time_ps=None,
+                    max_cycle_exceeded=False,
+                    vcs_report_seen=False,
+                    sfuz_expansion_seen=True,
+                ),
+                "t0_smoke_pass": False,
+                "run_outcome": "timeout",
+                "run_log": root / "run.log",
+                "assert_log": root / "assert.log",
+                "case_dir": root,
+                "case_name": "dual",
+                "infrastructure_error": "",
+                "command_has_cycles_arg": False,
+                "command_has_max_cycles_plusarg": False,
+            }
+
+            row = row_from_run(
+                args=Namespace(),
+                ctx=Namespace(),
+                campaign_exec=1,
+                entry=entry,
+                run=run,
+                new_bits=0,
+                group_new_bits={},
+                group_accumulated_bits={},
+                accumulated=bytearray(),
+                retained=False,
+                retention_reason="not_interesting",
+                notes="",
+            )
+
+        self.assertFalse(row["formal_multicore_result"])
 
     def test_parse_coverage_group_snapshot_reads_sfuzz_native_groups(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

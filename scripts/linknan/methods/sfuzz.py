@@ -1260,13 +1260,20 @@ def append_simv_arg(existing: str | None, extra: str) -> str:
     return f"{text} {extra}".strip() if text else extra
 
 
+def seed_has_core1_payload(seed: Path) -> bool:
+    try:
+        return bool(read_sfuz_seed(seed).core1_prog)
+    except Exception:
+        return False
+
+
 def run_one(args: Any, ctx: VcsContext, runs_dir: Path, logs_dir: Path, seed: Path, case_name: str) -> dict[str, Any]:
     extra_env = {}
     firrtl_cov = getattr(args, "firrtl_cov", None)
     if firrtl_cov:
         extra_env["SFUZZ_FIRRTL_COV"] = str(firrtl_cov)
     simv_args = args.simv_args
-    if getattr(args, "enable_core1_handoff", False):
+    if getattr(args, "enable_core1_handoff", False) and seed_has_core1_payload(seed):
         simv_args = append_simv_arg(simv_args, "+sfuzz_enable_all_cores=1")
         simv_args = append_simv_arg(simv_args, "+sfuzz_secondary_reset_vector=2164260864")
     result, case_dir, run_log, assert_log = run_vcs_seed(
@@ -1408,7 +1415,14 @@ def row_from_run(
         "requires_core1_handoff": entry.requires_core1_handoff,
         "formal_multicore_result": bool(
             not entry.requires_core1_handoff
-            or (entry.core1_handoff_enabled and run["info"].sfuzz_core1_executed)
+            or (
+                entry.core1_handoff_enabled
+                and run["info"].sfuzz_core1_executed
+                and run["info"].good_trap_seen
+                and not run["result"].timed_out
+                and not run["info"].bug_triggered
+                and not run["infrastructure_error"]
+            )
         ),
         "good_trap_seen": run["info"].good_trap_seen,
         "bug_triggered": run["info"].bug_triggered,

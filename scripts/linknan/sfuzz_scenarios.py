@@ -21,6 +21,8 @@ PMEM_BASE = 0x80000000
 DEFAULT_SHARED_BASE = PMEM_BASE + 0x4000
 DEFAULT_CACHELINE_BYTES = 64
 EXCEPTION_HANDLER_OFFSET = 0x100
+CORE1_DONE_OFFSET = 0x1F8
+LONG_STRESS_DEFAULT_ITERATIONS = 512
 
 SCENARIO_FAMILIES = (
     "memory_alias",
@@ -333,6 +335,10 @@ def ebreak(role: str = "end") -> EncodedInstruction:
     return inst("ebreak", 0x00100073, role)
 
 
+def wfi(role: str = "wait") -> EncodedInstruction:
+    return inst("wfi", 0x10500073, role)
+
+
 def xstrap_good(role: str = "end") -> EncodedInstruction:
     return inst(".word 0x0005006b # xiangshan good trap", 0x0005006B, role)
 
@@ -385,6 +391,25 @@ def _shared_region(name: str, base: int, size: int) -> SharedRegion:
 
 def _finish(seq: list[EncodedInstruction]) -> None:
     seq.extend([addi(31, 31, 1, "depth"), addi(10, 0, 0, "good_trap_code"), xstrap_good()])
+
+
+def _park_core1_after_done(seq: list[EncodedInstruction], base: int) -> None:
+    seq.extend(li_pmem_addr(5, base + CORE1_DONE_OFFSET, "core1_done_addr"))
+    seq.extend(li_small(6, 1, "core1_done_value"))
+    seq.extend(
+        [
+            sd(6, 5, 0, "core1_done_store"),
+            fence_rw_rw("core1_done_fence"),
+            wfi("core1_wfi"),
+            beq(0, 0, -4, "core1_wfi_loop"),
+        ]
+    )
+
+
+def _wait_for_core1_done(seq: list[EncodedInstruction], base: int) -> None:
+    seq.extend(li_pmem_addr(5, base + CORE1_DONE_OFFSET, "core1_done_addr"))
+    seq.extend(li_small(6, 1, "core1_done_expected"))
+    seq.extend([ld(8, 5, 0, "core1_done_load"), bne(8, 6, -4, "core1_done_wait")])
 
 
 def _append_runtime_stress_loop(seq: list[EncodedInstruction], iterations: int) -> None:
@@ -511,7 +536,7 @@ def generate_scenario(
     if runtime_profile not in {"short", "long"}:
         raise ValueError(f"unsupported SFuzz runtime profile: {runtime_profile}")
     if runtime_profile == "long" and stress_iterations <= 0:
-        stress_iterations = max(4096, target_min_wall_time_sec * 4096)
+        stress_iterations = LONG_STRESS_DEFAULT_ITERATIONS
     base = _base_for_variant(variant + rnd.randrange(16))
     alias_offset = 8 if op != "create_cross_cacheline_alias" else DEFAULT_CACHELINE_BYTES
     shared_size = 0x6000 if family == "tlb_refill_memory" else 512
@@ -550,7 +575,6 @@ def generate_scenario(
             core1.extend(li_pmem_addr(5, base))
             core1.extend(li_small(6, 9))
             core1.extend([ld(8, 5, 0), sd(6, 5, DEFAULT_CACHELINE_BYTES - 8), fence_rw_rw()])
-            _finish(core1)
             target_groups = ("sfuzz_coherence", "sfuzz_dcache", "sfuzz_lsq")
             expected = ("cross_core_probe", "probe_ack", "release_fire", "dcache_bank_conflict")
     elif family == "load_store_dependency":
@@ -583,7 +607,6 @@ def generate_scenario(
         core1.extend(li_pmem_addr(5, base))
         core1.extend(li_small(6, 3))
         core1.extend([amoadd_d(8, 5, 6), sd(6, 5, 0), fence_rw_rw()])
-        _finish(core1)
         target_groups = ("sfuzz_atomic", "sfuzz_fence", "sfuzz_lsq")
         expected = ("amo_fire", "amo_conflict", "fence_fire")
     elif family == "lrsc_success_fail":
@@ -595,7 +618,6 @@ def generate_scenario(
             core1.extend(li_pmem_addr(5, base))
             core1.extend(li_small(6, 7))
             core1.extend([sd(6, 5, 0), fence_rw_rw()])
-            _finish(core1)
         target_groups = ("sfuzz_atomic", "sfuzz_lsq")
         expected = ("lr_seen", "sc_success", "sc_fail" if requires_core1 else "local_sc_result")
     elif family == "fence_ordering":
@@ -612,7 +634,6 @@ def generate_scenario(
             core1.extend(li_pmem_addr(5, base))
             core1.extend(li_small(6, 11))
             core1.extend([sd(6, 5, 0), fence_rw_rw(), ld(8, 5, 0)])
-            _finish(core1)
         target_groups = ("sfuzz_fence", "sfuzz_lsq", "sfuzz_atomic")
         expected = ("fence_fire", "fence_wait", "fence_drain", "amo_fire" if op == "insert_fence_before_after_amo" else "load_store_forward")
     elif family == "branch_flush_memory":
@@ -653,8 +674,12 @@ def generate_scenario(
 
     applied_stress_iterations = stress_iterations if runtime_profile == "long" and not needs_exception_handler else 0
     if core1 and applied_stress_iterations:
-        _insert_runtime_stress_before_finish(core1, applied_stress_iterations * 2)
+        _append_runtime_stress_loop(core1, applied_stress_iterations)
+    if core1:
+        _park_core1_after_done(core1, base)
     _append_runtime_stress_loop(core0, applied_stress_iterations)
+    if requires_core1:
+        _wait_for_core1_done(core0, base)
     _finish(core0)
     if needs_exception_handler:
         _append_exception_handler(core0)
