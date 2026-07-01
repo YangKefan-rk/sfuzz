@@ -317,6 +317,23 @@ def generated_firrtl_metadata_matches(build_dir: Path, firrtl_cov: str) -> bool:
             return False
         if group in {"common", "all"} and count < EXPECTED_EXPANDED_COMMON_POINTS:
             return False
+    if "directfuzz_mux_toggle" in requested:
+        direct = metadata.get("directfuzz")
+        if not isinstance(direct, dict):
+            return False
+        metadata_path = os.environ.get("SFUZZ_DIRECTFUZZ_METADATA", "")
+        if metadata_path:
+            config_path = Path(metadata_path).expanduser()
+            if not config_path.is_file():
+                return False
+            if str(direct.get("metadata_sha256", "")) != sha256_file(config_path):
+                return False
+        target_instance = os.environ.get("SFUZZ_DIRECTFUZZ_TARGET_INSTANCE", "")
+        if target_instance and str(direct.get("target_instance", "")) != target_instance:
+            return False
+        max_distance = os.environ.get("SFUZZ_DIRECTFUZZ_MAX_DISTANCE", "")
+        if max_distance and str(direct.get("max_distance", "")) != max_distance:
+            return False
     if "surgefuzz_trace" in requested:
         surge = metadata.get("surgefuzz")
         if not isinstance(surge, dict):

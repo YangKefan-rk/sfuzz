@@ -104,6 +104,11 @@ def _assert_campaign_env(testcase: unittest.TestCase, item: dict[str, object]) -
         testcase.assertEqual(env_dict["SFUZZ_SURGEFUZZ_TARGET"], "io_unit_target")
         testcase.assertEqual(env_dict["SFUZZ_SURGEFUZZ_ANCESTOR_SELECTOR"], "distance-nmi")
         testcase.assertEqual(env_dict["SFUZZ_SURGEFUZZ_MAX_ANCESTOR_WIDTH"], "64")
+    elif item["method"] == "directfuzz":
+        testcase.assertEqual(env_dict["NUM_CORES"], "2")
+        testcase.assertIn("SFUZZ_DIRECTFUZZ_METADATA", env_dict)
+        testcase.assertEqual(env_dict["SFUZZ_DIRECTFUZZ_TARGET_INSTANCE"], "target")
+        testcase.assertEqual(env_dict["SFUZZ_DIRECTFUZZ_MAX_DISTANCE"], "1")
     else:
         testcase.assertEqual(env_dict, {"NUM_CORES": "2"})
 

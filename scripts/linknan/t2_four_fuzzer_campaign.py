@@ -565,7 +565,14 @@ def campaign_commands(
     worker_count = max(1, int(getattr(args, "workers_per_fuzzer", 1) or 1))
     worker_count = min(worker_count, max(len(sfuzz_shards), len(workload_shards)))
     worker_budget = per_worker_budget(args.exec_budget, worker_count)
+    direct_max_distance = int(getattr(args, "direct_max_distance", 1))
     linknan_env = {"NUM_CORES": str(args.sfuzz_num_cores)}
+    direct_env = {
+        **linknan_env,
+        "SFUZZ_DIRECTFUZZ_METADATA": str(direct_metadata),
+        "SFUZZ_DIRECTFUZZ_TARGET_INSTANCE": args.direct_target_instance,
+        "SFUZZ_DIRECTFUZZ_MAX_DISTANCE": str(direct_max_distance),
+    }
     surge_target = select_target(surge_manifest, args.surge_target)
     surge_env = {**linknan_env, **target_env(surge_target)}
     framework_smoke = bool(getattr(args, "framework_smoke", False))
@@ -685,7 +692,7 @@ def campaign_commands(
                 str(rng_seed),
             ]
             + ([] if framework_smoke else ["--formal-campaign-total-execs", str(args.exec_budget), "--require-paper-native"]),
-            env=linknan_env,
+            env=direct_env,
             worker_id=worker_id,
             seed_list=workload_seed_list,
         )
@@ -773,6 +780,7 @@ def write_campaign_manifest(paths: CampaignPaths, testcases: list[Testcase], com
         "build_timeout_sec": args.build_timeout_sec,
         "timeout_quarantine": [str(path) for path in getattr(args, "timeout_quarantine", [])],
         "surge_artifact_execution_guard_blocks": getattr(args, "surge_artifact_execution_guard_blocks", 12288),
+        "direct_max_distance": getattr(args, "direct_max_distance", 1),
         "sfuzz_num_cores": args.sfuzz_num_cores,
         "workers_per_fuzzer": args.workers_per_fuzzer,
         "parallel_jobs": args.parallel_jobs,
@@ -1219,6 +1227,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--direct-metadata", type=Path, default=SFUZZ_HOME / "work" / "directfuzz-native" / "static_metadata_per_instance_full.csv")
     parser.add_argument("--surge-target-manifest", type=Path, default=SFUZZ_HOME / "config" / "surgefuzz_targets.toml")
     parser.add_argument("--direct-target-instance", default=DEFAULT_DIRECT_TARGET)
+    parser.add_argument(
+        "--direct-max-distance",
+        type=int,
+        default=1,
+        help="maximum static DirectFuzz distance to instrument dynamically; negative keeps full-design per-instance probes",
+    )
     parser.add_argument("--surge-target", default="memblock_load_miss")
     parser.add_argument("--limit", type=int, default=120, help="maximum testcase count selected from manifest")
     parser.add_argument("--min-testcases", type=int, default=100)
