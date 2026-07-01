@@ -204,6 +204,17 @@ class ScenarioIR:
             for block in core1_blocks:
                 lines.append(f"{block.label}:")
                 lines.extend(f"    .word 0x{inst.word:08x} # {inst.asm}" for inst in block.instructions)
+        lines.extend(
+            [
+                "",
+                '    .section .sfuzz_mutable,"aw",@progbits',
+                "    .balign 8",
+                "sfuzz_mutable_start:",
+            ]
+        )
+        for index in range(16):
+            value = 0x5F00000000000000 | ((index & 0xFF) << 8) | (len(self.scenario_id) & 0xFF)
+            lines.append(f"    .quad 0x{value:016x}")
         return "\n".join(lines) + "\n"
 
     def metadata(self) -> dict[str, object]:

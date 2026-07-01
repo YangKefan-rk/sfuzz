@@ -60,6 +60,7 @@ from linknan.t2_four_fuzzer_campaign import (  # noqa: E402
 from linknan.workload_mutation import (  # noqa: E402
     ENTRY_GUARD_BYTES,
     EXIT_GUARD_BYTES,
+    elf_mutable_ranges,
     elf_load_segments,
     mutate_linknan_workload,
 )
@@ -294,15 +295,92 @@ class WorkloadMutationTests(unittest.TestCase):
             data[0x100 + i] = i & 0xFF
         return bytes(data)
 
+    def _semantic_loop_elf64(self) -> bytes:
+        data = bytearray(0x180)
+        data[:4] = b"\x7fELF"
+        data[4] = 2
+        data[5] = 1
+        struct.pack_into("<H", data, 0x10, 2)
+        struct.pack_into("<H", data, 0x12, 0xF3)
+        struct.pack_into("<I", data, 0x14, 1)
+        struct.pack_into("<Q", data, 0x18, 0x80000000)
+        struct.pack_into("<Q", data, 0x20, 0x40)
+        struct.pack_into("<H", data, 0x34, 64)
+        struct.pack_into("<H", data, 0x36, 56)
+        struct.pack_into("<H", data, 0x38, 1)
+        struct.pack_into("<I", data, 0x40, 1)  # PT_LOAD
+        struct.pack_into("<I", data, 0x44, 5)
+        struct.pack_into("<Q", data, 0x48, 0x100)
+        struct.pack_into("<Q", data, 0x50, 0x80000000)
+        struct.pack_into("<Q", data, 0x58, 0x80000000)
+        struct.pack_into("<Q", data, 0x60, 0x58)
+        struct.pack_into("<Q", data, 0x68, 0x58)
+        struct.pack_into("<Q", data, 0x70, 0x1000)
+        words = [
+            0x100002B7,
+            0x00329293,
+            0x00008F37,
+            0x000F0F13,
+            0x01E282B3,
+            0x00100313,
+            0x00200393,
+            0x0062B023,
+            0x0002B403,
+            0x0072B423,
+            0x0082B483,
+            0x00002E37,
+            0x000E0E13,
+            0x0002BE83,
+            0x001E8E93,
+            0x01D2B023,
+            0x0330000F,
+            0xFFFE0E13,
+            0xFE0E16E3,
+            0x001F8F93,
+            0x00000513,
+            0x0005006B,
+        ]
+        for index, word in enumerate(words):
+            struct.pack_into("<I", data, 0x100 + index * 4, word)
+        return bytes(data)
+
     def test_linknan_workload_mutation_preserves_elf_load_headers(self) -> None:
         parent = self._minimal_elf64()
         child, mutation, model = mutate_linknan_workload(parent, random.Random(7), 32)
 
         self.assertEqual(child[:0x100], parent[:0x100])
         self.assertEqual(elf_load_segments(child), elf_load_segments(parent))
-        self.assertNotEqual(child[0x100:0x140], parent[0x100:0x140])
-        self.assertIn("elf-load", mutation)
-        self.assertEqual(model, "elf-workload-load-segment")
+        self.assertEqual(child, parent)
+        self.assertEqual(mutation, "elf-preserve-no-mutable-section-replay")
+        self.assertEqual(model, "elf-workload-replay")
+
+    def test_linknan_workload_mutation_rewrites_safe_semantic_offsets(self) -> None:
+        parent = self._semantic_loop_elf64()
+        child, mutation, model = mutate_linknan_workload(parent, random.Random(7), 4)
+
+        self.assertEqual(child[:0x100], parent[:0x100])
+        self.assertEqual(elf_load_segments(child), elf_load_segments(parent))
+        self.assertEqual(child[0x100:0x114], parent[0x100:0x114])
+        self.assertEqual(child[0x12C:], parent[0x12C:])
+        self.assertNotEqual(child[0x114:0x12C], parent[0x114:0x12C])
+        self.assertIn("elf-instruction-preserving", mutation)
+        self.assertEqual(model, "elf-workload-instruction-preserving")
+
+    def test_semantic_workload_assembly_exposes_mutable_data_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            from linknan.sfuzz_scenarios import scenario_from_operator  # noqa: PLC0415
+
+            scenario = scenario_from_operator("insert_load_store_pair", runtime_profile="long", stress_iterations=1)
+            asm = root / "seed.S"
+            elf = root / "seed.elf"
+            binary = root / "seed.bin"
+            asm.write_text(scenario.assembly(), encoding="utf-8")
+
+            compile_assembly(asm, output_elf=elf, output_bin=binary)
+
+            ranges = elf_mutable_ranges(elf.read_bytes())
+            self.assertTrue(any(item.name == ".sfuzz_mutable" and item.size >= 128 for item in ranges))
 
     def test_directfuzz_file_mutation_preserves_elf_loader_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -315,8 +393,8 @@ class WorkloadMutationTests(unittest.TestCase):
 
             self.assertTrue(child.is_file())
             self.assertEqual(elf_load_segments(child.read_bytes()), elf_load_segments(parent.read_bytes()))
-            self.assertIn("elf-load", mutation)
-            self.assertEqual(model, "elf-workload-load-segment")
+            self.assertEqual(mutation, "elf-preserve-no-mutable-section-replay")
+            self.assertEqual(model, "elf-workload-replay")
 
     def test_raw_workload_mutation_preserves_exit_tail(self) -> None:
         parent = bytes((idx % 251 for idx in range(4096)))
