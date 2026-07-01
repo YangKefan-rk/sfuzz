@@ -31,6 +31,10 @@ from linknan.known_good_gate import (  # noqa: E402
     map_row_to_case,
     row_is_initial_replay,
 )
+from linknan.build_semantic_workload_corpus import (  # noqa: E402
+    build_common_rows,
+    write_manifest as write_semantic_manifest,
+)
 from linknan.t2_four_fuzzer_campaign import (  # noqa: E402
     CampaignPaths,
     DEFAULT_BUILD_TIMEOUT_SEC,
@@ -695,6 +699,39 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             testcases = load_testcases(manifest, limit=10, quarantine=quarantine)
 
         self.assertEqual([case.testcase_id for case in testcases], ["tc-ok"])
+
+    def test_semantic_workload_manifest_is_usable_by_t2_campaign(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "semantic-corpus"
+            args = SimpleNamespace(
+                output_dir=corpus,
+                limit=2,
+                variants_per_scenario=1,
+                variant_base=0,
+                rng_seed=7,
+                target_min_wall_time_sec=300,
+                stress_iterations=64,
+                input_format="bin",
+                riscv_gcc="",
+                objcopy="",
+            )
+
+            rows = build_common_rows(args)
+            manifest = corpus / "semantic_workload_manifest.csv"
+            write_semantic_manifest(manifest, rows)
+            testcases = load_testcases(manifest, limit=10)
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(len(testcases), 2)
+            for row in rows:
+                self.assertEqual(row["source"], "sfuzz-semantic-scenario")
+                self.assertEqual(row["applicable_fuzzers"], "sfuzz,rfuzz,directfuzz,surgefuzz")
+                self.assertTrue(Path(row["sfuzz_seed_path"]).is_file())
+                self.assertTrue(Path(row["rfuzz_workload_path"]).is_file())
+                self.assertEqual(row["rfuzz_workload_path"], row["directfuzz_workload_path"])
+                self.assertEqual(row["rfuzz_workload_path"], row["surgefuzz_workload_path"])
+                self.assertIn("scenario_family=", row["notes"])
+                self.assertIn("stress_iterations=", row["notes"])
 
     def test_known_good_gate_maps_rfuzz_initial_rows_by_worker_seed_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
