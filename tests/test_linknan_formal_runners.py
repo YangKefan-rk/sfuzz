@@ -35,6 +35,7 @@ from linknan.t2_four_fuzzer_campaign import (  # noqa: E402
     prepare_isolated_build_dirs,
     row_uses_no_cycle_limit,
     row_is_mutation,
+    summarize_csv,
     validate_prepare,
     write_seed_shards,
     write_seed_lists,
@@ -749,6 +750,32 @@ class FormalRunnerBudgetTests(unittest.TestCase):
 
         self.assertEqual([row["worker_id"] for row in rows], ["000", "001"])
         self.assertEqual([row["accumulated_covered_bits"] for row in rows], ["3", "5"])
+
+    def test_t2_summary_separates_primary_and_aux_coverage(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "direct.csv"
+            csv_path.write_text(
+                "fuzzer,mutation_index,paper_faithful,timed_out,no_max_cycle_limit,"
+                "target_instance,accumulated_target_covered_bits,target_total_bits,"
+                "common_coverage_value\n"
+                "directfuzz,0,True,False,True,SimTop.target,4,16,25.0\n"
+                "directfuzz,1,True,False,True,SimTop.target,8,16,50.0\n",
+                encoding="utf-8",
+            )
+
+            row = summarize_csv("directfuzz", csv_path)
+
+        self.assertEqual(row["primary_feedback_name"], "DirectFuzz.SimTop.target.mux-toggle")
+        self.assertEqual(row["primary_final_value"], 8)
+        self.assertEqual(row["primary_final_total"], 16)
+        self.assertEqual(row["primary_final_percent"], 50.0)
+        self.assertEqual(row["primary_auc_value"], 37.5)
+        self.assertEqual(row["primary_auc_unit"], "percent")
+        self.assertEqual(row["aux_final_value"], 50)
+        self.assertEqual(row["aux_final_total"], 100)
+        self.assertEqual(row["aux_auc_percent"], 37.5)
 
     def test_prepare_isolated_build_dirs_copies_rtl_per_worker(self) -> None:
         import tempfile

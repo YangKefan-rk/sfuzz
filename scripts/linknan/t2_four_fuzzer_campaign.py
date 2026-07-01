@@ -47,6 +47,17 @@ SUMMARY_FIELDS = [
     "bug_rows",
     "no_cycle_limit_rows",
     "command_cycle_violations",
+    "primary_feedback_name",
+    "primary_final_value",
+    "primary_final_total",
+    "primary_final_percent",
+    "primary_auc_value",
+    "primary_auc_unit",
+    "aux_coverage_name",
+    "aux_final_value",
+    "aux_final_total",
+    "aux_final_percent",
+    "aux_auc_percent",
     "final_covered",
     "final_total",
     "final_percent",
@@ -887,22 +898,88 @@ def numeric(value: Any) -> float | None:
         return None
 
 
-def coverage_pair(row: dict[str, str]) -> tuple[float | None, float | None]:
-    candidates = [
-        ("accumulated_covered_bits", "common_coverage_total"),
-        ("total_covered", "rfuzz_mux_total"),
-        ("accumulated_covered_bits", "total"),
-        ("global_ancestor_coverage", "coverage_total"),
-    ]
+def format_metric(value: float | None) -> int | float | str:
+    if value is None:
+        return ""
+    return int(value) if float(value).is_integer() else value
+
+
+def ratio_percent(value: float | None, total: float | None) -> float | str:
+    if value is None or not total:
+        return ""
+    return round(100.0 * value / total, 6)
+
+
+def first_numeric_pair(row: dict[str, str], candidates: list[tuple[str, str]]) -> tuple[float | None, float | None]:
     for covered_key, total_key in candidates:
         covered = numeric(row.get(covered_key))
         total = numeric(row.get(total_key))
         if covered is not None and total and total > 0:
             return covered, total
+    return None, None
+
+
+def primary_feedback_name(method: str, row: dict[str, str]) -> str:
+    if method == "sfuzz":
+        return row.get("common_coverage_name") or "SFUZZ.native"
+    if method == "rfuzz":
+        return "RFuzz.mux-toggle"
+    if method == "directfuzz":
+        target = row.get("target_instance") or "target-instance"
+        return f"DirectFuzz.{target}.mux-toggle"
+    if method == "surgefuzz":
+        target = row.get("active_target_id") or row.get("surgefuzz_target_id") or "target"
+        return f"SurgeFuzz.{target}.ancestor-states"
+    return row.get("coverage_backend") or method
+
+
+def primary_feedback_pair(method: str, row: dict[str, str]) -> tuple[float | None, float | None]:
+    if method == "sfuzz":
+        return first_numeric_pair(row, [("accumulated_covered_bits", "common_coverage_total")])
+    if method == "rfuzz":
+        return first_numeric_pair(row, [("total_covered", "rfuzz_mux_total"), ("covered", "total")])
+    if method == "directfuzz":
+        return numeric(row.get("accumulated_target_covered_bits")), numeric(row.get("target_total_bits"))
+    if method == "surgefuzz":
+        value = numeric(row.get("global_ancestor_coverage"))
+        total = numeric(row.get("coverage_total"))
+        return value, total
+    return first_numeric_pair(row, [("accumulated_covered_bits", "common_coverage_total")])
+
+
+def aux_coverage_name(row: dict[str, str]) -> str:
+    return row.get("common_coverage_name") or row.get("coverage_backend") or ""
+
+
+def aux_coverage_pair(row: dict[str, str]) -> tuple[float | None, float | None]:
+    covered, total = first_numeric_pair(
+        row,
+        [
+            ("common_coverage_covered", "common_coverage_total"),
+            ("coverage_covered", "coverage_total"),
+        ],
+    )
+    if covered is not None:
+        return covered, total
     value = numeric(row.get("common_coverage_value") or row.get("coverage_value"))
     if value is not None:
         return value, 100.0
     return None, None
+
+
+def legacy_coverage_pair(row: dict[str, str]) -> tuple[float | None, float | None]:
+    covered, total = aux_coverage_pair(row)
+    if covered is not None:
+        return covered, total
+    return first_numeric_pair(
+        row,
+        [
+            ("accumulated_covered_bits", "common_coverage_total"),
+            ("total_covered", "rfuzz_mux_total"),
+            ("accumulated_covered_bits", "total"),
+            ("global_ancestor_coverage", "coverage_total"),
+        ],
+    )
 
 
 def row_is_mutation(row: dict[str, str]) -> bool:
@@ -952,6 +1029,23 @@ def row_uses_no_cycle_limit(row: dict[str, str]) -> bool:
 
 
 def summarize_csv(method: str, csv_path: Path) -> dict[str, Any]:
+    empty_feedback = {
+        "primary_feedback_name": "",
+        "primary_final_value": "",
+        "primary_final_total": "",
+        "primary_final_percent": "",
+        "primary_auc_value": "",
+        "primary_auc_unit": "",
+        "aux_coverage_name": "",
+        "aux_final_value": "",
+        "aux_final_total": "",
+        "aux_final_percent": "",
+        "aux_auc_percent": "",
+        "final_covered": "",
+        "final_total": "",
+        "final_percent": "",
+        "auc_exec_percent": "",
+    }
     if not csv_path.is_file():
         return {
             "method": method,
@@ -964,25 +1058,37 @@ def summarize_csv(method: str, csv_path: Path) -> dict[str, Any]:
             "bug_rows": 0,
             "no_cycle_limit_rows": 0,
             "command_cycle_violations": 0,
-            "final_covered": "",
-            "final_total": "",
-            "final_percent": "",
-            "auc_exec_percent": "",
+            **empty_feedback,
             "notes": "missing result CSV",
         }
     with csv_path.open(newline="", encoding="utf-8") as input_file:
         rows = list(csv.DictReader(input_file))
-    coverage_percent: list[float] = []
-    final_covered: float | None = None
-    final_total: float | None = None
+    primary_series: list[float] = []
+    primary_has_denominator = True
+    primary_final: float | None = None
+    primary_total: float | None = None
+    aux_series: list[float] = []
+    aux_final: float | None = None
+    aux_total: float | None = None
     for row in rows:
-        covered, total = coverage_pair(row)
-        if covered is None or not total:
-            continue
-        final_covered, final_total = covered, total
-        coverage_percent.append(100.0 * covered / total)
-    auc = sum(coverage_percent) / len(coverage_percent) if coverage_percent else ""
-    final_percent = 100.0 * final_covered / final_total if final_covered is not None and final_total else ""
+        primary_value, primary_denominator = primary_feedback_pair(method, row)
+        if primary_value is not None:
+            primary_final, primary_total = primary_value, primary_denominator
+            if primary_denominator:
+                primary_series.append(100.0 * primary_value / primary_denominator)
+            else:
+                primary_has_denominator = False
+                primary_series.append(primary_value)
+        aux_value, aux_denominator = aux_coverage_pair(row)
+        if aux_value is not None:
+            aux_final, aux_total = aux_value, aux_denominator
+            if aux_denominator:
+                aux_series.append(100.0 * aux_value / aux_denominator)
+    primary_auc = sum(primary_series) / len(primary_series) if primary_series else ""
+    aux_auc = sum(aux_series) / len(aux_series) if aux_series else ""
+    feedback_name = primary_feedback_name(method, rows[-1]) if rows else ""
+    aux_name = aux_coverage_name(rows[-1]) if rows else ""
+    primary_unit = "percent" if primary_series and primary_has_denominator and primary_total else "value"
     mutation_rows = sum(1 for row in rows if row_is_mutation(row))
     bug_rows = sum(
         1
@@ -1001,10 +1107,21 @@ def summarize_csv(method: str, csv_path: Path) -> dict[str, Any]:
         "bug_rows": bug_rows,
         "no_cycle_limit_rows": sum(1 for row in rows if row_uses_no_cycle_limit(row)),
         "command_cycle_violations": sum(1 for row in rows if command_log_cycle_violation(row)),
-        "final_covered": int(final_covered) if final_covered is not None and float(final_covered).is_integer() else final_covered or "",
-        "final_total": int(final_total) if final_total is not None and float(final_total).is_integer() else final_total or "",
-        "final_percent": round(final_percent, 6) if final_percent != "" else "",
-        "auc_exec_percent": round(auc, 6) if auc != "" else "",
+        "primary_feedback_name": feedback_name,
+        "primary_final_value": format_metric(primary_final),
+        "primary_final_total": format_metric(primary_total),
+        "primary_final_percent": ratio_percent(primary_final, primary_total),
+        "primary_auc_value": round(primary_auc, 6) if primary_auc != "" else "",
+        "primary_auc_unit": primary_unit if primary_series else "",
+        "aux_coverage_name": aux_name,
+        "aux_final_value": format_metric(aux_final),
+        "aux_final_total": format_metric(aux_total),
+        "aux_final_percent": ratio_percent(aux_final, aux_total),
+        "aux_auc_percent": round(aux_auc, 6) if aux_auc != "" else "",
+        "final_covered": format_metric(primary_final),
+        "final_total": format_metric(primary_total),
+        "final_percent": ratio_percent(primary_final, primary_total),
+        "auc_exec_percent": round(primary_auc, 6) if primary_auc != "" and primary_unit == "percent" else "",
         "notes": "",
     }
 
@@ -1023,13 +1140,31 @@ def aggregate(paths: CampaignPaths) -> Path:
     output_csv = paths.results / "aggregate_summary.csv"
     write_table(rows, output_json, output_csv, SUMMARY_FIELDS, {"campaign_root": str(paths.root)})
     report = paths.reports / "t2_four_fuzzer_summary.md"
-    lines = ["# T2 四工具长运行对比摘要", "", f"campaign: `{paths.root}`", "", "| method | rows | mutation rows | final coverage | AUC | notes |", "|---|---:|---:|---:|---:|---|"]
+    lines = [
+        "# T2 四工具长运行对比摘要",
+        "",
+        f"campaign: `{paths.root}`",
+        "",
+        "| method | rows | mutation rows | primary feedback | primary final | primary AUC | aux final | aux AUC | notes |",
+        "|---|---:|---:|---|---:|---:|---:|---:|---|",
+    ]
     for row in rows:
-        final = ""
-        if row["final_covered"] != "" and row["final_total"] != "":
-            final = f"{row['final_covered']} / {row['final_total']} ({row['final_percent']}%)"
+        primary_final = ""
+        if row["primary_final_value"] != "":
+            primary_final = str(row["primary_final_value"])
+            if row["primary_final_total"] != "":
+                primary_final = f"{row['primary_final_value']} / {row['primary_final_total']} ({row['primary_final_percent']}%)"
+        aux_final = ""
+        if row["aux_final_value"] != "":
+            aux_final = str(row["aux_final_value"])
+            if row["aux_final_total"] != "":
+                aux_final = f"{row['aux_final_value']} / {row['aux_final_total']} ({row['aux_final_percent']}%)"
+        primary_auc = ""
+        if row["primary_auc_value"] != "":
+            primary_auc = f"{row['primary_auc_value']} {row['primary_auc_unit']}".strip()
         lines.append(
-            f"| {row['method']} | {row['rows']} | {row['mutation_rows']} | {final} | {row['auc_exec_percent']} | {row['notes']} |"
+            f"| {row['method']} | {row['rows']} | {row['mutation_rows']} | {row['primary_feedback_name']} | "
+            f"{primary_final} | {primary_auc} | {aux_final} | {row['aux_auc_percent']} | {row['notes']} |"
         )
     lines.append("")
     lines.append("正式结论需要逐项检查 command_cycle_violations=0、rows>=1000、mutation_ratio>=0.8。")

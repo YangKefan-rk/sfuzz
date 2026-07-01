@@ -66,9 +66,11 @@ DIRECTFUZZ_FIELDS = [
     "native_coverage_source",
     "native_coverage_path",
     "target_covered_bits",
+    "target_total_bits",
     "target_new_bits",
     "new_coverage_bits",
     "accumulated_covered_bits",
+    "total_coverage_bits",
     "accumulated_target_covered_bits",
     "distance",
     "energy",
@@ -373,9 +375,11 @@ class DirectCoverageState:
         if coverage is None:
             return {
                 "target_covered_bits": "",
+                "target_total_bits": self.target_total_bits(),
                 "target_new_bits": "",
                 "new_coverage_bits": "",
                 "accumulated_covered_bits": self.accumulated_covered_bits(),
+                "total_coverage_bits": self.total_coverage_bits(),
                 "accumulated_target_covered_bits": self.accumulated_target_covered_bits(),
                 "distance": "",
                 "energy": "",
@@ -427,9 +431,11 @@ class DirectCoverageState:
             energy = max_energy - (max_energy - min_energy) * min(max(distance / max_distance, 0.0), 1.0)
         return {
             "target_covered_bits": target_bits,
+            "target_total_bits": self.target_total_bits(),
             "target_new_bits": target_new_bits,
             "new_coverage_bits": new_coverage_bits,
             "accumulated_covered_bits": self.accumulated_covered_bits(),
+            "total_coverage_bits": self.total_coverage_bits(),
             "accumulated_target_covered_bits": self.accumulated_target_covered_bits(),
             "distance": "" if distance is None else round(distance, 6),
             "energy": round(energy, 6),
@@ -439,6 +445,12 @@ class DirectCoverageState:
 
     def accumulated_covered_bits(self) -> int:
         return sum(count_bits_with_width(bytes(data), meta.width) for meta, data in zip(self.metadata, self.accumulated))
+
+    def total_coverage_bits(self) -> int:
+        return sum(meta.width for meta in self.metadata)
+
+    def target_total_bits(self) -> int:
+        return sum(meta.width for meta in self.metadata if meta.is_target)
 
     def accumulated_target_covered_bits(self) -> int:
         return sum(
