@@ -22,6 +22,15 @@ from linknan.methods.directfuzz import (  # noqa: E402
     run_directfuzz,
 )
 from linknan.methods.surgefuzz import surgefuzz_mutation_limit  # noqa: E402
+from linknan.known_good_gate import (  # noqa: E402
+    METHODS as METHODS_FOR_GATE,
+    SelectedCase,
+    classify_case,
+    index_by_basename,
+    load_selected_cases,
+    map_row_to_case,
+    row_is_initial_replay,
+)
 from linknan.t2_four_fuzzer_campaign import (  # noqa: E402
     CampaignPaths,
     DEFAULT_BUILD_TIMEOUT_SEC,
@@ -686,6 +695,70 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             testcases = load_testcases(manifest, limit=10, quarantine=quarantine)
 
         self.assertEqual([case.testcase_id for case in testcases], ["tc-ok"])
+
+    def test_known_good_gate_maps_rfuzz_initial_rows_by_worker_seed_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            campaign = root / "campaign"
+            seed_lists = campaign / "inputs" / "seed_lists"
+            manifests = campaign / "manifests"
+            seed_lists.mkdir(parents=True)
+            manifests.mkdir(parents=True)
+            seed = root / "seed.sfuz"
+            workload = root / "rv64ui-p-add"
+            seed.write_bytes(b"SFUZ")
+            workload.write_bytes(b"ELF")
+            manifests.joinpath("selected_testcases.csv").write_text(
+                "testcase_id,source,category,sfuzz_seed,workload,input_format,file_size\n"
+                f"tc0,unit,ISA,{seed},{workload},elf,3\n",
+                encoding="utf-8",
+            )
+            seed_lists.joinpath("workload_seed_list.worker-000.txt").write_text(str(workload) + "\n", encoding="utf-8")
+
+            cases = load_selected_cases(campaign)
+            by_key = index_by_basename(cases)
+            row = {
+                "worker_id": "000",
+                "round": "1",
+                "mutation": "initial-workload",
+                "input_path": str(campaign / "results" / "rfuzz" / "work" / "inputs" / "rfuzz-smoke-0001-deadbeef.elf"),
+            }
+
+            mapped = map_row_to_case(campaign, row, "rfuzz", cases, by_key)
+
+        self.assertIsNotNone(mapped)
+        assert mapped is not None
+        self.assertEqual(mapped.testcase_id, "tc0")
+
+    def test_known_good_gate_classifies_long_four_method_pass(self) -> None:
+        case = SelectedCase(
+            testcase_id="tc-long",
+            source="unit",
+            category="microbenchmark",
+            sfuzz_seed_path="/tmp/tc.sfuz",
+            input_path="/tmp/tc.bin",
+            input_format="bin",
+            file_size="4",
+        )
+        rows_by_case = {
+            "tc-long": [
+                (method, {"tohost_exit_seen": "True", "timed_out": "False", "wall_time_sec": str(wall)})
+                for method, wall in zip(METHODS_FOR_GATE, [310, 320, 330, 340])
+            ]
+        }
+
+        row = classify_case(case, rows_by_case, min_wall=300, timeout_sec=900)
+
+        self.assertEqual(row["status"], "known_good")
+        self.assertEqual(row["methods_passed"], "directfuzz;rfuzz;sfuzz;surgefuzz")
+
+    def test_known_good_gate_initial_replay_scope_excludes_mutations(self) -> None:
+        self.assertTrue(row_is_initial_replay("sfuzz", {"mutation_index": "", "semantic_operator": ""}))
+        self.assertFalse(row_is_initial_replay("sfuzz", {"mutation_index": "2", "semantic_operator": "insert_fence_rw_rw"}))
+        self.assertTrue(row_is_initial_replay("rfuzz", {"mutation": "initial-workload"}))
+        self.assertFalse(row_is_initial_replay("rfuzz", {"mutation": "guarded-bitflip[300:1]"}))
+        self.assertTrue(row_is_initial_replay("surgefuzz", {"round": "bootstrap"}))
+        self.assertFalse(row_is_initial_replay("surgefuzz", {"round": "0", "mutation_kind": "workload"}))
 
     def test_t2_campaign_mutation_row_classifier_is_method_aware(self) -> None:
         self.assertFalse(row_is_mutation({"fuzzer": "sfuzz", "mutation_index": "", "semantic_operator": ""}))
