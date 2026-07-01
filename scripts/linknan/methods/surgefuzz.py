@@ -26,10 +26,12 @@ from ..vcs import (
     common_coverage_backend,
     design_bug,
     design_bug_reasons,
+    resolve_tohost_addr,
     run_vcs_seed,
     scan_vcs_logs,
     wall_timeout,
 )
+from ..workload_mutation import ELF_MAGIC, mutate_linknan_workload
 
 
 REQUIRED_SURGE_NATIVE_ABI = "surgefuzz_per_cycle_score_and_ancestor_coverage"
@@ -90,6 +92,8 @@ SURGEFUZZ_FIELDS = [
     "vcs_report_seen",
     "sfuz_expansion_seen",
     "good_trap_seen",
+    "tohost_exit_seen",
+    "tohost_exit_code",
     "bug_triggered",
     "bug_reasons",
     "vcs_cpu_time_sec",
@@ -544,17 +548,18 @@ def extract_sfuz_core0(path: Path) -> bytes:
 
 
 def load_workload_seed(path: Path) -> WorkloadSeed:
+    data = path.read_bytes()
     with path.open("rb") as input_file:
         magic = input_file.read(4)
     suffix = path.suffix.lower()
     if suffix == ".elf" or magic == b"\x7fELF":
-        return WorkloadSeed(path, "linknan-workload-elf", flatten_elf_load_segments(path), "ELF PT_LOAD payload")
+        return WorkloadSeed(path, "linknan-workload-elf", data, "ELF container; mutation preserves ELF metadata")
     if magic == b"SFUZ":
         raise ValueError(
             f"{path}: SurgeFuzz LinkNan campaign expects normal workload .bin/.elf input; "
             ".sfuz is an SFuzz/LinkNan structured seed container and must not be replayed as the SurgeFuzz input"
         )
-    return WorkloadSeed(path, "linknan-workload-bin", path.read_bytes(), "raw workload bytes")
+    return WorkloadSeed(path, "linknan-workload-bin", data, "raw workload bytes")
 
 
 def collect_workloads(args: Any, work_dir: Path) -> list[Path]:
@@ -848,6 +853,13 @@ def mutate_payload(payload: bytes, rnd: random.Random, max_bytes: int) -> tuple[
     return bytes(data), operation
 
 
+def mutate_workload_payload(payload: bytes, rnd: random.Random, max_bytes: int) -> tuple[bytes, str, str]:
+    child, mutation, model = mutate_linknan_workload(payload, rnd, 1, max_input_bytes=max_bytes)
+    if payload.startswith(ELF_MAGIC) and not child.startswith(ELF_MAGIC):
+        return payload, "elf-preserve-container-fallback", "workload-preserving-replay"
+    return child, mutation, model
+
+
 def run_one(
     *,
     args: Any,
@@ -876,6 +888,7 @@ def run_one(
         timeout_sec=args.timeout_sec,
         cov=args.cov,
         simv_args=args.simv_args,
+        tohost_addr=int(getattr(args, "_surgefuzz_tohost_addr", 0) or 0),
         extra_env=extra_env,
     )
     info = scan_vcs_logs(run_log, assert_log, ctx.cycles)
@@ -996,6 +1009,8 @@ def append_row(
             "vcs_report_seen": info.vcs_report_seen,
             "sfuz_expansion_seen": info.sfuz_expansion_seen,
             "good_trap_seen": info.good_trap_seen,
+            "tohost_exit_seen": getattr(info, "tohost_exit_seen", False),
+            "tohost_exit_code": getattr(info, "tohost_exit_code", None) if getattr(info, "tohost_exit_code", None) is not None else "",
             "bug_triggered": info.bug_triggered,
             "bug_reasons": info.bug_reasons,
             "vcs_cpu_time_sec": info.vcs_cpu_time_sec,
@@ -1129,6 +1144,7 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
     _campaign_start = time.monotonic()
     exec_count = 0
     input_mode = getattr(args, "input_mode", "workload")
+    args._surgefuzz_tohost_addr = 0
 
     def checkpoint_results() -> None:
         write_table(
@@ -1364,6 +1380,7 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
             )
     else:
         workloads = collect_workloads(args, work_dir)
+        args._surgefuzz_tohost_addr = resolve_tohost_addr(getattr(args, "tohost_addr", "auto"), workloads)
         max_execs = args.max_execs if args.max_execs > 0 else len(workloads) + args.mutations
 
         for index, workload in enumerate(workloads):
@@ -1444,8 +1461,9 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
             if exec_count >= max_execs or not corpus:
                 break
             parent = select_seed(corpus, rnd, disable_power_scheduling=getattr(args, "disable_power_scheduling", False))
-            child_payload, mutation_kind = mutate_payload(parent.payload, rnd, args.max_input_bytes)
-            child_path = generated_dir / f"surgefuzz-round-{round_index:04d}-parent-{parent.seed_id:04d}.bin"
+            child_payload, mutation_kind, mutation_model = mutate_workload_payload(parent.payload, rnd, args.max_input_bytes)
+            suffix = ".elf" if child_payload.startswith(ELF_MAGIC) else ".bin"
+            child_path = generated_dir / f"surgefuzz-round-{round_index:04d}-parent-{parent.seed_id:04d}{suffix}"
             child_path.write_bytes(child_payload)
             active_target_index = None
             active_target = None
@@ -1497,6 +1515,7 @@ def run_surgefuzz(args: Any, ctx: VcsContext) -> int:
                 input_format="generated-linknan-workload-bin",
                 input_size_bytes=len(child_payload),
                 mutation_kind=mutation_kind,
+                mutation_backend=mutation_model,
                 result=result,
                 case_dir=case_dir,
                 run_log=run_log,

@@ -146,7 +146,14 @@ def surgefuzz_trace_summary_available(row: dict[str, str]) -> bool:
     return rows > 0
 
 
-def add_common_checks(audit: MethodAudit, rows: list[dict[str, str]], expected_rows: int, complete: bool) -> None:
+def add_common_checks(
+    audit: MethodAudit,
+    rows: list[dict[str, str]],
+    expected_rows: int,
+    complete: bool,
+    *,
+    require_paper_faithful: bool = True,
+) -> None:
     if complete and audit.rows != expected_rows:
         audit.issues.append(f"rows {audit.rows} != expected {expected_rows}")
     elif not complete and audit.rows == 0:
@@ -159,7 +166,7 @@ def add_common_checks(audit: MethodAudit, rows: list[dict[str, str]], expected_r
             audit.issues.append(f"rows with missing case_dir: {audit.missing_case_dir}")
         if audit.missing_command_log:
             audit.issues.append(f"rows with missing command_log_path: {audit.missing_command_log}")
-        if audit.paper_faithful_rows != audit.rows:
+        if require_paper_faithful and audit.paper_faithful_rows != audit.rows:
             audit.issues.append(f"paper_faithful rows {audit.paper_faithful_rows} != rows {audit.rows}")
         abi = counter(rows, "required_native_abi")
         if any(key for key in abi if key.strip()):
@@ -196,7 +203,8 @@ def audit_method(root: Path, method: str, expected_rows: int, complete: bool) ->
         if rows and key in rows[0]:
             audit.counters[key] = counter(rows, key)
 
-    add_common_checks(audit, rows, expected_rows, complete)
+    surge_workload_mode = method == "surgefuzz" and any(str(row.get("input_format", "")).startswith("linknan-workload") for row in rows)
+    add_common_checks(audit, rows, expected_rows, complete, require_paper_faithful=not surge_workload_mode)
     if complete and audit.rows and audit.mutation_ratio < 0.8:
         audit.issues.append(f"mutation ratio {audit.mutation_ratio:.3f} < 0.8")
 
@@ -242,6 +250,7 @@ def audit_method(root: Path, method: str, expected_rows: int, complete: bool) ->
             audit.issues.append("DirectFuzz has rows without target_instance")
 
     if method == "surgefuzz" and rows:
+        workload_mode = any(str(row.get("input_format", "")).startswith("linknan-workload") for row in rows)
         if any(row.get("trace_source") != "vcs-native-abi" for row in rows):
             audit.issues.append(f"SurgeFuzz trace_source mismatch: {dict(counter(rows, 'trace_source'))}")
         if any(row.get("coverage_backend") != "surgefuzz_vcs_native_abi_trace" for row in rows):
@@ -260,6 +269,8 @@ def audit_method(root: Path, method: str, expected_rows: int, complete: bool) ->
             audit.issues.append(f"SurgeFuzz has rows without recoverable trace summary: {len(unrecoverable)}")
         if missing_trace_summary and not unrecoverable:
             audit.counters["trace_summary_fallback"] = Counter({"csv_samples": len(missing_trace_summary)})
+        if workload_mode and audit.paper_faithful_rows:
+            audit.issues.append("SurgeFuzz workload-mode rows must not be marked artifact paper_faithful")
 
     return audit
 

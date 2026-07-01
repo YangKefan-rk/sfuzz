@@ -370,7 +370,11 @@ class FormalRunnerBudgetTests(unittest.TestCase):
             _assert_campaign_env(self, item)
         self.assertIn("--rfuzz-rounds 1000", " ".join(commands[1]["command"]))
         self.assertIn("--require-paper-native", " ".join(commands[2]["command"]))
-        self.assertIn("--require-paper-native", " ".join(commands[3]["command"]))
+        surge_command = " ".join(commands[3]["command"])
+        self.assertIn("--input-mode workload", surge_command)
+        self.assertIn("--seed-list", surge_command)
+        self.assertNotIn("--require-paper-native", surge_command)
+        self.assertIn("processor workload mode", commands[3]["formal_guard"])
 
     def test_t2_framework_smoke_allows_small_budget_without_formal_guards(self) -> None:
         import tempfile
@@ -517,7 +521,9 @@ class FormalRunnerBudgetTests(unittest.TestCase):
         self.assertIn("--formal-campaign-total-execs 1000", " ".join(commands[2]["command"]))
         self.assertIn("--max-execs 500", " ".join(commands[3]["command"]))
         self.assertIn("--mutations 500", " ".join(commands[3]["command"]))
-        self.assertIn("--formal-campaign-total-execs 1000", " ".join(commands[3]["command"]))
+        self.assertIn("--input-mode workload", " ".join(commands[3]["command"]))
+        self.assertIn("workload_seed_list.worker-000.txt", " ".join(commands[3]["command"]))
+        self.assertNotIn("--formal-campaign-total-execs 1000", " ".join(commands[3]["command"]))
 
     def test_t2_campaign_prebuilds_one_shared_simv_per_backend(self) -> None:
         import tempfile

@@ -689,37 +689,53 @@ def campaign_commands(
             worker_id=worker_id,
             seed_list=workload_seed_list,
         )
+        surge_input_mode = getattr(args, "surgefuzz_input_mode", "workload")
+        surge_formal_guard = (
+            "framework-smoke; single target; workload input; VCS native trace; no rotation"
+            if framework_smoke and surge_input_mode == "workload"
+            else "framework-smoke; single target; artifact Program mutation; no rotation"
+            if framework_smoke
+            else "single target; LinkNan processor workload mode; VCS native trace; no artifact paper-native claim"
+            if surge_input_mode == "workload"
+            else "--require-paper-native; single target; artifact Program mutation; no rotation"
+        )
+        surge_tail = [
+            "--input-mode",
+            surge_input_mode,
+            "--max-execs",
+            str(worker_budget),
+            "--mutations",
+            str(worker_budget),
+            "--rng-seed",
+            str(rng_seed),
+            "--target-manifest",
+            str(surge_manifest),
+            "--surge-target",
+            args.surge_target,
+            "--trace-source",
+            "vcs-native-abi",
+        ]
+        if surge_input_mode == "workload":
+            surge_tail.extend(["--seed-list", str(workload_seed_list)])
+        else:
+            surge_tail.extend(
+                [
+                    "--initial-seed-count",
+                    str(args.surge_initial_seed_count),
+                    "--artifact-execution-guard-blocks",
+                    str(getattr(args, "surge_artifact_execution_guard_blocks", 12288)),
+                ]
+            )
+            if not framework_smoke:
+                surge_tail.extend(["--formal-campaign-total-execs", str(args.exec_budget), "--require-paper-native"])
         add(
             "surgefuzz",
             "SurgeFuzz.trace",
-            (
-                "framework-smoke; single target; artifact Program mutation; no rotation"
-                if framework_smoke
-                else "--require-paper-native; single target; artifact Program mutation; no rotation"
-            ),
-            [
-                "--input-mode",
-                "artifact-program",
-                "--max-execs",
-                str(worker_budget),
-                "--mutations",
-                str(worker_budget),
-                "--initial-seed-count",
-                str(args.surge_initial_seed_count),
-                "--rng-seed",
-                str(rng_seed),
-                "--target-manifest",
-                str(surge_manifest),
-                "--surge-target",
-                args.surge_target,
-                "--trace-source",
-                "vcs-native-abi",
-                "--artifact-execution-guard-blocks",
-                str(getattr(args, "surge_artifact_execution_guard_blocks", 12288)),
-            ]
-            + ([] if framework_smoke else ["--formal-campaign-total-execs", str(args.exec_budget), "--require-paper-native"]),
+            surge_formal_guard,
+            surge_tail,
             env=surge_env,
             worker_id=worker_id,
+            seed_list=workload_seed_list if surge_input_mode == "workload" else None,
         )
     return commands
 
@@ -1218,6 +1234,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-min-wall-time-sec", type=int, default=60)
     parser.add_argument("--rng-seed", type=int, default=20260605)
     parser.add_argument("--sfuzz-scheduler", choices=["weighted-innovation", "semantic-bandit"], default="semantic-bandit")
+    parser.add_argument(
+        "--surgefuzz-input-mode",
+        choices=["workload", "artifact-program"],
+        default="workload",
+        help="SurgeFuzz input mode for four-fuzzer campaigns; workload uses the shared .bin/.elf corpus",
+    )
     parser.add_argument("--surge-initial-seed-count", type=int, default=1)
     parser.add_argument("--surge-artifact-execution-guard-blocks", type=int, default=12288)
     parser.add_argument(
