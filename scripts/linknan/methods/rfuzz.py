@@ -25,6 +25,7 @@ from ..vcs import (
     common_coverage_backend,
     design_bug,
     design_bug_reasons,
+    resolve_tohost_addr,
     run_vcs_seed,
     scan_vcs_logs,
     wall_timeout,
@@ -62,6 +63,8 @@ RFUZZ_FIELDS = [
     "vcs_report_seen",
     "sfuz_expansion_seen",
     "max_cycle_exceeded",
+    "tohost_exit_seen",
+    "tohost_exit_code",
     "bug_triggered",
     "bug_reasons",
     "invalid_input",
@@ -473,6 +476,9 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
 
     initial = collect_initial_workloads(args, ctx, work_dir)
     build_simv_if_needed(args, ctx, work_dir)
+    # Use the same HTIF completion monitor as DirectFuzz for LinkNan workload
+    # seeds. Raw mutations inherit the original riscv-test tohost address.
+    tohost_addr = resolve_tohost_addr(getattr(args, "tohost_addr", "auto"), [path for path, _data, _model in initial])
 
     rng = random.Random(args.rfuzz_random_seed)
     coverage = RfuzzCoverageState(args.rfuzz_toggle_total)
@@ -521,6 +527,7 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
             timeout_sec=args.timeout_sec,
             cov=args.cov,
             simv_args=args.simv_args,
+            tohost_addr=tohost_addr,
         )
         info = scan_vcs_logs(run_log, assert_log, ctx.cycles)
         invalid_reason = invalid_workload_reason(assert_log)
@@ -585,6 +592,8 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
         notes.extend(abi_audit.notes)
         if ctx.cycles is None:
             notes.append("cycle limit disabled by --no-cycle-limit; wall-clock bounded by --timeout-sec")
+        if tohost_addr > 0:
+            notes.append(f"tohost monitor enabled at 0x{tohost_addr:x}")
         if bitmap and not has_native_bitmap:
             coverage_backend = "rfuzz_mux_select_external_bitmap_diagnostic"
             notes.append("bitmap was supplied, but source is not vcs-native-abi")
@@ -631,6 +640,8 @@ def run_rfuzz(args: Any, ctx: VcsContext) -> int:
                 "vcs_report_seen": info.vcs_report_seen,
                 "sfuz_expansion_seen": info.sfuz_expansion_seen,
                 "max_cycle_exceeded": info.max_cycle_exceeded,
+                "tohost_exit_seen": info.tohost_exit_seen,
+                "tohost_exit_code": info.tohost_exit_code if info.tohost_exit_code is not None else "",
                 "bug_triggered": info.bug_triggered,
                 "bug_reasons": info.bug_reasons,
                 "invalid_input": invalid_input,
