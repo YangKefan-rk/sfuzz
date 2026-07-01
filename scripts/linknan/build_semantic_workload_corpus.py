@@ -116,6 +116,7 @@ def compile_assembly(
         "-march=rv64imac",
         "-mabi=lp64",
         f"-Wl,-Ttext={link_address:#x}",
+        "-Wl,-N",
         "-Wl,--no-relax",
         "-o",
         str(output_elf),

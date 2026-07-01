@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import random
+import shutil
+import struct
 import sys
 import tempfile
 import unittest
@@ -33,6 +35,7 @@ from linknan.known_good_gate import (  # noqa: E402
 )
 from linknan.build_semantic_workload_corpus import (  # noqa: E402
     build_common_rows,
+    compile_assembly,
     write_manifest as write_semantic_manifest,
 )
 from linknan.t2_four_fuzzer_campaign import (  # noqa: E402
@@ -732,6 +735,52 @@ class FormalRunnerBudgetTests(unittest.TestCase):
                 self.assertEqual(row["rfuzz_workload_path"], row["surgefuzz_workload_path"])
                 self.assertIn("scenario_family=", row["notes"])
                 self.assertIn("stress_iterations=", row["notes"])
+
+    def test_semantic_elf_first_load_segment_starts_at_pmem_base(self) -> None:
+        gcc = shutil.which("riscv64-unknown-elf-gcc") or "/nfs/share/opt/riscv/bin/riscv64-unknown-elf-gcc"
+        objcopy = shutil.which("riscv64-unknown-elf-objcopy") or "/nfs/share/opt/riscv/bin/riscv64-unknown-elf-objcopy"
+        if not Path(gcc).is_file() or not Path(objcopy).is_file():
+            self.skipTest("riscv64-unknown-elf toolchain is unavailable")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            asm = root / "seed.S"
+            elf = root / "seed.elf"
+            binary = root / "seed.bin"
+            asm.write_text(
+                "\n".join(
+                    [
+                        "    .option norvc",
+                        "    .section .text",
+                        "    .globl _start",
+                        "_start:",
+                        "    .word 0x00000013",
+                        "    .word 0x0005006b",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            compile_assembly(asm, output_elf=elf, output_bin=binary, gcc=gcc, objcopy=objcopy)
+            data = elf.read_bytes()
+            phoff = struct.unpack_from("<Q", data, 0x20)[0]
+            phentsize = struct.unpack_from("<H", data, 0x36)[0]
+            phnum = struct.unpack_from("<H", data, 0x38)[0]
+
+            load_segments = []
+            for index in range(phnum):
+                off = phoff + index * phentsize
+                p_type = struct.unpack_from("<I", data, off)[0]
+                if p_type != 1:
+                    continue
+                p_offset = struct.unpack_from("<Q", data, off + 0x08)[0]
+                p_paddr = struct.unpack_from("<Q", data, off + 0x18)[0]
+                load_segments.append((p_offset, p_paddr))
+
+            self.assertTrue(load_segments)
+            self.assertEqual(load_segments[0][1], 0x80000000)
+            self.assertEqual(data[load_segments[0][0] : load_segments[0][0] + 4], b"\x13\x00\x00\x00")
 
     def test_known_good_gate_maps_rfuzz_initial_rows_by_worker_seed_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
