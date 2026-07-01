@@ -1463,16 +1463,14 @@ def row_from_run(
         "core1_handoff_reason": run["info"].sfuzz_core1_handoff_reason,
         "requires_core1_handoff": entry.requires_core1_handoff,
         "formal_multicore_result": bool(
-            not entry.requires_core1_handoff
-            or (
-                entry.core1_handoff_enabled
-                and run["info"].sfuzz_core1_staged
-                and run["info"].sfuzz_core1_executed
-                and run["info"].good_trap_seen
-                and not run["result"].timed_out
-                and not run["info"].bug_triggered
-                and not run["infrastructure_error"]
-            )
+            entry.requires_core1_handoff
+            and entry.core1_handoff_enabled
+            and run["info"].sfuzz_core1_staged
+            and run["info"].sfuzz_core1_executed
+            and run["info"].good_trap_seen
+            and not run["result"].timed_out
+            and not run["info"].bug_triggered
+            and not run["infrastructure_error"]
         ),
         "good_trap_seen": run["info"].good_trap_seen,
         "bug_triggered": run["info"].bug_triggered,

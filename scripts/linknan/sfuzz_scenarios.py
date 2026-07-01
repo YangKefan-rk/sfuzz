@@ -182,7 +182,7 @@ class ScenarioIR:
 
     @property
     def formal_multicore_result(self) -> bool:
-        return not self.requires_core1_handoff or self.core1_handoff_enabled
+        return self.requires_core1_handoff and self.core1_handoff_enabled
 
     def core_payload(self, core: int) -> bytes:
         return b"".join(block.payload() for block in self.instruction_blocks if block.core == core)

@@ -20,6 +20,12 @@ class ElfLoadSegment:
     filesz: int
 
 
+ENTRY_GUARD_BYTES = 256
+EXIT_GUARD_BYTES = 1024
+RAW_MIN_MUTABLE_BYTES = 512
+MIN_GUARDED_MUTABLE_BYTES = 16
+
+
 def is_elf_bytes(data: bytes) -> bool:
     return data.startswith(ELF_MAGIC)
 
@@ -73,42 +79,61 @@ def elf_load_segments(data: bytes) -> list[ElfLoadSegment]:
     return segments
 
 
+def guarded_payload_window(size: int, *, raw_flat_image: bool) -> tuple[int, int] | None:
+    if size <= 0:
+        return None
+    if raw_flat_image and size < RAW_MIN_MUTABLE_BYTES:
+        return None
+    if size <= MIN_GUARDED_MUTABLE_BYTES:
+        return (0, size)
+
+    max_guard = max(0, (size - MIN_GUARDED_MUTABLE_BYTES) // 4)
+    head = min(ENTRY_GUARD_BYTES, max_guard)
+    tail = min(EXIT_GUARD_BYTES, max_guard)
+    if head + tail >= size:
+        return (0, size)
+    return (head, size - tail)
+
+
+def choose_index_in_window(rng: random.Random, base: int, size: int, *, width: int = 1) -> int | None:
+    window = guarded_payload_window(size, raw_flat_image=False)
+    if window is None:
+        return None
+    start, end = window
+    end = max(start, end - max(0, width - 1))
+    if end <= start:
+        return None
+    return base + rng.randrange(start, end)
+
+
 def mutate_raw_bytes(parent: bytes, rng: random.Random, budget: int, max_input_bytes: int = 0) -> tuple[bytes, str]:
     data = bytearray(parent or b"\x00")
+    window = guarded_payload_window(len(data), raw_flat_image=True)
+    if window is None:
+        return bytes(data), "raw-preserve-small-workload-replay"
+    start, end = window
     operations: list[str] = []
     for _ in range(max(1, budget)):
-        op = rng.randrange(6)
+        op = rng.randrange(4)
+        idx = rng.randrange(start, end)
         if op == 0:
-            idx = rng.randrange(len(data))
             bit = rng.randrange(8)
             data[idx] ^= 1 << bit
-            operations.append(f"bitflip[{idx}:{bit}]")
+            operations.append(f"guarded-bitflip[{idx}:{bit}]")
         elif op == 1:
-            idx = rng.randrange(len(data))
             data[idx] = rng.randrange(256)
-            operations.append(f"overwrite8[{idx}]")
-        elif op == 2 and len(data) > 1:
-            idx = rng.randrange(len(data))
-            del data[idx]
-            operations.append(f"delete8[{idx}]")
-        elif op == 3 and len(data) < 1 << 20:
-            idx = rng.randrange(len(data) + 1)
-            data[idx:idx] = bytes([rng.randrange(256)])
-            operations.append(f"insert8[{idx}]")
-        elif op == 4 and len(data) > 4:
-            start = rng.randrange(len(data))
-            end = min(len(data), start + rng.randrange(1, min(16, len(data) - start) + 1))
-            insert_at = rng.randrange(len(data) + 1)
-            data[insert_at:insert_at] = data[start:end]
-            operations.append(f"clone[{start}:{end}]->{insert_at}")
+            operations.append(f"guarded-overwrite8[{idx}]")
+        elif op == 2:
+            delta = rng.choice([-35, -16, -1, 1, 16, 35])
+            data[idx] = (data[idx] + delta) & 0xFF
+            operations.append(f"guarded-arith8{delta:+d}[{idx}]")
         else:
             width = min(4, len(data))
-            idx = rng.randrange(len(data) - width + 1)
-            delta = rng.choice([-35, -16, -1, 1, 16, 35])
+            idx = rng.randrange(start, max(start + 1, end - width + 1))
             value = int.from_bytes(data[idx : idx + width], "little")
-            value = (value + delta) % (1 << (8 * width))
+            value ^= 1 << rng.randrange(width * 8)
             data[idx : idx + width] = value.to_bytes(width, "little")
-            operations.append(f"arith{width * 8}{delta:+d}[{idx}]")
+            operations.append(f"guarded-wordbit[{idx}:{width}]")
     if not data:
         data.append(0)
     if max_input_bytes > 0 and len(data) > max_input_bytes:
@@ -125,25 +150,28 @@ def mutate_elf_load_bytes(parent: bytes, rng: random.Random, budget: int) -> tup
     operations: list[str] = []
     for _ in range(max(1, budget)):
         seg = rng.choice(segments)
-        idx = seg.offset + rng.randrange(seg.filesz)
+        idx = choose_index_in_window(rng, seg.offset, seg.filesz)
+        if idx is None:
+            operations.append("elf-load-preserve-small-segment-replay")
+            continue
         op = rng.randrange(4)
         if op == 0:
             bit = rng.randrange(8)
             data[idx] ^= 1 << bit
-            operations.append(f"elf-load-bitflip[{idx}:{bit}]")
+            operations.append(f"elf-load-guarded-bitflip[{idx}:{bit}]")
         elif op == 1:
             data[idx] = rng.randrange(256)
-            operations.append(f"elf-load-overwrite8[{idx}]")
+            operations.append(f"elf-load-guarded-overwrite8[{idx}]")
         elif op == 2:
             delta = rng.choice([-35, -16, -1, 1, 16, 35])
             data[idx] = (data[idx] + delta) & 0xFF
-            operations.append(f"elf-load-arith8{delta:+d}[{idx}]")
+            operations.append(f"elf-load-guarded-arith8{delta:+d}[{idx}]")
         else:
             width = min(4, seg.filesz - (idx - seg.offset))
             value = int.from_bytes(data[idx : idx + width], "little")
             value ^= 1 << rng.randrange(width * 8)
             data[idx : idx + width] = value.to_bytes(width, "little")
-            operations.append(f"elf-load-wordbit[{idx}:{width}]")
+            operations.append(f"elf-load-guarded-wordbit[{idx}:{width}]")
     return bytes(data), ";".join(operations)
 
 

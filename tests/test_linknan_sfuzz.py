@@ -705,6 +705,82 @@ class SfuzzCoverageTests(unittest.TestCase):
 
         self.assertFalse(row["formal_multicore_result"])
 
+    def test_formal_multicore_result_is_false_for_single_core_seed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seed = root / "single.sfuz"
+            write_sfuz_seed(
+                seed,
+                SfuzSeed(
+                    core0_prog=b"core0",
+                    core1_prog=b"",
+                    shared_mem_init=[],
+                    interrupt_plan_raw=[],
+                    name="single",
+                    description="",
+                    tags=[],
+                ),
+            )
+            entry = CorpusEntry(
+                corpus_id=1,
+                path=seed,
+                seed_name="single",
+                category="test",
+                energy=1,
+                requires_core1_handoff=False,
+                core1_handoff_enabled=True,
+            )
+            run = {
+                "coverage": CoverageResult(coverage_name="sfuzz_firrtl.sfuzz_native"),
+                "coverage_backend": "sfuzz_firrtl",
+                "comparison_tier": "T2_sfuzz_native_online",
+                "native_feedback": True,
+                "result": Namespace(wall_time_sec=300.0, returncode=0, timed_out=False, command_log_path="cmd.log"),
+                "info": Namespace(
+                    sfuzz_core0_staged=True,
+                    sfuzz_core1_staged=False,
+                    sfuzz_core1_entry="",
+                    sfuzz_core1_payload_size=None,
+                    sfuzz_core1_executed=False,
+                    sfuzz_core1_handoff_reason="",
+                    good_trap_seen=True,
+                    bug_triggered=False,
+                    bug_reasons=[],
+                    cycles=None,
+                    vcs_cpu_time_sec=None,
+                    vcs_sim_time_ps=None,
+                    max_cycle_exceeded=False,
+                    vcs_report_seen=True,
+                    sfuz_expansion_seen=True,
+                ),
+                "t0_smoke_pass": True,
+                "run_outcome": "good_trap",
+                "run_log": root / "run.log",
+                "assert_log": root / "assert.log",
+                "case_dir": root,
+                "case_name": "single",
+                "infrastructure_error": "",
+                "command_has_cycles_arg": False,
+                "command_has_max_cycles_plusarg": False,
+            }
+
+            row = row_from_run(
+                args=Namespace(),
+                ctx=Namespace(),
+                campaign_exec=1,
+                entry=entry,
+                run=run,
+                new_bits=0,
+                group_new_bits={},
+                group_accumulated_bits={},
+                accumulated=bytearray(),
+                retained=False,
+                retention_reason="not_interesting",
+                notes="",
+            )
+
+        self.assertFalse(row["formal_multicore_result"])
+
     def test_formal_multicore_result_requires_core1_payload_staged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

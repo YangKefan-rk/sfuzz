@@ -40,7 +40,12 @@ from linknan.t2_four_fuzzer_campaign import (  # noqa: E402
     write_seed_shards,
     write_seed_lists,
 )
-from linknan.workload_mutation import elf_load_segments, mutate_linknan_workload  # noqa: E402
+from linknan.workload_mutation import (  # noqa: E402
+    ENTRY_GUARD_BYTES,
+    EXIT_GUARD_BYTES,
+    elf_load_segments,
+    mutate_linknan_workload,
+)
 
 
 def _entry(corpus_id: int, *, energy: float, target: bool, progress: bool) -> CorpusEntry:
@@ -290,6 +295,25 @@ class WorkloadMutationTests(unittest.TestCase):
             self.assertEqual(elf_load_segments(child.read_bytes()), elf_load_segments(parent.read_bytes()))
             self.assertIn("elf-load", mutation)
             self.assertEqual(model, "elf-workload-load-segment")
+
+    def test_raw_workload_mutation_preserves_exit_tail(self) -> None:
+        parent = bytes((idx % 251 for idx in range(4096)))
+        child, mutation, model = mutate_linknan_workload(parent, random.Random(19), 64)
+
+        self.assertEqual(child[:ENTRY_GUARD_BYTES], parent[:ENTRY_GUARD_BYTES])
+        self.assertEqual(child[-EXIT_GUARD_BYTES:], parent[-EXIT_GUARD_BYTES:])
+        self.assertEqual(len(child), len(parent))
+        self.assertNotEqual(child, parent)
+        self.assertIn("guarded", mutation)
+        self.assertEqual(model, "binary-workload-raw-bytes")
+
+    def test_small_raw_workload_mutation_replays_to_preserve_exit(self) -> None:
+        parent = bytes.fromhex("73001000")
+        child, mutation, model = mutate_linknan_workload(parent, random.Random(23), 4)
+
+        self.assertEqual(child, parent)
+        self.assertEqual(mutation, "raw-preserve-small-workload-replay")
+        self.assertEqual(model, "binary-workload-raw-bytes")
 
 
 class FormalRunnerBudgetTests(unittest.TestCase):
